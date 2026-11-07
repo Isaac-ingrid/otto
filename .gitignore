@@ -11,3 +11,7 @@ apps/steward/eval/results/2*.json
 
 # Node host (apps/steward/node-host): the SQLite database lives here in local runs.
 apps/steward/data/
+
+# 阿里云部署参数（含密钥，仅本地）
+deploy/aliyun.env
+deploy/*.local
