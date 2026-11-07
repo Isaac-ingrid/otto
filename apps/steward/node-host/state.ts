@@ -18,6 +18,13 @@ export interface DurableObjectIdLike {
   equals(other: DurableObjectIdLike): boolean;
 }
 
+/** Which state accepted a socket — the runtime uses it to route frames to the right instance. */
+const socketOwners = new WeakMap<HostSocket, NodeDurableObjectState>();
+
+export function socketOwner(socket: HostSocket): NodeDurableObjectState | undefined {
+  return socketOwners.get(socket);
+}
+
 export class NodeDurableObjectId implements DurableObjectIdLike {
   readonly name: string;
 
@@ -54,6 +61,7 @@ export class NodeDurableObjectState {
   acceptWebSocket(ws: HostSocket, tags: string[] = []): void {
     ws.accept();
     this.#sockets.add(ws);
+    socketOwners.set(ws, this);
     this.#tags.set(ws, [...tags]);
     ws.addEventListener("close", () => {
       this.#sockets.delete(ws);

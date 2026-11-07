@@ -8,7 +8,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
-import { peerOf, type HostSocket } from "./websocket.ts";
+import { bindPair, peerOf, type HostSocket } from "./websocket.ts";
 import type { HostRuntime } from "./runtime.ts";
 
 export interface HostServerOptions {
@@ -122,7 +122,7 @@ export function startServer(options: HostServerOptions): Promise<Server> {
 }
 
 function attach(ws: WebSocket, serverEnd: HostSocket, runtime: HostRuntime<never>, clientEnd: HostSocket): void {
-  clientEnd.__attachTransport({
+  bindPair(clientEnd, serverEnd, {
     send(data) {
       ws.send(data);
     },

@@ -9,7 +9,7 @@
  *  3. an upgrade returns a 101 `Response` carrying one end of a `WebSocketPair`, and frames
  *     from the other end arrive as `webSocketMessage` calls.
  */
-import { peerOf, type HostSocket, type SocketData } from "./websocket.ts";
+import { bindPair, peerOf, type HostSocket, type SocketData } from "./websocket.ts";
 import type { NodeDurableObjectState } from "./state.ts";
 
 export interface DurableObjectHost {
@@ -22,24 +22,31 @@ export interface DurableObjectHost {
 
 const TICK_MS = 250;
 
+export interface RuntimeOptions {
+  /** How often the persisted alarm is polled. workerd wakes the object exactly on time. */
+  tickMs?: number;
+}
+
 export class HostRuntime<H extends DurableObjectHost> {
   readonly #state: NodeDurableObjectState;
   readonly #instance: H;
+  readonly #tickMs: number;
   #timer: NodeJS.Timeout | undefined;
   #ticking = false;
   #messages: Promise<void> = Promise.resolve();
   #closed = false;
 
-  constructor(state: NodeDurableObjectState, instance: H) {
+  constructor(state: NodeDurableObjectState, instance: H, options: RuntimeOptions = {}) {
     this.#state = state;
     this.#instance = instance;
+    this.#tickMs = options.tickMs ?? TICK_MS;
   }
 
   start(): void {
     if (this.#timer) return;
     this.#timer = setInterval(() => {
       void this.tick();
-    }, TICK_MS);
+    }, this.#tickMs);
     this.#timer.unref?.();
   }
 
@@ -98,10 +105,10 @@ export class HostRuntime<H extends DurableObjectHost> {
   }
 }
 
-/** Bind a real socket to the upgrade `Response`'s client end. */
+/** Bind a real socket to the upgrade `Response`'s client end, and hand back the server end. */
 export function connectTransport(clientEnd: HostSocket, transport: { send(data: string | Uint8Array): void; close(code?: number, reason?: string): void }): HostSocket {
   const serverEnd = peerOf(clientEnd);
   if (!serverEnd) throw new Error("Upgrade response carried a socket that is not part of a pair");
-  clientEnd.__attachTransport(transport);
+  bindPair(clientEnd, serverEnd, transport);
   return serverEnd;
 }

@@ -54,8 +54,10 @@ at bundle time. No `if (isNode)` branches, no duplicated business logic.
 - **Alarm precision.** workerd arms real alarms; here a 250 ms timer polls the persisted row.
   The steward already assumes early or late alarms (`alarm.test.ts` pins that behaviour), and
   `resendUnacked` re-checks the row it is about to send, so polling is safe.
-- **Not covered by the workerd test suite.** `pnpm test` still runs against workerd and stays
-  the semantic baseline. The Node host has its own smoke path (below).
+- **Same suite, second runtime.** `pnpm test` (workerd) stays the semantic baseline;
+  `pnpm test:node` runs the *same* 44 test files after swapping `cloudflare:test` and
+  `cloudflare:workers` for `node-host/testing/` (see "Tests" below). One assertion diverges —
+  an ordering that depends on workerd's async interleaving.
 
 ## Running it
 
@@ -99,6 +101,50 @@ curl -s -X POST -H "authorization: Bearer $SERVER_KEY" http://127.0.0.1:8787/api
 Step 2 writes `sh_run`/`sh_outbound`/`pi_entries` and returns `200` with a ULID; step 3 plus a
 `hello` frame yields a `welcome`. Both survive a restart of the process, which is the point of
 keeping everything in SQLite.
+
+## Tests
+
+`pnpm test:node` is the workerd suite pointed at the Node host: same files, same assertions.
+It is the regression net for the shims — a platform gap shows up as a failing steward test,
+not as a runtime surprise on the VPS.
+
+```bash
+cd apps/steward
+pnpm test:node                                   # all groups, Node host
+STEWARD_TEST_RUNTIME=node npx vitest run --config vitest.node.config.ts test/handshake.test.ts
+```
+
+How the swap works:
+
+| workerd | Node host |
+| --- | --- |
+| `cloudflare:test` (`env`, `SELF`, `runInDurableObject`, `runDurableObjectAlarm`, `createExecutionContext`, `waitOnExecutionContext`, `listDurableObjectIds`) | `node-host/testing/cloudflare-test.ts` — only the surface the suite imports |
+| `cloudflare:workers` | `node-host/cloudflare-workers.ts` |
+| `vitest.config.ts` (`cloudflareTest()` plugin, miniflare bindings) | `vitest.node.config.ts` — an `enforce: "pre"` resolver answers the three `cloudflare:` specifiers, and `server.deps.inline` transforms `agents`/`@earendil-works/*`, which import `cloudflare:workers` themselves |
+| per-file workerd instance | `node-host/testing/harness.ts`: one `node:sqlite` database **per DO id**, so suites that build "old" DOs via `idFromName()` still get empty storage |
+| miniflare bindings | `PROFILES.explicit` / `PROFILES.generated` in the harness, mirroring `vitest.config.ts` and `vitest.generated-auth.config.ts`; `STEWARD_TEST_RUNTIME=node` + the `fresh-deploy` group select `generated` |
+
+Two deliberate emulations, because RPC here is a microtask and not a network round trip:
+
+- **Fire-and-forget work gets the turns a hop would.** A stub call first yields a few event loop
+  turns (plus 1 ms of wall clock), so `void this.drainNotifications()` has run by the time the
+  caller's next assertion reads state. Without it, tests see a state the real host never
+  returns.
+- **A hop costs a millisecond.** Some observations are *durations* —
+  `sh_machine.reliability.onlineMs` — which an in-process connect/drop cycle would measure as 0.
+
+Alarm cadence in the harness is 10 ms (the deployed poll is 250 ms) so "the alarm has fired by
+now" does not race the assertion; nothing in `src/` changes.
+
+### Known divergence
+
+`test/dispatch.test.ts › dispatch carries the steward's mode choice` asserts
+`debugSnapshot().threads` in creation order. `threads.list()` orders by
+`lastActivityAt DESC, threadId`, so that order only holds while the *first* Thread's last
+activity is written *after* the second dispatch — workerd's interleaving happens to do that; the
+Node host writes both inside their own calls, so the newer Thread sorts first. The behaviour
+under test (each Task carries its own mode, `write` default) is identical; only the row order
+differs. 666 of 667 tests pass.
 
 ## Deploying on a VPS
 

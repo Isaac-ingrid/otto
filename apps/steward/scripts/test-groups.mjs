@@ -14,6 +14,8 @@
 //   process, same semantics as before this runner) — used for single-file debugging.
 // - STEWARD_TEST_GROUPS=n                           → force the group count (default: scales
 //   with CPUs; these tests wait on real-time alarms more than they burn CPU).
+// - STEWARD_TEST_RUNTIME=node                       → run the same suite against the Node host
+//   (vitest.node.config.ts + node-host/testing/) instead of workerd.
 import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -72,9 +74,16 @@ function pipe(tag, stream, out) {
   rl.on("line", (line) => out.write(`${tag} ${line}\n`));
 }
 
-function runVitest(args, tag) {
+const runtime = process.env.STEWARD_TEST_RUNTIME === "node" ? "node" : "workerd";
+// The Node host is not workerd: its suite answers `cloudflare:test` from node-host/testing/ and
+// gets bindings per profile from SIG_TEST_PROFILE (see node-host/testing/harness.ts).
+const configArgs = runtime === "node" ? ["--config", "vitest.node.config.ts"] : [];
+const generatedAuthConfig = runtime === "node" ? "vitest.node.config.ts" : "vitest.generated-auth.config.ts";
+
+function runVitest(args, tag, env = {}) {
   const started = Date.now();
-  const child = spawn(vitestBin, args, { cwd: root, env: { ...process.env, CI: "1" } });
+  const extra = args.includes("--config") ? [] : configArgs;
+  const child = spawn(vitestBin, [...args, ...extra], { cwd: root, env: { ...process.env, CI: "1", ...env } });
   if (tag) {
     pipe(tag, child.stdout, process.stdout);
     pipe(tag, child.stderr, process.stderr);
@@ -128,7 +137,7 @@ for (const file of [...files].sort((a, b) => (COST[b] ?? DEFAULT_COST) - (COST[a
 for (const g of groups) g.files.sort();
 
 console.log(
-  `running ${files.length} test files in ${groupCount} parallel vitest processes ` +
+  `running ${files.length} test files in ${groupCount} parallel vitest processes on ${runtime} ` +
     `(groups: ${groups.map((g) => `~${g.cost}s/${g.files.length}f`).join("  ")}; per-process workerd, serial within)`,
 );
 
