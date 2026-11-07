@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.wrangler/
+worker-configuration.d.ts
+.dev.vars
+*.log
+.DS_Store
+
+# Ad-hoc eval runs (timestamped); named baselines are committed.
+apps/steward/eval/results/2*.json
+
+# Node host (apps/steward/node-host): the SQLite database lives here in local runs.
+apps/steward/data/

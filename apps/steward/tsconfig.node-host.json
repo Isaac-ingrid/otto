@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "types": ["node", "@cloudflare/vitest-plugin/types"],
+    "paths": {
+      "cloudflare:workers": ["../../node_modules/.pnpm/*/node_modules/@cloudflare/workers-types/index.d.ts"]
+    }
+  },
+  "include": ["node-host", "src", "worker-configuration.d.ts"]
+}
