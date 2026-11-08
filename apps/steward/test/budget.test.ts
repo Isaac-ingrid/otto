@@ -362,6 +362,52 @@ describe("over budget: wakes skipped, templates still send (steward.md §12)", (
     expect((await llmState()).runs.filter((r) => r.kind === "event")).toHaveLength(0);
     fake.close();
   }, 30_000);
+
+  it("an unreported settle has no window — over budget the cap forwards its last words anyway", async () => {
+    // The one event class whose ONLY notice is the model: an unreported run opens a question
+    // with no fallback deadline on purpose (§5.3 — a push would assert a failure the last
+    // utterance may contradict) and pushes nothing. Skipping its wake therefore used to
+    // leave the owner with silence until the cap reset. The cap now expires the window
+    // itself: same verbatim forward, same renderer, still no LLM.
+    const { fake, workerId } = await dispatchOne();
+    await ownerStub().setBudgetForTest(0.5);
+    await ownerStub().spendForTest(0.5);
+    await fake.emit("settled", workerId, { type: "settled", outcome: "unreported", lastText: "改完了，就这些" });
+    const snap = await waitFor(
+      () => ownerStub().debugSnapshot(),
+      (s) => s.wakes.some((w) => w.dedupeKey?.startsWith("settled:") && w.status === "skipped"),
+    );
+    await waitWhileOutboundPending();
+
+    // The worker's last words reached the owner, as a card, with no model call.
+    expect(JSON.stringify(await sentCards())).toContain("改完了，就这些");
+    expect((await llmState()).runs.filter((r) => r.kind === "event")).toHaveLength(0);
+    expect((await ownerStub().channelLogEntries(20)).some((l) => l.reason === "budget_forward_question")).toBe(true);
+    // The question is handled, so the 90-second sweep can never forward it a second time.
+    expect(snap.questions.find((q) => q.workerId === workerId)).toMatchObject({ kind: "unreported", status: "open" });
+    await ownerStub().sweepQuestionFallbackForTest();
+    await waitWhileOutboundPending();
+    expect(JSON.stringify(await sentCards()).split("改完了，就这些")).toHaveLength(2); // exactly one card carries it
+    fake.close();
+  }, 30_000);
+
+  it("a failure that already pushed is NOT forwarded again by the cap", async () => {
+    // failure_push reached the user deterministically; the question has no deadline and the
+    // skipped wake must not turn one push into two cards.
+    const { fake, workerId } = await dispatchOne();
+    await ownerStub().setBudgetForTest(0.5);
+    await ownerStub().spendForTest(0.5);
+    await fake.emit("settled", workerId, { type: "settled", outcome: "error", errorClass: "auth", lastText: "401 invalid key" });
+    await waitFor(
+      () => ownerStub().debugSnapshot(),
+      (s) => s.wakes.some((w) => w.dedupeKey?.startsWith("settled:") && w.status === "skipped"),
+    );
+    await waitWhileOutboundPending();
+    const cards = JSON.stringify(await sentCards());
+    expect(cards).toContain("401 invalid key"); // the failure push
+    expect((await ownerStub().channelLogEntries(20)).some((l) => l.reason === "budget_forward_question")).toBe(false);
+    fake.close();
+  }, 30_000);
 });
 
 describe("owner messages over budget: processed, state noted once", () => {

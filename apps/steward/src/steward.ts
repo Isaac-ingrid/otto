@@ -91,7 +91,7 @@ import {
   type FauxRequestRecord,
   type StewardModels,
 } from "./llm/models.ts";
-import { createLedger, QUIET_MERGE_MS, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type WakeRow } from "./ledger.ts";
+import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type WakeRow } from "./ledger.ts";
 import { DeploymentAuth, deploymentSecrets, ownerAuthorized } from "./deployment-auth.ts";
 import { loginPage } from "./login-page.ts";
 import { renderChangeReports } from "./notes.ts";
@@ -124,7 +124,7 @@ import {
 } from "./report-template.ts";
 import { MIGRATIONS, runMigrations } from "./schema.ts";
 import { openSecret, sealSecret } from "./secretbox.ts";
-import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText } from "./wake-text.ts";
+import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText, wakeOwnerNotified } from "./wake-text.ts";
 import { WorkspaceError, cardOpen, cardView, type WorkspaceActionInput, type WorkspaceInput } from "./workspace.ts";
 import type { MachineDirectoryBrowseInput, MachineDirectoryInput, MachineDirectoryResult } from "./workspace-api.ts";
 import { WorkspaceStream } from "./workspace-stream.ts";
@@ -392,8 +392,10 @@ export class Steward extends Agent<Env> {
     // must not depend on the enqueue-time pass having survived — re-arm from storage.
     void this.deliverOutbound();
     // A DO restart clears the in-memory arm-dedupe while storage alarms keep their own
-    // clock: re-arm maintenance so a restart never strands active workers unwatched.
-    this.armWorkerSweeps();
+    // clock: re-arm maintenance so a restart never strands active workers unwatched. One
+    // chain, ever — resetWorkerSweepChain drops the rows the last isolate left behind first,
+    // then arms (the block also keeps the SDK's startup warning at bay by arming late).
+    this.resetWorkerSweepChain();
     // Crash-window machine-status intents (created, never drained) get their due-date wake.
     this.rearmNoticeDrain();
     // Wakes queued by past reducers (crash between queue and submit, §11) drain now.
@@ -2732,6 +2734,8 @@ export class Steward extends Agent<Env> {
   protected workerSweepIntervalS = WORKER_SWEEP_INTERVAL_S;
   /** In-memory dedupe of pending schedule() rows (the SDK fires every row; see armWorkerSweeps). */
   private lastSweepArmAt = 0;
+  /** Set while onStart drops the predecessor isolate's sweep rows; arming waits it out. */
+  private sweepChainReset: Promise<void> | undefined;
 
   /** Arms the maintenance alarm while any worker is in an active state. Called from every
    * point that can change that (event reduction, hello reconciliation, dispatch enqueue);
@@ -2740,6 +2744,9 @@ export class Steward extends Agent<Env> {
    * the sweep's measured-offline reap, so an arming count that skips it would let the chain
    * die and wedge exactly the shape the sweep exists to close. */
   private armWorkerSweeps(): void {
+    // While the startup reset runs nothing may arm: its cancels would delete the row this
+    // call had just created, and the chain would be gone until some later event re-armed it.
+    if (this.sweepChainReset !== undefined) return;
     const active = this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM sh_worker WHERE state IN ('queued', 'starting', 'running', 'recovering')
     `[0]!.n;
@@ -2753,7 +2760,36 @@ export class Steward extends Agent<Env> {
     // whenever the interval was shrunk below 10 s).
     if (Date.now() - this.lastSweepArmAt < Math.max(0, (this.workerSweepIntervalS - 1) * 1000)) return;
     this.lastSweepArmAt = Date.now();
+    // No idempotent insert here, deliberately: the match ignores the delay, so it would dedup
+    // onto an already-pending row armed with a LONGER interval and the chain could never pull
+    // its next fire in (the arm window above exists for the same reason). One chain, ever, is
+    // onStart's job instead — resetWorkerSweepChain drops the predecessor isolate's rows.
     void this.schedule(this.workerSweepIntervalS, "sweepWorkers");
+  }
+
+  /**
+   * Drops the sweep rows a previous isolate left behind, then arms ONE chain. The SDK's
+   * idempotent insert cannot do this job (it matches on callback+payload and ignores the
+   * delay, so a stale row armed with a longer interval would pin the chain to that slower
+   * cadence) and cancelling blindly would eat the row an interleaved arm just created — hence
+   * the in-flight flag that parks armWorkerSweeps() until the reset lands.
+   */
+  private resetWorkerSweepChain(): void {
+    const reset = (async () => {
+      const rows = await this.listSchedules().catch(() => []);
+      for (const row of rows) {
+        if (row.callback !== "sweepWorkers") continue;
+        await this.cancelSchedule(row.id).catch(() => undefined);
+      }
+      this.lastSweepArmAt = 0;
+    })();
+    this.sweepChainReset = reset;
+    void reset
+      .catch(() => undefined)
+      .then(() => {
+        this.sweepChainReset = undefined;
+        this.armWorkerSweeps();
+      });
   }
 
   /**
@@ -3707,6 +3743,16 @@ export class Steward extends Agent<Env> {
       `${wake.operationId} kind=${wake.kind} spent=${formatUsd(budget.costUsd)} cap=${formatUsd(budget.budgetUsd)}`,
     );
     const reason = `skipped:超出每日预算（${formatUsd(budget.costUsd)} / ${formatUsd(budget.budgetUsd)}，${budget.day} 00:00 UTC 重置）`;
+    // The owner's only notice must not leave with the wake. An event wake whose deterministic
+    // card never went out ("已发送给用户的通知：否" — an unreported settle, an unhandled worker
+    // question) has nothing else on the path: skipping it would leave the run's last words
+    // unread until the cap resets. Expire its §5.3 window NOW instead, which queues the same
+    // verbatim forward the 90-second timeout would have — still no model on that path.
+    const questionId = wakeQuestionId(wake.dedupeKey);
+    if (questionId !== null && !wakeOwnerNotified(wake.text) && this.ledger.questions.forwardNow(questionId)) {
+      this.logChannel("budget_forward_question", `${questionId} ${wake.operationId}`);
+      void this.drainNotifications();
+    }
     // A fire's row owns an outcome either way (§8.6): list_schedules shows the skip instead
     // of a stale "已交给总管执行", and the timeline says the fire never reached the model.
     const routine = /^routine:(r_.+):\d+$/.exec(wake.operationId);

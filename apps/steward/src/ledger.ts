@@ -62,6 +62,18 @@ export type ThreadState = "running" | "waiting_you" | "idle";
 /** Worker states that keep a Thread `running` (steward.md §5.2); lost/broken do not count. */
 export const ACTIVE_WORKER_STATES = ["queued", "starting", "running", "recovering"] as const;
 
+/**
+ * The question a wake row is about, when its dedupeKey names one. Report and failure-class
+ * settles open `q_<workerId>_<seq>` (their dedupeKey is `report:`/`settled:` + the same pair);
+ * a worker's own question names the qid outright. Everything else (routines, external
+ * activity, queue returns) has no question, and returns null.
+ */
+export function wakeQuestionId(dedupeKey: string): string | null {
+  const fire = /^(?:report|settled):(.+):(\d+)$/.exec(dedupeKey);
+  if (fire) return `q_${fire[1]}_${fire[2]}`;
+  return dedupeKey.startsWith("question:") ? dedupeKey.slice("question:".length) : null;
+}
+
 export interface ThreadRow {
   threadId: string;
   title: string;
@@ -1407,6 +1419,20 @@ export function createLedger(deps: LedgerDeps) {
       const q = questions.get(qid);
       if (!q) return;
       sql`UPDATE sh_question SET fallbackDueAt = ${q.askedAt + ms} WHERE qid = ${qid} AND status = 'open'`;
+    },
+    /**
+     * Issue #28: the daily cap skipped the wake that would have handled this question inside
+     * its window. Expire the window NOW and queue the very same §5.3 forward the 90-second
+     * timeout would have queued — one deterministic `attention_report`, rendered from the
+     * question text verbatim, no model. Used only when the owner has had no card at all for
+     * this event (a failure push already reached them, so those are left alone).
+     */
+    forwardNow(qid: string): boolean {
+      const q = questions.get(qid);
+      if (!q || q.status !== "open" || q.handledAt !== null || q.threadId === null) return false;
+      notifications.queue(`question:${qid}`, "attention_report", q.threadId, q.workerId, qid);
+      questions.markHandled(qid);
+      return true;
     },
     /** The ask_user button mapping (issue #7): plain options + routing candidates. */
     payload(qid: string): AskCandidates | null {

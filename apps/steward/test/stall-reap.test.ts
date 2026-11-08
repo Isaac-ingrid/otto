@@ -87,6 +87,16 @@ async function setMachineOffline(minutesAgo: number): Promise<void> {
   });
 }
 
+/** The sweep rows currently queued in the isolate (the alarm chain's durable footprint). */
+async function sweepRows(): Promise<Array<{ id: string; time: number }>> {
+  return runInDurableObject(ownerStub(), async (instance: Steward) => {
+    const rows = await instance.listSchedules();
+    return rows
+      .filter((row) => (row as unknown as { callback?: string }).callback === "sweepWorkers")
+      .map((row) => ({ id: row.id, time: (row as unknown as { time?: number }).time ?? 0 }));
+  });
+}
+
 /** Restores the production sweep knobs and drops fast-cadence sweepWorkers rows — the
  * isolate (and its fields) outlives each test that shrinks them. */
 async function restoreSweepMaintenance(): Promise<void> {
@@ -217,6 +227,38 @@ describe("the §8.4 stall alarm (online machine, lastEventAt + 20 min)", () => {
       const row = await workerRow(workerId);
       expect(row!.thread.timeline.some((e) => e.kind === "stall")).toBe(true);
       expect((await sentCards()).length).toBe(1);
+    } finally {
+      fake.close();
+      await restoreSweepMaintenance();
+    }
+  }, 30_000);
+
+  it("a DO restart drops the predecessor's sweep row instead of starting a second chain", async () => {
+    // Every isolate re-arms maintenance, but the row the last one left behind outlives it:
+    // arming on top of it left one more chain per restart, each re-arming itself forever
+    // (the SDK warns about exactly this at startup). onStart resets first, then arms once.
+    const { fake } = await dispatchRunningWorker("重启后的清扫链");
+    try {
+      await runInDurableObject(ownerStub(), async (instance: Steward) => {
+        // Two rows as a restarted isolate would find them (the boot arm plus a leftover).
+        await instance.schedule(600, "sweepWorkers");
+        await instance.schedule(900, "sweepWorkers");
+      });
+      const before = await sweepRows();
+      expect(before.length).toBeGreaterThanOrEqual(2);
+
+      await runInDurableObject(ownerStub(), async (instance: Steward) => {
+        await (instance as unknown as { resetWorkerSweepChain(): void }).resetWorkerSweepChain();
+        // The reset is async by necessity (listSchedules); let it land before counting.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+
+      // Exactly one chain — and it is armed for the production interval, not for a stale
+      // row's delay (an idempotent insert would have kept the older, slower due time).
+      const after = await sweepRows();
+      expect(after.length).toBe(1);
+      const due = after[0]!.time * 1000;
+      expect(due - Date.now()).toBeLessThan(65_000);
     } finally {
       fake.close();
       await restoreSweepMaintenance();

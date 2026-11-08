@@ -27,7 +27,13 @@ to be cosmetic, not a bug.
 
 Real behaviour observed on the VPS that is not what a reader would assume:
 
-1. **Over budget swallows the result of dispatched work.** The cap is a cap on *wakes*, not on
+1. ~~**Over budget swallows the result of dispatched work.**~~ **Fixed 2026-11-09** — a skipped
+   wake whose deterministic half sent nothing (an `unreported` settle's open question, which has
+   no deadline on purpose, §5.3) now forwards that question verbatim, through the same path the
+   90-second timeout uses (`questions.forwardNow`), instead of letting the cap keep the owner's
+   only notice. Failures that already pushed their evidence are still skipped as designed. See
+   `docs/design/steward.md` §8 and `test/budget.test.ts`. The original observation follows.
+   The cap is a cap on *wakes*, not on
    messages: `skipWake` (`apps/steward/src/steward.ts`) marks the worker's completion wake
    `skipped` and only counts it. Verified: with `DAILY_BUDGET_USD=0.05` and $0.10 spent, a
    read-only task was dispatched (`worker_event settled`, report produced), the wake row went
@@ -35,12 +41,15 @@ Real behaviour observed on the VPS that is not what a reader would assume:
    the owner never sees the answer. `renderOverBudgetNote` claims "完成汇报、失败提醒、汇总卡片照常",
    which is true for deterministic cards but not for a worker that only reports. Either relay the
    report straight through the cap, or say so in the note.
-2. **`sweepWorkers` is armed without `{ idempotent: true }`.** Every service start logs the SDK
-   warning (`Scheduling "sweepWorkers" during startup … can cause duplicate executions`); the
-   in-memory `lastSweepArmAt` guard in `armWorkerSweeps` cannot survive a process restart, so each
-   restart may add another row. Harmless so far (the sweep is a no-op pass), but `drainWakes`
-   already solves the same problem by cancelling tracked ids — the sweep should adopt one of the
-   two patterns.
+2. ~~**`sweepWorkers` is armed without `{ idempotent: true }`.**~~ **Fixed 2026-11-09**, but not
+   with `idempotent: true`: the SDK's dedupe matches on callback + payload and *ignores the
+   delay*, so a leftover row armed with a longer interval would pin the chain to that slower
+   cadence (and re-arming from inside the callback's own fire dedupes onto itself and kills the
+   chain — `test/stall-reap.test.ts` catches both). Instead `onStart` → `resetWorkerSweepChain`
+   cancels the predecessor isolate's `sweepWorkers` rows first, then arms exactly one chain; while
+   that reset is in flight, `armWorkerSweeps` returns early so an interleaved cancel cannot eat
+   the row it just created. The startup warning is gone (nothing is scheduled during the
+   `starting` lifecycle), and no restart adds a second chain.
 3. **One outbound row took 61 s longer than its neighbour.** Row 8 was created 00:19:17 and sent
    00:20:18 (`attempts = 1`) while row 9, created 18 s later, went out immediately. Not explained
    yet; nothing an owner would notice on a chat channel, but the claim/`nextAttemptAt` path is

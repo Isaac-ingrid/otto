@@ -23,6 +23,23 @@ export function isMarkedInput(text: string): boolean {
   return text.startsWith(MARK_OPEN);
 }
 
+/** The line every event wake carries about the deterministic card (see eventWakeText). */
+const OWNER_NOTIFIED_LINE = "已发送给用户的通知：";
+
+/**
+ * Whether the core has already told the owner about this wake, read back from the text it
+ * wrote. The budget gate (issue #28) needs it: a wake it skips must not take the owner's ONLY
+ * notice with it. Every "否" counts, not just the first — merged wakes concatenate whole
+ * blocks, so one un-notified event makes the row un-notified. Wakes that never mention the
+ * line (routine fires, external activity) already have their deterministic half, or never
+ * needed one.
+ */
+export function wakeOwnerNotified(text: string): boolean {
+  return !text
+    .split("\n")
+    .some((line) => line.startsWith(OWNER_NOTIFIED_LINE) && line.slice(OWNER_NOTIFIED_LINE.length).startsWith("否"));
+}
+
 export interface EventWakeInput {
   thread: ThreadRow | null;
   worker: WorkerRow;
