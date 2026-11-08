@@ -91,6 +91,32 @@ login links. Verified: a pairing call through the vhost returned
 `npx … connect http://sig.test.invalid CODE`, i.e. the forwarded host, not `127.0.0.1:8787`.
 The service itself stays on loopback; only nginx is exposed.
 
+## Ops hardening: `deploy/harden.sh`
+
+One idempotent script, run once on the box (it restarts `sig` and journald):
+
+```bash
+./deploy/remote.sh --copy deploy/harden.sh /tmp/
+./deploy/remote.sh 'bash /tmp/harden.sh'
+```
+
+| Piece | Value | Why |
+| --- | --- | --- |
+| `sig.service.d/limits.conf` | `StartLimitBurst=10`, `StartLimitIntervalSec=300`, `RestartSec=3` | systemd's defaults (5 starts / 10 s) turn one transient failure into a service that stays down |
+| same | `MemoryHigh=800M`, `MemoryMax=1200M` | box has 1.7 GB; a Node heap blow kills the steward only, never nginx/sshd, and `Restart=always` brings it back — workers live on the laptop, so a restart is survivable (verified) |
+| `journald.conf.d/sig.conf` | `SystemMaxUse=200M`, `RuntimeMaxUse=64M` | the steward is chatty during runs; journal was 16 MB and unbounded |
+| `sig-backup.timer` | daily 03:20 UTC (±5 min), `Persistent=true` | `sqlite3 .backup` is an online copy: consistent with a live WAL writer, no long lock |
+| `sig-backup.service` | `/var/lib/sig/backups/steward-<utc>.sqlite`, keep 14 | bad upgrade / accidental delete recovery |
+
+Verified after the first run: service `active`, limits in `systemctl show`, a real backup
+written and `PRAGMA integrity_check` = `ok` (3 threads, 14 outbound rows inside). Off-box copy
+still needs an rclone remote: set `RCLONE_REMOTE` and append a `rclone copy` step to the unit —
+until then the backup protects against mistakes, not against losing the disk.
+
+`unattended-upgrades` was already installed and enabled (security pockets only, the distro
+default), so the script only reports its state. A disk-usage alarm has to be created in the
+Aliyun console (cloud monitor, threshold 80 %) — nothing on the box can raise it.
+
 ## Secret hygiene
 
 `SERVER_KEY` is the root of every session, device token and sealed secret. If it was ever

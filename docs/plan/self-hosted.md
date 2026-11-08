@@ -97,17 +97,27 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## P2 · Ops hardening (no domain needed)
 
-- **Backup**: `SIG_DB_PATH` is one SQLite file. `sqlite3 .backup` to `/var/lib/sig/backups/` on a
-  systemd timer, then `rclone copy` to the remote named in `RCLONE_REMOTE`. Untested so far.
-- **Logs**: everything goes to journald. Set `SystemMaxUse=` or a `sig` drop-in; at 2 vCPU the
-  steward is chatty during runs.
-- **Restart safety**: `Restart=always` is set; add `StartLimitBurst`/`StartLimitIntervalSec` so a
-  crash loop does not spin forever.
-- **Unattended upgrades** for security patches only, and confirm the box survives a kernel reboot
-  with `sig` and `nginx` both coming back.
-- **Disk watch**: 32 GB free now; SQLite + WAL grew to 2 MB after one conversation. Set a
-  threshold alarm (阿里云 cloud monitor) at 80 %.
-- **Rotate `SERVER_KEY`** and reset the DB if the current key was ever exposed (see NOTES.md).
+Done by `deploy/harden.sh` (idempotent, re-runnable; details in NOTES.md):
+
+- **Backup** ✅ `sqlite3 .backup` runs daily on a systemd timer into `/var/lib/sig/backups/`,
+  keeping 14. Verified: file written, `PRAGMA integrity_check` = `ok`, live rows inside.
+  Off-box copy is *not* done — needs `RCLONE_REMOTE`; until then this recovers from mistakes,
+  not from losing the disk.
+- **Logs** ✅ journald capped at 200 MB (+64 MB runtime) via a `sig` drop-in.
+- **Restart safety** ✅ `RestartSec=3`, `StartLimitBurst=10` over 300 s, and a memory ceiling
+  (`MemoryHigh=800M`/`MemoryMax=1200M`) so a Node heap blow takes only the steward.
+- **Unattended upgrades** ✅ already installed and enabled (security pockets only, distro
+  default); the script reports it rather than changing it.
+- **Disk watch** — open: the alarm has to be created in the Aliyun console (80 % threshold).
+  Nothing on the box can raise it. 32 GB free, DB 1.1 MB after several conversations.
+- **Kernel reboot** ✅ rebooted the box: back in 53 s, `sig`/`nginx`/`ssh`/backup timer all
+  `active`, `http 200`, DB intact (3 threads), and an owner message after boot answered from
+  the gateway — so `SERVER_KEY` unsealing still works on a cold start. Note the SSH tunnel dies
+  with the box; `ssh -f -N -L 18787:127.0.0.1:8787 …` has to be re-run after any reboot.
+- **Rotate `SERVER_KEY`** — open, and it is the one remaining item with real exposure: the
+  current value was echoed into a chat transcript. Rotation is *not* just an env edit —
+  `sh_model` is sealed under it, so either reset the DB (`NOTES.md` → Secret hygiene) or set
+  `SERVER_KEY_PREVIOUS` to the old value to keep the sealed secrets and device tokens open.
 
 ## P3 · Public entry point (blocked on 备案)
 
