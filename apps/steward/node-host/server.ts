@@ -8,6 +8,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
+import { clientIp } from "./client-ip.ts";
 import { bindPair, peerOf, type HostSocket } from "./websocket.ts";
 import type { HostRuntime } from "./runtime.ts";
 
@@ -43,6 +44,12 @@ async function readBody(request: IncomingMessage): Promise<Buffer | undefined> {
 async function toRequest(request: IncomingMessage): Promise<Request> {
   const method = request.method ?? "GET";
   const headers = toHeaders(request);
+  // `index.ts` buckets the auth throttles on this header. workerd fills it in; here it has to be
+  // derived or every client shares one `unknown` bucket (see client-ip.ts).
+  headers.set(
+    "cf-connecting-ip",
+    clientIp({ remoteAddress: request.socket.remoteAddress, forwardedFor: request.headers["x-forwarded-for"], existing: request.headers["cf-connecting-ip"] }),
+  );
   const body = method === "GET" || method === "HEAD" ? undefined : await readBody(request);
   return new Request(`${baseUrl(request)}${request.url ?? "/"}`, {
     method,

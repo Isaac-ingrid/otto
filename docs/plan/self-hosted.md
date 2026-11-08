@@ -17,7 +17,7 @@ needs no domain, no certificate and no 备案. Only "P3" does.
 | Budget guard | set `DAILY_BUDGET_USD` low, send messages until it trips | the cap gates *wakes*, not messages; ledger records the spend ✅ |
 | Restart durability | `systemctl restart sig` mid-run | pending run resumes or is reported failed; no lost conversation ✅ |
 | Model switching | switch model/thinking level in the composer | `model_changed` frame, next turn uses the new selection ✅ |
-| Login | password login + `/api/login-link` link | session cookie issued; link works once, then expires |
+| Login | password login + `/api/login-link` link | session cookie issued; link works once, then expires ✅ |
 
 Known divergence to watch: the Node host differs from workerd on one dispatch ordering test
 (`docs/design/node-host.md`), so a dispatch that looks "out of order" in a card list is expected
@@ -59,8 +59,26 @@ Real behaviour observed on the VPS that is not what a reader would assume:
    shared that window. The original observation follows. Row 8 was created 00:19:17 and sent
    00:20:18 (`attempts = 1`) while row 9, created 18 s later, went out immediately.
 
+4. ~~**Every client's auth attempts shared one throttle bucket.**~~ **Fixed 2026-11-09** — on
+   workerd the edge limiter keys on `CF-Connecting-IP`, which the platform fills in. nginx sets
+   only `X-Forwarded-For`, so the Node host saw no address and every request bucketed as
+   `unknown`: one stranger could spend the owner's five password attempts per minute. Fixed by
+   synthesising the header in `node-host/server.ts` (`node-host/client-ip.ts`, unit-tested):
+   an existing `CF-Connecting-IP` wins (so the workerd suite's fixed test IPs keep working when
+   the same tests run on this host), `X-Forwarded-For` is only believed from a loopback peer —
+   i.e. the nginx on this box — and otherwise the socket address is used. Verified on the VPS:
+   five attempts from `203.0.113.5` then `429`, while `198.51.100.9` and the tunnel got their own
+   `401`s and only the global 20/min bucket counted all of them.
+
 ## Log
 
+- **2026-11-09** — **Login flows verified** and one real bug fixed. Wrong password → `401
+  invalid_password`, right password → `200` with `sig_session` (HttpOnly, SameSite=Lax, 7 days),
+  `/app` with that cookie → `200`, a login link works once (`303`) and then answers `410`.
+  Also learned: `/auth/*` requires `Origin` to equal the serving origin (`403` otherwise) and
+  sits behind two throttle layers — a per-scope edge limiter in `src/index.ts` and a per-purpose
+  bucket table in the DO (`password`: 5/IP and 20 global per minute). The second layer was the
+  only one doing anything on this box: see Finding 4.
 - **2026-11-09** — **Workspace live stream verified** (the frame protocol, not SSE: the owner
   socket carries `stream` frames). A browser-equivalent client (`ws` + the `sig_session` cookie,
   `?role=web&view=workspace`) saw `workspace_changed` 5.2 s after an owner message, three
