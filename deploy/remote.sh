@@ -38,10 +38,18 @@ target="$SIG_SSH_USER@$SIG_SSH_HOST"
 ssh_args=(-i "$key_file" -p "$SIG_SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 
 if [ "${1:-}" = "--copy" ]; then
+  # macOS ships openrsync, which cannot create remote paths ("mkpath: Permission denied").
+  # A tar pipe does the same job with only tar/ssh, both stable everywhere.
   shift
-  command -v rsync >/dev/null || { echo "rsync not installed locally" >&2; exit 1; }
-  rsync -az --info=progress2 -e "ssh ${ssh_args[*]}" "$@"
-  exit
+  [ "$#" -eq 2 ] || { echo "usage: remote.sh --copy <local-path> <remote-dir>" >&2; exit 1; }
+  src="$1"; dest="$2"
+  ssh "${ssh_args[@]}" "$target" "mkdir -p '$dest'"
+  if [ -d "$src" ]; then
+    tar -C "$src" -cf - . | ssh "${ssh_args[@]}" "$target" "tar -C '$dest' -xf -"
+  else
+    tar -C "$(dirname "$src")" -cf - "$(basename "$src")" | ssh "${ssh_args[@]}" "$target" "tar -C '$dest' -xf -"
+  fi
+  exit 0
 fi
 
 exec ssh "${ssh_args[@]}" "$target" "$@"
