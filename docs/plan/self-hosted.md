@@ -50,10 +50,14 @@ Real behaviour observed on the VPS that is not what a reader would assume:
    that reset is in flight, `armWorkerSweeps` returns early so an interleaved cancel cannot eat
    the row it just created. The startup warning is gone (nothing is scheduled during the
    `starting` lifecycle), and no restart adds a second chain.
-3. **One outbound row took 61 s longer than its neighbour.** Row 8 was created 00:19:17 and sent
-   00:20:18 (`attempts = 1`) while row 9, created 18 s later, went out immediately. Not explained
-   yet; nothing an owner would notice on a chat channel, but the claim/`nextAttemptAt` path is
-   worth a look before it matters on a notifier with retries.
+3. ~~**One outbound row took 61 s longer than its neighbour.**~~ **Explained 2026-11-09: not a
+   bug.** It is the issue #11 quiet merge window. Re-read the two rows: both were
+   `urgency = quiet` done-reports, `nextAttemptAt - createdAt = 60000` exactly, delivered 60.2 s
+   and 60.7 s after creation — while every `push` row (owner replies, asks, failures) went out
+   2–6 ms after creation. A quiet report waits out the 60-second merge window so several can
+   fold into one message; the neighbour that "went out immediately" was a `push` row and never
+   shared that window. The original observation follows. Row 8 was created 00:19:17 and sent
+   00:20:18 (`attempts = 1`) while row 9, created 18 s later, went out immediately.
 
 ## Log
 
