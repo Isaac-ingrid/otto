@@ -23,6 +23,15 @@ Known divergence to watch: the Node host differs from workerd on one dispatch or
 (`docs/design/node-host.md`), so a dispatch that looks "out of order" in a card list is expected
 to be cosmetic, not a bug.
 
+## Log
+
+- **2026-11-08** — VPS deployed under systemd on `127.0.0.1:8787`; the gateway model answered a
+  real message (`sh_run` settled `done`, `sh_outbound` sent).
+- **2026-11-09** — Connector pairing verified through the SSH tunnel: `dev_fbe47c5f3cac`
+  (`isaac-mac`) reached the steward, `sh_machine.online = 1`, `maxWorkers = 8`, connector log
+  shows `welcomed`. Run with `SIG_HOME=/tmp/sig-conn-test` so nothing touched `~/.sig`.
+  Next: register a directory in the web workspace (needs a browser), then dispatch.
+
 ## P2 · Ops hardening (no domain needed)
 
 - **Backup**: `SIG_DB_PATH` is one SQLite file. `sqlite3 .backup` to `/var/lib/sig/backups/` on a
