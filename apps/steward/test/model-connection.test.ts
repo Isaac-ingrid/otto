@@ -25,7 +25,7 @@ describe("provider endpoint selection", () => {
 });
 
 import { testModelConnection } from "../src/llm/connection-test.ts";
-import { providerCatalog } from "../src/llm/models.ts";
+import { providerCatalog, resolveCatalogModel, resolveModelThinking } from "../src/llm/models.ts";
 
 const config = { provider: "deepseek", modelId: "deepseek-flash", explicit: true };
 
@@ -88,6 +88,35 @@ describe("connection probe", () => {
     const noFetch = async () => { throw new Error("must not fetch"); };
     expect(await testModelConnection(config, undefined, noFetch)).toEqual({ ok: false, error: "missing_key" });
     expect(await testModelConnection({ ...config, modelId: "missing" }, "test-only", noFetch)).toEqual({ ok: false, error: "unknown_model" });
+  });
+
+  it("addresses a gateway's own model name once the selection also names its endpoint", async () => {
+    // A self-hosted OpenAI-compatible gateway fronts DeepSeek under its own snapshot name; the
+    // catalog knows neither the id nor the host, so both come from the deploy config.
+    let url = "";
+    let payload = "";
+    const result = await testModelConnection(
+      { provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", baseUrl: "https://gateway.example/v1", explicit: true, thinkingLevel: "high" },
+      "test-only",
+      async (input, init) => {
+        url = String(input);
+        payload = String(init?.body);
+        return new Response('data: {"id":"t","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}\n\ndata: {"id":"t","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } });
+      },
+    );
+    expect(result).toEqual({ ok: true });
+    expect(url).toBe("https://gateway.example/v1/chat/completions");
+    expect(JSON.parse(payload)).toMatchObject({ model: "deepseek-v4.1-flash-1017", reasoning_effort: "high" });
+  });
+
+  it("keeps the catalog dialect when the model id is the gateway's", () => {
+    // The synthesized entry clones a sibling from the same provider, so the DeepSeek reasoning
+    // dialect (thinkingLevelMap high/max, max_tokens) survives a custom name.
+    const config = { provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", baseUrl: "https://gateway.example/v1", explicit: true };
+    expect(resolveModelThinking({ ...config, thinkingLevel: "high" })).toEqual({ thinkingLevel: "high", thinkingLevels: ["off", "low", "high", "max"] });
+    expect(resolveCatalogModel(config)).toMatchObject({ id: "deepseek-v4.1-flash-1017", provider: "deepseek", api: "openai-completions", baseUrl: "https://gateway.example/v1" });
+    // Without an endpoint there is nothing to address: a typo stays a visible no_model.
+    expect(resolveCatalogModel({ provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", explicit: true })).toBeUndefined();
   });
 });
 

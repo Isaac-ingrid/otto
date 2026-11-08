@@ -86,6 +86,7 @@ import {
   stewardProviders,
   resolveModelConfig,
   resolveModelThinking,
+  resolveCatalogModel,
   type ComposerModelInput,
   type FauxRequestRecord,
   type StewardModels,
@@ -3116,8 +3117,10 @@ export class Steward extends Agent<Env> {
     explicitVars: boolean;
     sealedProvider: string | null;
     apiKey: boolean;
-    /** False when the selected provider's catalog has no such model — runs would settle
-     *  `unanswered` with `no_model` (review #10); ensureRootModel logs model_config_error. */
+    /** False when the selection cannot be addressed at all — runs would settle `unanswered`
+     *  with `no_model` (review #10); ensureRootModel logs model_config_error. A model id the
+     *  catalog does not ship counts as known when the selection also names its endpoint
+     *  (resolveCatalogModel). */
     modelKnown: boolean;
     thinkingLevel: ModelThinkingLevel;
     thinkingLevels: ModelThinkingLevel[];
@@ -3134,7 +3137,7 @@ export class Steward extends Agent<Env> {
       explicitVars: vars.explicit,
       sealedProvider: sealed?.provider ?? null,
       apiKey: Boolean(sealed && sealed.provider === config.provider && sealed.apiKey),
-      modelKnown: config.provider === "faux" || stewardProviders().some((p) => p.id === config.provider && p.getModels().some((m) => m.id === config.modelId)),
+      modelKnown: config.provider === "faux" || resolveCatalogModel(config) !== undefined,
     };
   }
 

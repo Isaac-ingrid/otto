@@ -15,7 +15,7 @@ import { providerInfo, type ProviderInfo } from "./provider-info.ts";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { MODEL_THINKING_LEVELS } from "@earendil-works/pi-ai/providers/model-schema";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { AssistantMessage, TranscriptContext } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, TranscriptContext } from "@earendil-works/pi-ai";
 import { fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
 
 /** The deploy-config shape (`vars.STEWARD_MODEL` in the root wrangler.jsonc). */
@@ -108,8 +108,31 @@ export function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
   return MODEL_THINKING_LEVELS.some((level) => value === level);
 }
 
+/**
+ * The model entry a config actually addresses: the catalog's own, or — when the config names an
+ * endpoint the catalog does not ship a model for — a clone of the provider's sibling entry
+ * re-keyed to the configured id. Self-hosted OpenAI-compatible gateways front DeepSeek with
+ * their own snapshot names (`deepseek-v4.1-flash-1017`, served at `POST /v1/chat/completions`),
+ * and the wire body carries `model.id`, so the id has to be the gateway's own.
+ *
+ * Synthesis requires an explicit `baseUrl`: without one, a typo must keep failing visibly as
+ * `no_model` (review #10) instead of sending an invented name to a first-party endpoint.
+ */
+export function resolveCatalogModel(config: StewardModelConfig): Model<Api> | undefined {
+  const base = stewardProviders().find((provider) => provider.id === config.provider);
+  if (!base) return undefined;
+  const models = base.getModels();
+  const known = models.find((model) => model.id === config.modelId);
+  if (known !== undefined || !config.baseUrl) return known;
+  // The sibling donates the dialect (api, compat, reasoning map, context window): a gateway
+  // proxying one vendor's models speaks that vendor's request shape.
+  const sibling = models.find((model) => model.api === "openai-completions") ?? models[0];
+  if (sibling === undefined) return undefined;
+  return { ...sibling, id: config.modelId, name: config.modelId, baseUrl: config.baseUrl };
+}
+
 export function resolveModelThinking(config: StewardModelConfig): { thinkingLevel: ModelThinkingLevel; thinkingLevels: ModelThinkingLevel[] } {
-  const model = stewardProviders().find((provider) => provider.id === config.provider)?.getModels().find((entry) => entry.id === config.modelId);
+  const model = resolveCatalogModel(config);
   return model
     ? { thinkingLevel: clampThinkingLevel(model, config.thinkingLevel ?? "off"), thinkingLevels: getSupportedThinkingLevels(model) }
     : { thinkingLevel: "off", thinkingLevels: ["off"] };
@@ -148,7 +171,7 @@ export function resolveModelConfig(raw: unknown): StewardModelConfig {
  * the Worker. A missing key keeps the provider registered but unconfigured, so model calls
  * fail loudly instead of silently trying `DEEPSEEK_API_KEY`.
  */
-export function providerWithInlineKey(base: Provider, apiKey: string | undefined, baseUrl?: string): Provider {
+export function providerWithInlineKey(base: Provider, apiKey: string | undefined, baseUrl?: string, extraModels: readonly Model<Api>[] = []): Provider {
   return createProvider({
     id: base.id,
     name: base.name,
@@ -160,7 +183,7 @@ export function providerWithInlineKey(base: Provider, apiKey: string | undefined
         resolve: async () => (apiKey ? { auth: { apiKey, ...(baseUrl ? { baseUrl } : {}) }, source: "deploy config" } : undefined),
       },
     },
-    models: [...base.getModels()],
+    models: [...base.getModels(), ...extraModels],
     api: {
       stream: base.stream.bind(base),
       streamSimple: base.streamSimple.bind(base),
@@ -168,6 +191,14 @@ export function providerWithInlineKey(base: Provider, apiKey: string | undefined
       ...(base.cancelDeferred ? { cancelDeferred: base.cancelDeferred.bind(base) } : {}),
     },
   });
+}
+
+/** The catalog provider a conversation runs on: inline key, endpoint override, and the
+ *  configured model registered too when the catalog does not ship it (resolveCatalogModel). */
+export function providerForConfig(base: Provider, config: StewardModelConfig, apiKey: string | undefined): Provider {
+  const model = resolveCatalogModel(config);
+  const extra = model !== undefined && !base.getModels().some((entry) => entry.id === model.id) ? [model] : [];
+  return providerWithInlineKey(base, apiKey, config.baseUrl, extra);
 }
 
 /** One captured model request, as the test scaffolding sees it (after beforeRequest). */
@@ -210,7 +241,7 @@ export function installModel(models: MutableModels, config: StewardModelConfig, 
   if (config.provider === "faux") return;
   const base = stewardProviders().find((p) => p.id === config.provider);
   if (!base) return; // unknown provider: registers nothing — runs fail visibly as no_model
-  models.setProvider(providerWithInlineKey(base, apiKey, config.baseUrl));
+  models.setProvider(providerForConfig(base, config, apiKey));
 }
 
 const textOf = (content: unknown): string => {
@@ -324,6 +355,6 @@ export function buildStewardModels(config: StewardModelConfig, apiKey: string | 
   }
   // An unknown model id is likewise kept as configured (it fails visibly as `no_model`);
   // silently substituting a different model would break the eval-baseline rule.
-  models.setProvider(providerWithInlineKey(base, apiKey, config.baseUrl));
+  models.setProvider(providerForConfig(base, config, apiKey));
   return { models, config };
 }

@@ -81,6 +81,12 @@ Environment:
 `STEWARD_MODEL` (JSON), `DAILY_BUDGET_USD`, `MODEL_KEY`. As in production, the model API key
 ends up in the sealed `sh_model` row, not in the environment.
 
+`STEWARD_MODEL` is `{provider, modelId, baseUrl?, thinkingLevel?}`. A self-hosted gateway that
+fronts a vendor under its own snapshot name works without patching the catalog: naming a
+`baseUrl` also registers that `modelId` (cloned from the provider's sibling entry, so the
+vendor's request dialect survives). `https://ai.ctaigw.cn/v1/chat/completions` is therefore
+`"baseUrl":"https://ai.ctaigw.cn/v1"`, and the id in the wire body is the gateway's own.
+
 The process refuses nothing that a Worker would refuse: the session gate, pairing lockout,
 budget cap and push policy are all the same code.
 
