@@ -41,6 +41,7 @@ at bundle time. No `if (isNode)` branches, no duplicated business logic.
 | DO namespace binding (`env.Steward`) | `node-host/namespace.ts` | one live instance behind a `Proxy`, so `getAgentByName()` and `stub.pair(...)` RPC both work |
 | `env.ASSETS` | `node-host/env.ts` | serves `apps/steward/ui` from disk |
 | `LOGIN_RATE_LIMITER` | same file | 10 requests / 60 s per key, in memory |
+| `CF-Connecting-IP` | `node-host/client-ip.ts` | workerd fills it in, nginx sets only `X-Forwarded-For`; without it every client shared one `unknown` throttle bucket (see `docs/plan/self-hosted.md` Finding 4) |
 
 ## What behaves differently
 
