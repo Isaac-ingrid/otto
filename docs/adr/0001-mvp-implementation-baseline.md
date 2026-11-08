@@ -1,6 +1,6 @@
 # ADR-0001: MVP implementation baseline
 
-Status: accepted (2026-10-15). Decisions 4, 7 and 12 are amended by [ADR-0002](0002-pip-web-workspace.md) (the Pip web workspace). Decisions 4, 7–9 and 12 are further amended by [ADR-0003](0003-web-entry-local-sessions.md) for the Web entry and local worker-session scope (implemented).
+Status: accepted (2026-10-15). Decisions 4, 7 and 12 are amended by [ADR-0004](0004-web-workspace.md) (the web workspace). Decisions 4, 7–9 and 12 are further amended by [ADR-0005](0005-web-entry-and-local-sessions.md) for the Web entry and local worker-session scope (implemented).
 
 Context: the spike phase concluded ([spike-conclusions.md](../spike-conclusions.md)). Before the real implementation starts, the open choices left by the [spec](../spec.md) and the [design docs](../design/) were settled in one review session. Where a design doc and the spike's field results disagreed, the spike wins.
 
@@ -15,7 +15,7 @@ Context: the spike phase concluded ([spike-conclusions.md](../spike-conclusions.
 7. **No HTTP admin routes.** (the admin surface is now the SERVER_KEY-gated owner API — [ADR-0003](0003-owner-api-replaces-chat-channel.md)) Intervention goes through Feishu; management goes through the signed-link web. The only unauthenticated entry points are `/pair` and the Feishu webhook. `SERVER_KEY` must be rotatable.
 8. **Onboarding bootstrap is guarded by `SETUP_TOKEN`** (superseded — no setup page, [ADR-0003](0003-owner-api-replaces-chat-channel.md)), a secret generated at deploy time. The setup page (Feishu QR code / manual credentials) opens only with it and closes permanently once the owner is bound. *Why:* before owner binding there is no IM to issue signed links, and first-come-first-served lets a leaked URL hijack the deployment.
 9. **Feishu inbound is webhook only.** (superseded — the chat channel is removed, [ADR-0003](0003-owner-api-replaces-chat-channel.md)) The long-lived connection is deferred entirely. Manual App ID/Secret entry is implemented first (it is the permanent fallback); QR creation builds on it.
-10. **Connector package is `@iefnaf/shepherd`** (public package/command superseded by [ADR-0002](0002-sig-brand-and-compatibility.md)) (`shepherd` is taken on npm). Pairing command: `npx @iefnaf/shepherd connect <url> <code>`. Background service on macOS (launchd) and Linux (systemd user unit); no Windows.
+10. **Connector package is `@alexlikevibe/sig`** (renamed from the original `shepherd` package by [ADR-0002](0002-sig-brand-and-compatibility.md); `shepherd` is taken on npm). Pairing command: `npx @alexlikevibe/sig connect <url> <code>`. Background service on macOS (launchd) and Linux (systemd user unit); no Windows.
 11. **Steward model: provider configurable, default deepseek-flash** (the eval baseline). Changing the model requires re-running the routing eval.
 12. **Web is server-rendered HTML from the Worker**, with a little vanilla JS only for the raw-process stream. No frontend build chain.
 13. **Connector LocalStore uses `node:sqlite`** (transactions for command state and event seqs; the spike's `seqs.json` bug shows why).

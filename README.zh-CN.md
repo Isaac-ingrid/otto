@@ -24,13 +24,18 @@ Sig 是一个可自行部署的 **Personal Agent（个人智能体）**，基于
 
 ### 1. 部署你的 Personal Agent
 
-**一键部署。** 点击按钮，Cloudflare 会把这个仓库克隆到你的账号并完成构建部署：
+**从你的代码检出目录部署。** 把这个仓库部署到你自己的 Cloudflare 账号。完整步骤见[部署指南](docs/deploy.md)；在仓库根目录执行：
 
 开始前，请用密码管理器生成并保存一个**至少 15 个字符**的独立密码，填写到 `LOGIN_PASSWORD`。即使 Cloudflare 表单接受了短密码、常见密码或已泄露密码，Sig 启动后也会拒绝使用它们登录。
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iefnaf/sig)
+```sh
+pnpm install
+wrangler deploy
+wrangler secret put LOGIN_PASSWORD
+wrangler deploy
+```
 
-给 Worker 起个名字，在表单里设置登录密码。构建完成后打开 Worker 地址登录，向导会引导你填写模型 API key。
+构建完成后打开 Worker 地址登录，向导会引导你填写模型 API key。
 
 如果部署时提示 GitHub 授权过期，请按[部署排错指南](docs/deploy.md#deployment-troubleshooting)恢复连接。修改登录密码无法修复 GitHub 授权。
 
@@ -39,8 +44,8 @@ Sig 是一个可自行部署的 **Personal Agent（个人智能体）**，基于
 ```text
 帮我把 Sig 这个 personal agent 部署到我自己的 Cloudflare 账号。
 
-项目仓库：https://github.com/iefnaf/sig
-请先阅读仓库里的 docs/agent-deploy.md，并按其中的步骤操作。
+项目仓库：本地的 sig 代码检出目录（找不到就问我路径）
+请先阅读该目录里的 docs/agent-deploy.md，并按其中的步骤操作。
 
 检查前置条件，部署 Worker 和 Durable Object，配置密钥，验证访问，
 然后打开网页工作台。需要 Cloudflare 授权时引导我完成；模型 API key
@@ -59,8 +64,8 @@ Sig 是一个可自行部署的 **Personal Agent（个人智能体）**，基于
 帮我在这台电脑上安装 Sig connector，连接到我已经部署在 Cloudflare
 上的 personal agent。
 
-项目仓库：https://github.com/iefnaf/sig
-请先阅读仓库里的 docs/agent-connect.md，并按其中的步骤操作。
+项目仓库：本地的 sig 代码检出目录（找不到就问我路径）
+请先阅读该目录里的 docs/agent-connect.md，并按其中的步骤操作。
 
 向我确认 Sig 部署地址，以及我要连接的本地仓库。检查 Node.js 和本地
 coding agent 的配置，安装 connector，并引导我从网页工作台的「机器」
@@ -73,7 +78,7 @@ coding agent 的配置，安装 connector，并引导我从网页工作台的「
 
 Connector 会主动连接 Sig，你无需给电脑开放入站端口。本地 agent 工作期间，电脑需要保持唤醒和联网。
 
-> 如果你的 agent 无法读取仓库，需要先授予 GitHub 访问权限，或提供本地 checkout。npm 包暂不可用时，connector 指南提供从源码安装的路径。如果所在网络无法访问 `workers.dev`，部署指南也包含自定义域名的配置方法。
+> 如果你的 agent 找不到仓库，请把它指向本地 checkout。npm 包暂不可用时，connector 指南提供从源码安装的路径。如果所在网络无法访问 `workers.dev`，部署指南也包含自定义域名的配置方法。
 
 ## 开始对话
 

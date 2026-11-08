@@ -12,7 +12,7 @@ Every critical design assumption was **validated in practice**: the steward prot
 |---|---|---|
 | `do-protocol` | DO↔connector WebSocket protocol skeleton (pairing, outbox, acks, resend) | Protocol design corrections; see [research/do-protocol-spike.md](research/do-protocol-spike.md) |
 | `pi-rpc` | pi `--mode rpc` event and control surfaces | Event shapes; adjudication inputs |
-| `feishu-webhook` / `feishu` | Feishu inbound webhook, outbound cards, button callbacks | Channel approach; [research/feishu-channel.md](research/feishu-channel.md) |
+| `feishu-webhook` / `feishu` | Feishu inbound webhook, outbound cards, button callbacks | Channel approach; Feishu channel research (not retained in this tree) |
 | `steward-m1` | Steward core: ledger (SQLite on DO), reducer, report templates, outbound queue | 15/15 tests; the `sh_*` table prototypes |
 | `steward-m2` | The steward as a pi-durable extension: tool set, policy hooks, real-model routing | Routing eval **100/106 (94.3%)**; settle-time dispatch verification |
 | `e2e` | The full loop deployed live: Feishu → steward → connector → real worker → card | One-command bootstrap; the M3 reliability layer; the 11-bug list |

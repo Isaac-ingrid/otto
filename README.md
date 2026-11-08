@@ -24,13 +24,18 @@ Deploy Sig into your Cloudflare account first, then connect a machine where you 
 
 ### 1. Deploy your personal agent
 
-**One click.** The button clones this repository into your Cloudflare account, builds, and deploys:
+**From your checkout.** Deploy this repository into your own Cloudflare account. The [deployment guide](docs/deploy.md) covers the whole runbook; from the repository root:
 
 Before you start, generate and save a unique password of **at least 15 characters** in your password manager. Enter it as `LOGIN_PASSWORD`. Sig rejects shorter, common, or compromised passwords when it starts, even if Cloudflare accepts them in the deployment form.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iefnaf/sig)
+```sh
+pnpm install
+wrangler deploy
+wrangler secret put LOGIN_PASSWORD
+wrangler deploy
+```
 
-Give the Worker a name and set your login password in the form. When the build finishes, open the Worker URL and sign in; the setup wizard asks for your model provider's API key.
+When the build finishes, open the Worker URL and sign in; the setup wizard asks for your model provider's API key.
 
 If deployment reports expired GitHub authorization, follow the [deployment troubleshooting guide](docs/deploy.md#deployment-troubleshooting). Changing the login password does not repair the GitHub connection.
 
@@ -39,8 +44,8 @@ If deployment reports expired GitHub authorization, follow the [deployment troub
 ```text
 Deploy Sig, my personal agent, to my Cloudflare account.
 
-Repository: https://github.com/iefnaf/sig
-Read docs/agent-deploy.md in that repository and follow its runbook.
+Repository: a local checkout of sig — ask me for its path if you cannot find one.
+Read docs/agent-deploy.md in that checkout and follow its runbook.
 
 Check the prerequisites, deploy the Worker and Durable Object, configure
 the secrets, verify access, and open the web workspace. Guide me through
@@ -60,8 +65,8 @@ Run your coding agent **on the machine you want Sig to work on**, then paste:
 Install the Sig connector on this machine and connect it to my existing
 personal agent on Cloudflare.
 
-Repository: https://github.com/iefnaf/sig
-Read docs/agent-connect.md in that repository and follow its runbook.
+Repository: a local checkout of sig — ask me for its path if you cannot find one.
+Read docs/agent-connect.md in that checkout and follow its runbook.
 
 Ask me for my Sig deployment URL and which local repositories to connect.
 Check Node.js and my local coding-agent setup, install the connector,
@@ -76,7 +81,7 @@ read-only task to confirm the connection works end to end.
 
 The connector makes an outbound connection to Sig; you do not need to open an inbound port on your computer. Your machine must stay awake and connected for local agents to run.
 
-> If your agent cannot read the repository, give it GitHub access or a local checkout. The connector runbook includes a source-install path when the npm package is unavailable. If `workers.dev` is unreachable from your network, the deployment runbook covers using a custom domain.
+> If your agent cannot find the repository, point it at a local checkout. The connector runbook includes a source-install path when the npm package is unavailable. If `workers.dev` is unreachable from your network, the deployment runbook covers using a custom domain.
 
 ## Start a conversation
 

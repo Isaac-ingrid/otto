@@ -26,10 +26,10 @@ Use the owner's normal Node installation and a user-writable npm prefix; do not 
 
 ### If the package is not yet published
 
-An npm 404 is not a successful installation. Use an accessible checkout of [iefnaf/sig](https://github.com/iefnaf/sig); if access is denied, ask the owner to authorize GitHub or provide a checkout. From the repository root, use its pinned pnpm version:
+An npm 404 is not a successful installation. Use your local checkout of sig. From the repository root, use its pinned pnpm version:
 
 ```sh
-git clone https://github.com/iefnaf/sig && cd sig   # or use an existing checkout
+cd <your checkout of sig>
 pnpm install
 pnpm --filter @alexlikevibe/sig build
 sig_package_dir="$(mktemp -d)"

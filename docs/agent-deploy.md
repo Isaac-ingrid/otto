@@ -13,7 +13,7 @@ Decisions behind the flow: [ADR-0010](adr/0010-browser-password-authentication.m
 ## 0 · Preconditions
 
 - Node ≥ 22.18 (`node -v`), npm, git, and the pnpm version pinned in the repository's `package.json` (`packageManager`). Use Corepack to select it when available.
-- Access to [iefnaf/sig](https://github.com/iefnaf/sig), or an existing local checkout. If GitHub denies access, ask the owner to authorize it before cloning.
+- A local checkout of this repository.
 - A Cloudflare account and a model-provider API key (see [costs](deploy.md#costs)). If an account is needed, the owner creates it before continuing.
 - A proxy network? Export `HTTPS_PROXY`/`HTTP_PROXY` before every wrangler and curl step. If step 3's probe cannot reach the workers.dev address, do [Appendix A](#appendix-a--custom-domain) before step 4.
 
@@ -30,7 +30,7 @@ A browser opens; the owner signs in with the account that will own the deploymen
 For a new deployment, pick a distinct Worker name such as `sig-<two random words or 4 hex chars>` to avoid overwriting another Worker in the owner's account. For an update, use the existing deployment's name instead.
 
 ```sh
-git clone https://github.com/iefnaf/sig && cd sig
+cd <your checkout of sig>
 pnpm install
 npm run deploy -- --name <name>
 ```

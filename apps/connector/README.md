@@ -79,11 +79,11 @@ Released under the [MIT License](LICENSE).
 
 ## Documentation
 
-The deployment and connector runbooks live in the [Sig repository](https://github.com/iefnaf/sig):
+The deployment and connector runbooks live in the Sig repository checkout:
 
-- [Deploy Sig](https://github.com/iefnaf/sig/blob/main/docs/deploy.md)
-- [Connect a machine](https://github.com/iefnaf/sig/blob/main/docs/agent-connect.md)
-- [Usage and agent behavior](https://github.com/iefnaf/sig/blob/main/docs/usage.md)
+- Deploy Sig — `docs/deploy.md`
+- Connect a machine — `docs/agent-connect.md`
+- Usage and agent behavior — `docs/usage.md`
 
 ---
 

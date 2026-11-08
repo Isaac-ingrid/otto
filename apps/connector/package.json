@@ -17,11 +17,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/iefnaf/sig.git",
-    "directory": "apps/connector"
-  },
   "license": "MIT",
   "scripts": {
     "build": "node build.mjs",

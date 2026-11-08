@@ -285,7 +285,7 @@ When several matters run at the same time on the same repo, **each change-making
 ### 12.1 Onboarding Flow
 
 1. Click Deploy to deploy to Cloudflare and fill in the model API key. **Users in mainland China must additionally bind a custom domain to the Worker**: `*.workers.dev` is blocked in mainland China (verified on this machine), which breaks both the user's access to the web pages and the connector's connection to the steward.
-2. When deployment completes, a QR code appears; scan it with Feishu to create a bot, and the scanner becomes the owner (based on Feishu's official app-registration device flow; see [research/feishu-channel.md](research/feishu-channel.md)).
+2. When deployment completes, a QR code appears; scan it with Feishu to create a bot, and the scanner becomes the owner (based on Feishu's official app-registration device flow; see the Feishu channel research, not retained in this tree).
 3. In the conversation, the steward gives a command; paste and run it in a terminal on the computer to connect, and the machine shows up with the steward.
 4. (Nice to have) The steward probes that machine's agents and repos and walks the user through dispatching the first task.
 
@@ -357,7 +357,7 @@ The following are assumptions formed during discussion, not yet verified. They a
 
 - pi-durable provides Cloudflare Durable Object storage (`openDurableObjectSqliteStorage`), persistable documents and tasks, idempotent commits keyed by `requestId`, and background sub-agents with a report-back pattern (see the README and Example 23 of `packages/durable` in the pi repo). Memory and dispatch are expected to be built on these primitives.
 - How a task waits for an **external event** (the connector reporting back): no ready-made primitive was found in the spec; it needs prototype validation. Possible paths include waiting based on document changes, or modeling the remote worker as a proxy session.
-- Most pi-side assumptions have been verified on this machine; see [research/pi-integration.md](research/pi-integration.md) and [spikes/pi-rpc](../spikes/pi-rpc): interjecting mid-run, aborting, resuming a session after the process is killed, injecting a reporting tool, forcing a catch-up report, and read-only restrictions all hold.
+- Most pi-side assumptions have been verified on this machine; see [research/pi-integration.md](research/pi-integration.md) and the `pi-rpc` spike (removed from the tree; preserved by git tag `spike-final`): interjecting mid-run, aborting, resuming a session after the process is killed, injecting a reporting tool, forcing a catch-up report, and read-only restrictions all hold.
 - Whether the long connection between the connector and the DO supports hibernation, and whether a task can be woken by an alarm after hibernating.
 - The dispatch tool has external side effects; crash replay must avoid duplicate dispatches, so an idempotency key is needed.
 - The actual capability and permission scope of Feishu's "scan QR code to create a bot", and whether a personal account can create one.

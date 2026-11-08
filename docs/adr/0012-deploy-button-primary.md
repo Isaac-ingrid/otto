@@ -1,5 +1,7 @@
 # ADR-0012: The Deploy-to-Cloudflare button is the primary deployment channel
 
+Status: suspended. The button needs a public mirror of this repository, and the README and `docs/deploy.md` now document deploying from a local checkout; the decisions below return to force once the repository is publicly mirrored.
+
 Supersedes [ADR-0007](0007-agent-driven-deploy.md)'s channel ordering. The runbook keeps its role as the agent-guided channel, with its secret discipline unchanged.
 
 Both premises behind ADR-0007's agent-first choice have expired. First, the button form now collects Worker secrets: it reads declarations from `.dev.vars.example` (2025-07 platform changelog) and field descriptions from `package.json`'s `cloudflare.bindings`, so the post-deploy terminal step the old button lacked is gone — and [ADR-0010](0010-browser-password-authentication.md) moved everything else off the terminal: the login password into the deployment form, the model key into the workspace's Settings. Second, live click-throughs on a public mirror showed the form pre-fills each field with the example file's value, which fixes the shape the template files must take. Against that, agent-driven deploy keeps its real variance: name collisions, proxy handling, and heterogeneous agents improvising around the runbook.

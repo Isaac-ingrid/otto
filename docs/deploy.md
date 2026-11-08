@@ -6,29 +6,27 @@ Open the deployment URL to use the web workspace. Sign in with your deployment p
 
 ## Two ways to deploy
 
-- **One click** — the primary channel ([ADR-0012](adr/0012-deploy-button-primary.md)). The [Deploy-to-Cloudflare button in the README](../README.md#get-started) builds and deploys into your own account and asks for the login password.
+- **From a checkout** — deploy from your local clone straight into your own account. The hosted Deploy-to-Cloudflare button needs a public mirror of this repository; [ADR-0012](adr/0012-deploy-button-primary.md) records that channel.
 - **With your coding agent** — the guided channel ([ADR-0007](adr/0007-agent-driven-deploy.md)): end-to-end verification, custom domains where workers.dev is unreachable, and agent-operated setups. Use the [prompts in the README](../README.md#get-started): [agent-deploy.md](agent-deploy.md) deploys Sig, configures the secrets, and opens the workspace; [agent-connect.md](agent-connect.md) installs and pairs each machine separately. `npm run deploy -- --name <name>` wraps the deploy step.
 
-## One-click deploy
+## Deploy from a checkout
 
-Generate and save a unique password of **at least 15 characters** in your password manager before opening the form.
+Generate and save a unique password of **at least 15 characters** in your password manager before you start.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iefnaf/sig)
-
-The form clones the repo into your own account and asks for one secret:
+The deploy needs one secret:
 
 | Secret | What it is |
 |---|---|
 | `LOGIN_PASSWORD` | Your Sig login password. Use at least 15 characters and save it in a password manager. Common and compromised passwords are rejected. |
 
-Your model provider's API key (default provider: DeepSeek — [platform.deepseek.com](https://platform.deepseek.com)) is not part of the form. After the build, open the Worker URL and sign in; the setup wizard, or the workspace's **Settings** page, takes the key.
+Your model provider's API key (default provider: DeepSeek — [platform.deepseek.com](https://platform.deepseek.com)) is not part of the deploy. After the build, open the Worker URL and sign in; the setup wizard, or the workspace's **Settings** page, takes the key.
 
-The form collects a Cloudflare Secret. Sig checks the password when the application starts, so a completed deployment does not mean the password passed its policy. A rejected password cannot create a browser session. Follow the recovery instructions on the login page to replace it.
+The secret is stored as a Cloudflare Secret. Sig checks the password when the application starts, so a completed deployment does not mean the password passed its policy. A rejected password cannot create a browser session. Follow the recovery instructions on the login page to replace it.
 
-From a terminal instead:
+Run the deploy from the repository root:
 
 ```sh
-git clone https://github.com/iefnaf/sig && cd sig
+cd <your checkout of sig>
 pnpm install
 wrangler deploy
 wrangler secret put LOGIN_PASSWORD

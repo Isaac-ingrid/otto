@@ -607,7 +607,7 @@ The default conclusion after a wake-up is `no_action`. Every proactive wake-up s
 
 ## 9. Channels: Feishu
 
-### 9.0 Onboarding and event transport (based on the [Feishu research](../research/feishu-channel.md); corrected against live tests on 2026-10-14)
+### 9.0 Onboarding and event transport (based on the Feishu research, not retained in this tree; corrected against live tests on 2026-10-14)
 
 - **Creation**: after deployment, the DO calls Feishu's app-registration device flow (`POST accounts.feishu.cn/oauth/v1/app/registration`, `action=begin`, `archetype=PersonalAgent`) and shows the returned QR-code link on the settings page; the DO uses the alarm to poll `action=poll` at the `interval`, and on success obtains the `client_id`, `client_secret`, and the `open_id` of the user who scanned (switching to the international domain to continue when `tenant_brand=lark`). Credentials are stored encrypted, and the `open_id` serves directly as the owner. In live testing the link is valid for 1 hour and is one-time. Manually filling in the App ID and App Secret is the fallback.
 - **Inbound transport has two implementations**, selected by the adapter's configuration:
@@ -642,7 +642,7 @@ interface ChannelAdapter {
 }
 ```
 
-Feishu is the first implementation. "QR-code creation", "long connection vs webhook", and "cards, callbacks, rate limits, and message length" are already covered by [research](../research/feishu-channel.md); of these, the 5 QPS per user and the 30 KB serialized-message cap are folded into §6. Still-unverified points (whether a QR-created app can switch to webhook, whether a publish review is required, the stability of a DO-hosted long connection, and Feishu-to-Worker reachability) are listed in section 6 of the research doc.
+Feishu is the first implementation. "QR-code creation", "long connection vs webhook", and "cards, callbacks, rate limits, and message length" are already covered by that research; of these, the 5 QPS per user and the 30 KB serialized-message cap are folded into §6. Still-unverified points (whether a QR-created app can switch to webhook, whether a publish review is required, the stability of a DO-hosted long connection, and Feishu-to-Worker reachability) are listed in section 6 of the research doc.
 
 ## 10. The web read model
 
@@ -712,7 +712,7 @@ Legend: ✓ verified in the protocol spike; ◦ seen only in docs or type declar
 | `this.schedule(cron, ...)` idempotent | ✓ (issue #20: cron dedups by expression+payload, one-shots opt in with `idempotent: true`; verified by tests incl. lost-schedule reconciliation). ✓ (issue #19): the daily notes-maintenance cron reuses it — arming at every `onStart` dedups onto the same row (restarts never postpone or stack it), replacing #18's 24h one-shot chain |
 | Feishu: QR-code creation (`registerApp` device flow) | ◦ official SDK source; no live scan performed |
 | Feishu: long-connection protocol, message send / reply / card update, rate limits and lengths | ◦ official SDK source and comments; not exercised live |
-| Feishu: switching a QR-created app to webhook, publish review, personal-account limits, long-connection stability inside the DO | ? unverified; see [feishu-channel.md](../research/feishu-channel.md) §6 |
+| Feishu: switching a QR-created app to webhook, publish review, personal-account limits, long-connection stability inside the DO | ? unverified; see the Feishu channel research §6 (not retained in this tree) |
 
 ## 14. MVP scope and milestones
 
