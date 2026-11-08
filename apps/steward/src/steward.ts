@@ -77,6 +77,7 @@ import {
 import { Dispatcher, parseOwnerCommand } from "./dispatch.ts";
 import { buildSituationBrief } from "./llm/brief.ts";
 import { buildStewardExtension, type StewardExtensionContext } from "./llm/extension.ts";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { testModelConnection } from "./llm/connection-test.ts";
 import {
   buildStewardModels,
@@ -3097,11 +3098,25 @@ export class Steward extends Agent<Env> {
   }
 
   private async selectComposerModel(input: ComposerModelInput) {
-    const model = providerCatalog().find((provider) => provider.id === input.provider)?.models.find((entry) => entry.id === input.modelId);
+    // Resolved, not looked up (issue #70 × self-hosting): a gateway names its own model ids and
+    // the catalog has never heard of them, so a bare catalog lookup made the active model
+    // unselectable — "model_not_available" on the very selection that was already running. The
+    // stored endpoint is what makes an unknown id legitimate (resolveCatalogModel clones a
+    // sibling's dialect only when a baseUrl is given; without one a typo must not silently
+    // address the first-party API).
+    // The endpoint may come from either side of the merge: a Settings-page switch writes it
+    // into sh_model, a self-hosted deployment writes it into vars.STEWARD_MODEL. Whatever the
+    // deployment is *currently* addressing is the thing an unknown id may be resolved against.
+    const current = mergeModelSelection(await this.modelConfig(), resolveModelConfig(this.env.STEWARD_MODEL));
+    const baseUrl = current.provider === input.provider ? current.baseUrl : undefined;
+    const model = resolveCatalogModel({ provider: input.provider, modelId: input.modelId, baseUrl, explicit: true });
     if (!model || !(await this.sealedKeyFor(input.provider))) throw new WorkspaceError("model_not_available");
-    if (!model.thinkingLevels.includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
+    if (!getSupportedThinkingLevels(model).includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
     if (await this.piHarness.session().busy()) throw new WorkspaceError("model_busy", 409);
-    await this.setModelConfig(input.provider, undefined, input.modelId, undefined, input.thinkingLevel);
+    // The endpoint rides along: setModelConfig writes what it is given, so passing undefined
+    // here would drop a gateway deployment's baseUrl and re-point it at the vendor's own API
+    // the moment the owner nudges a thinking level.
+    await this.setModelConfig(input.provider, undefined, input.modelId, baseUrl, input.thinkingLevel);
     await this.ensureRootModel();
     return this.llmSelection();
   }

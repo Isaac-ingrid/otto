@@ -32,6 +32,19 @@ gateway's own snapshot name, which is not in pi-ai's catalog — `resolveCatalog
 selection names an endpoint. Verified end to end on this box: a `POST /api/messages` produced a
 real Chinese reply, `sh_run.status = settled`, `resultStatus = done`.
 
+**Switching the model from Settings wins over `.dev.vars`.** The Settings page writes the choice
+(provider, model id, endpoint, thinking level) into `sh_model` row 0, and `mergeModelSelection`
+lets a sealed row with a `modelId` beat `STEWARD_MODEL` — so editing `.dev.vars` after a runtime
+switch changes nothing until that row is cleared:
+
+```bash
+./deploy/remote.sh 'systemctl stop sig && sqlite3 /var/lib/sig/steward.sqlite "DELETE FROM sh_model" && systemctl start sig'
+```
+
+Verified here: the composer switched this deployment from `high` to `low` (the switch keeps the
+gateway `baseUrl`, otherwise it would silently re-point at `api.deepseek.com`), the next owner
+message answered normally, and the level went back to `high`.
+
 ## Reload after a code change
 
 ```bash

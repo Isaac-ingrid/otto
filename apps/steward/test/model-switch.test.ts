@@ -185,6 +185,35 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     expect(after.keyedProviders).toEqual(["anthropic", "openai"]);
   });
 
+  it("changes the thinking level of a gateway's own model name, keeping its endpoint (self-hosting)", async () => {
+    // A self-hosted gateway addresses model ids the catalog has never shipped. A bare catalog
+    // lookup made the composer reject the very model that was already running
+    // (`model_not_available`), and passing no baseUrl on the switch would have dropped the
+    // gateway and re-pointed the deployment at the vendor's first-party API.
+    const { post, settings } = await browser();
+    await post("settings/model", { provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", apiKey: "sk-gateway", baseUrl: "https://gw.example/v1" });
+    const before = ((await (await settings()).json()) as { model: { thinkingLevel: string; thinkingLevels: string[] } }).model;
+    expect(before.thinkingLevel).toBeTruthy();
+    const next = before.thinkingLevels.find((level) => level !== before.thinkingLevel)!;
+
+    const res = await post("settings/model/selection", { provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", thinkingLevel: next });
+    expect(res.status).toBe(200);
+    const after = ((await (await settings()).json()) as { model: { modelId: string; baseUrl: string | null; thinkingLevel: string; modelKnown: boolean } }).model;
+    expect(after).toMatchObject({ modelId: "deepseek-v4.1-flash-1017", baseUrl: "https://gw.example/v1", thinkingLevel: next, modelKnown: true });
+  });
+
+  it("rejects a thinking level the resolved model does not support, and an unknown provider", async () => {
+    const { post } = await browser();
+    await post("settings/model", { provider: "deepseek", modelId: "deepseek-flash", apiKey: "sk-ds" });
+    const levels = (await ownerStub().llmSelection()).thinkingLevels;
+    const unsupported = (["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const).find((level) => !levels.includes(level))!;
+    const bad = await post("settings/model/selection", { provider: "deepseek", modelId: "deepseek-flash", thinkingLevel: unsupported });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toEqual({ error: "thinking_not_supported" });
+    const unknown = await post("settings/model/selection", { provider: "nobody", modelId: "deepseek-flash", thinkingLevel: "off" });
+    expect(await unknown.json()).toEqual({ error: "model_not_available" });
+  });
+
   it("rejects a switch missing provider or modelId, or with a malformed apiKey", async () => {
     const { post } = await browser();
     expect((await post("settings/model", { modelId: "claude-x", apiKey: "sk-1" })).status).toBe(400);

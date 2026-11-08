@@ -13,10 +13,10 @@ needs no domain, no certificate and no 备案. Only "P3" does.
 | --- | --- | --- |
 | Connector pairing | tunnel to `127.0.0.1:8787`, `sig connect http://127.0.0.1:8787 <code>` | `sig status` shows paired; machine appears in **机器** |
 | Worker dispatch | from the workspace, ask for a trivial repo task | run settles `done`, files land in the local repo, output returns to the chat |
-| Workspace stream | open `/app` → workspace tab through the tunnel | SSE stays connected past a callback; no 502 after idle |
-| Budget guard | set `DAILY_BUDGET_USD` low, send messages until it trips | message refused with the budget reason; ledger records the spend |
-| Restart durability | `systemctl restart sig` mid-run | pending run resumes or is reported failed; no lost conversation |
-| Model switching | switch model/thinking level in the composer | `model_changed` frame, next turn uses the new selection |
+| Workspace stream | open `/app` → workspace tab through the tunnel | live frames arrive and the socket survives idle ✅ |
+| Budget guard | set `DAILY_BUDGET_USD` low, send messages until it trips | the cap gates *wakes*, not messages; ledger records the spend ✅ |
+| Restart durability | `systemctl restart sig` mid-run | pending run resumes or is reported failed; no lost conversation ✅ |
+| Model switching | switch model/thinking level in the composer | `model_changed` frame, next turn uses the new selection ✅ |
 | Login | password login + `/api/login-link` link | session cookie issued; link works once, then expires |
 
 Known divergence to watch: the Node host differs from workerd on one dispatch ordering test
@@ -56,6 +56,21 @@ Real behaviour observed on the VPS that is not what a reader would assume:
    worth a look before it matters on a notifier with retries.
 
 ## Log
+
+- **2026-11-09** — **Workspace live stream verified** (the frame protocol, not SSE: the owner
+  socket carries `stream` frames). A browser-equivalent client (`ws` + the `sig_session` cookie,
+  `?role=web&view=workspace`) saw `workspace_changed` 5.2 s after an owner message, three
+  incremental `stream` frames of the reply being typed, the closing empty frame, then another
+  `workspace_changed`. `threadId` is `null` when the turn routed to no thread, which is correct
+  for a status question.
+- **2026-11-09** — **Thinking-level switching verified, after fixing two bugs it exposed.**
+  `selectComposerModel` looked the model up in pi-ai's catalog, so a gateway's own model id —
+  the one this deployment was already running — answered `model_not_available`; and it passed
+  `baseUrl: undefined` into `setModelConfig`, which would have dropped the gateway endpoint and
+  re-pointed the deployment at `api.deepseek.com` on the next turn. Now it resolves through
+  `resolveCatalogModel` against the deployment's *current* selection (sealed row merged over
+  `STEWARD_MODEL`) and carries that `baseUrl` through. Verified on the box: `high` → `low`
+  → a real reply → back to `high`, with `baseUrl` intact throughout.
 
 - **2026-11-08** — VPS deployed under systemd on `127.0.0.1:8787`; the gateway model answered a
   real message (`sh_run` settled `done`, `sh_outbound` sent).
