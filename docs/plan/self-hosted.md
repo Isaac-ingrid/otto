@@ -30,7 +30,13 @@ to be cosmetic, not a bug.
 - **2026-11-09** — Connector pairing verified through the SSH tunnel: `dev_fbe47c5f3cac`
   (`isaac-mac`) reached the steward, `sh_machine.online = 1`, `maxWorkers = 8`, connector log
   shows `welcomed`. Run with `SIG_HOME=/tmp/sig-conn-test` so nothing touched `~/.sig`.
-  Next: register a directory in the web workspace (needs a browser), then dispatch.
+- **2026-11-09** — First real dispatch through the VPS: `tstock` registered from the workspace,
+  `POST /api/messages` → steward opened Thread「摸清 tstock 目录结构与入口文件」 → `start_worker`
+  to `isaac-mac` → pi ran read-only in `/Users/isaac/agent/tstock` → 5 outbound messages, every
+  `sh_run` settled `done`, `git status` in the repo stayed clean (0 files).
+  Observed, by design but worth knowing: the worker's first report hit the length limit, so the
+  steward re-ran the *same* worker with "re-send it smaller" — one extra worker run per long
+  report. Login-link minting also exercised: valid token → 303, unknown token → 410.
 
 ## P2 · Ops hardening (no domain needed)
 
