@@ -23,6 +23,29 @@ Known divergence to watch: the Node host differs from workerd on one dispatch or
 (`docs/design/node-host.md`), so a dispatch that looks "out of order" in a card list is expected
 to be cosmetic, not a bug.
 
+## Findings
+
+Real behaviour observed on the VPS that is not what a reader would assume:
+
+1. **Over budget swallows the result of dispatched work.** The cap is a cap on *wakes*, not on
+   messages: `skipWake` (`apps/steward/src/steward.ts`) marks the worker's completion wake
+   `skipped` and only counts it. Verified: with `DAILY_BUDGET_USD=0.05` and $0.10 spent, a
+   read-only task was dispatched (`worker_event settled`, report produced), the wake row went
+   `skipped`, `sh_usage_day.skippedWakes` became 1, and **no outbound message was ever queued** —
+   the owner never sees the answer. `renderOverBudgetNote` claims "完成汇报、失败提醒、汇总卡片照常",
+   which is true for deterministic cards but not for a worker that only reports. Either relay the
+   report straight through the cap, or say so in the note.
+2. **`sweepWorkers` is armed without `{ idempotent: true }`.** Every service start logs the SDK
+   warning (`Scheduling "sweepWorkers" during startup … can cause duplicate executions`); the
+   in-memory `lastSweepArmAt` guard in `armWorkerSweeps` cannot survive a process restart, so each
+   restart may add another row. Harmless so far (the sweep is a no-op pass), but `drainWakes`
+   already solves the same problem by cancelling tracked ids — the sweep should adopt one of the
+   two patterns.
+3. **One outbound row took 61 s longer than its neighbour.** Row 8 was created 00:19:17 and sent
+   00:20:18 (`attempts = 1`) while row 9, created 18 s later, went out immediately. Not explained
+   yet; nothing an owner would notice on a chat channel, but the claim/`nextAttemptAt` path is
+   worth a look before it matters on a notifier with retries.
+
 ## Log
 
 - **2026-11-08** — VPS deployed under systemd on `127.0.0.1:8787`; the gateway model answered a
@@ -37,6 +60,16 @@ to be cosmetic, not a bug.
   Observed, by design but worth knowing: the worker's first report hit the length limit, so the
   steward re-ran the *same* worker with "re-send it smaller" — one extra worker run per long
   report. Login-link minting also exercised: valid token → 303, unknown token → 410.
+- **2026-11-09** — **Restart durability passes**: a `systemctl restart sig` at 00:18:21 landed
+  while worker `w_01M6XZ7BDC5Y5J9KFJ9PXKAZ4Y` was mid-run. The connector saw `connection_closed
+  1006`, reconnected (`welcomed`) 1 s later, the worker kept emitting progress (it lives on the
+  Mac, not the VPS), and its report was accepted after the restart — Thread went `waiting_you`
+  with the full answer, so in-flight work survives a steward restart even though the in-memory
+  worker registry does not.
+- **2026-11-09** — **Budget cap behaves as documented for wakes**: `/花费` is answered without a
+  model call (`spent $0.09 / cap $0.05, 399,772 tokens`), an owner message still dispatched while
+  over budget, and the worker's settle wake was skipped once (`skippedWakes = 1`, `overNotedAt`
+  set). See Findings 1 for what that costs the owner. Cap restored to $1 afterwards.
 
 ## P2 · Ops hardening (no domain needed)
 
