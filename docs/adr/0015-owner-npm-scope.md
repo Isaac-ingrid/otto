@@ -26,7 +26,8 @@ published, and it is the only name where an npm account matters.
 Consequences. Nothing is migrated, deprecated or bridged: no version of this project was ever
 published under `@isaac2ingrid`, so `@isaac2ingrid/otto@0.2.0` is the first release and there is no
 upgrade path to write. Machines running the CLI from a checkout — which is how this deployment runs
-it — are unaffected. `apps/connector/README.md` keeps the publish runbook, including the fact that
-`publishConfig.registry` has to pin `registry.npmjs.org` because the local `~/.npmrc` points at the
-read-only `npmmirror`. Historical records (ADR-0001, ADR-0008, ADR-0013) keep the old scope names,
+it — are unaffected. `apps/connector/README.md` keeps the publish runbook: `publishConfig.registry` pins
+`registry.npmjs.org` for the upload, and `npm login` has to name that registry explicitly, because
+the local `~/.npmrc` points at `npmmirror`, which answers every auth write with `Public
+registration is not allowed` — an error about the mirror, not about the account. Historical records (ADR-0001, ADR-0008, ADR-0013) keep the old scope names,
 per the convention ADR-0002 set.

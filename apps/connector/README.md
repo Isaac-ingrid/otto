@@ -161,13 +161,17 @@ otto uninstall              # 移除服务，保留本地状态
 发布的是 `@isaac2ingrid/otto`，scope 就是 npm 账号名本身，所以账号必须先存在。
 
 ```sh
-npm login          # 先在 npmjs.com 注册 isaac2ingrid，再登录
+# 先在 npmjs.com 注册 isaac2ingrid（scope 等于账号名），再登录
+# 本机 npm 默认指向 npmmirror 镜像，登录必须显式改回官网
+npm login --registry=https://registry.npmjs.org
+npm whoami --registry=https://registry.npmjs.org   # 应打印 isaac2ingrid
 cd apps/connector
-npm publish        # publishConfig.registry 固定为 registry.npmjs.org
+npm publish        # publishConfig.registry 已固定为 registry.npmjs.org
 ```
 
-`publishConfig.registry` 是必要的：本机 `~/.npmrc` 指向 `registry.npmmirror.com`，那是只读镜像，
-写入会失败，而报错看起来像网络问题。发布前先改 `package.json` 的 `version`（升级版本时用
+镜像对 `/login`、`/adduser` 一律返回 `Public registration is not allowed`（npmmirror 上连
+`PUT /-/user/...` 都是 `[FORBIDDEN]`），所以这条报错跟账号无关，只说明命令打到了镜像。发布同理：
+`publishConfig.registry` 是必要的，否则写入会失败而报错看起来像网络问题。发布前先改 `package.json` 的 `version`（升级版本时用
 `otto upgrade`；当前是 0.2.0）。
 
 `@alexlikevibe/*` 那一支（`@alexlikevibe/sig@0.1.3` 等）属于上游作者自己的 npm 身份，不归本项目，
