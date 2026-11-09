@@ -98,6 +98,14 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## Log
 
+- **2026-11-09 (later)** — **P4 item 2 landed and is live** (#1): `subscribe_thread` →
+  `thread_events` / `thread_state` over the owner socket, `sh_timeline.id` as the resume cursor,
+  protocol §6.9. Deployed the rebuilt `dist/node/steward-node.mjs` (previous one kept on the box as
+  `steward-node.mjs.prev` for rollback), restarted, and verified through the SSH tunnel: a fresh
+  subscribe on the one live Thread returned its 5 rows in ascending order followed by
+  `thread_state`; a second subscribe with `after: 3` returned exactly `[4, 5]`; an unauthenticated
+  upgrade was refused before any frame. Nothing else was touched — no config, no key, no DB.
+
 - **2026-11-09** — **`SERVER_KEY` rotated** (`f4bc1a3d` → `3eb860d0`), the security item that was
   still open. Sequence, all through `deploy/rotate-key.sh`: `open` (new key as primary, old kept as
   `SERVER_KEY_PREVIOUS`, `/etc/otto/.dev.vars` rewritten, `otto` restarted), verify (the connector

@@ -87,6 +87,21 @@ pnpm build:node                                   # on the Mac
 
 The UI is shipped separately (`--copy apps/steward/ui /opt/otto/dist/ui`) and needs no restart.
 
+## Reload log after a code change
+
+`./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node` (after
+`pnpm --filter @isaac2ingrid/steward build:node`), then `systemctl restart otto`. The box keeps the
+bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
+
+```bash
+./deploy/remote.sh 'cp /opt/otto/dist/node/steward-node.mjs /opt/otto/dist/node/steward-node.mjs.prev'
+./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node
+./deploy/remote.sh 'systemctl restart otto && sleep 3 && systemctl is-active otto'
+```
+
+Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
+`apps/steward/ui` only needs re-copying when the page itself changes.
+
 ## Access today
 
 Bound to loopback only, so no port is exposed while there is no name and no cert:
