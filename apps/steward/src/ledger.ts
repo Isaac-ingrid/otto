@@ -231,7 +231,7 @@ export interface SilentWorker extends WorkerRow {
 export interface WakeRow {
   id: number;
   operationId: string;
-  kind: "event" | "routine" | "followup";
+  kind: "event" | "routine" | "followup" | "watchdog";
   dedupeKey: string;
   text: string;
   priority: "low" | "normal" | "high";
@@ -246,7 +246,7 @@ export interface WakeRow {
 /** One steward run (steward.md §6.3): a submitted input and how its outcome is handled. */
 export interface RunRow {
   operationId: string;
-  kind: "user" | "event" | "routine" | "followup" | "verify";
+  kind: "user" | "event" | "routine" | "followup" | "verify" | "watchdog";
   replyTo: string | null;
   channel: string | null;
   routedThreadId: string | null;

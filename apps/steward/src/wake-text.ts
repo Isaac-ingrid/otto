@@ -147,6 +147,41 @@ export function followupWakeText(
   ].join("\n");
 }
 
+/**
+ * The ⟦watchdog⟧ input (issue #3, steward.md §8.4): a run has gone silent and the core is
+ * about to hand the model ONE look at it before the deterministic verdict. Written from
+ * ledger facts only; the deadline it quotes is the core's, not the model's, and the wake
+ * says so explicitly — an answer of "wait" cannot extend it (bounded by construction: one
+ * wake per silent stretch, deduped on lastEventAt like the stall notice).
+ */
+export function watchdogWakeText(input: {
+  thread: ThreadRow;
+  worker: WorkerRow;
+  machine: MachineRow | null;
+  silentMinutes: number;
+  /** Minutes until the core reaps the run regardless of what happens here. */
+  verdictMinutes: number;
+  /** The user message that authorized the original dispatch (`user:<msgId>`), when known. */
+  provenanceRef: string | null;
+}): string {
+  const { thread, worker, machine } = input;
+  const progress = worker.lastProgress === null ? "（没有进展文本）" : escapeMarkers(worker.lastProgress.slice(0, 200));
+  const lines = [
+    `${MARK_OPEN}watchdog${MARK_CLOSE} thread=${thread.threadId} 「${thread.title}」 worker=${worker.workerId}`,
+    `- worker ${worker.workerId}（${worker.agent}@${machine?.name ?? worker.deviceId}）已经 ${input.silentMinutes} 分钟没有任何事件，机器在线，状态 ${worker.state}。最后一次进展：${progress}`,
+    "- 只是没有动静，不是失败也不是完成：不要说它失败、完成或已停，除非有事件证明。",
+    `- ${OWNER_NOTIFIED_LINE}是（已经发过「长时间没有任何动静」的模板通知），不要重复播报同一件事。`,
+    `- 你的判断改变不了兜底：${input.verdictMinutes} 分钟后仍无事件，核心会按既定规则把它判为失联（lost）并关掉这个 Thread。这段静默只问你这一次，回答「再等等」不会延长任何期限。`,
+    "- 你可以：",
+    input.provenanceRef === null
+      ? "  ① 重规划（不可用：这个 Thread 不是由用户消息开的，不能凭它派发）"
+      : `  ① 看出它跑偏或卡死的方式 → 用 start_worker 在同一 Thread 派一份改写的任务书（必须带 provenanceRef=${input.provenanceRef}，那是这次授权的来源；不写会按 §7.2 被拒）`,
+    "  ② 该由主人拍板（换做法、放弃、再等等）→ 用 ask_user，选项给可点的一项",
+    "  ③ 什么都不做 → 等上面那条兜底规则",
+  ];
+  return lines.join("\n");
+}
+
 /** The ⟦event⟧ wake for a `queue_returned` (connector-pi.md §6.2/§11.1): texts pi handed
  *  back at interrupt time never reached the worker — the steward decides their fate. */
 export function queueReturnedWakeText(input: {

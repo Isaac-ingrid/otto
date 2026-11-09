@@ -43,12 +43,21 @@ Cloudflare deployment ever becomes interesting again, `wrangler.jsonc` already s
 | `/opt/otto/dist/node/steward-node.mjs` | the esbuild bundle, built on the Mac and shipped (the box has 1.7 GB RAM — do not build here) |
 | `/opt/otto/dist/ui` | copy of `apps/steward/ui`; `createAssets` resolves `dist/ui` from the bundle's own directory |
 | `/opt/otto/node_modules/ws` | the bundle's only runtime dependency (`ws` is external by design) |
-| `/etc/otto/.dev.vars` | `SERVER_KEY`, `LOGIN_PASSWORD`, `MODEL_KEY`, `STEWARD_MODEL`, `DAILY_BUDGET_USD` |
+| `/etc/otto/.dev.vars` | `SERVER_KEY`, `LOGIN_PASSWORD`, `MODEL_KEY`, `STEWARD_MODEL`, `DAILY_BUDGET_USD`, `WATCHDOG_LLM` |
 | `/var/lib/otto/steward.sqlite` | the database (WAL) |
 | `/etc/systemd/system/otto.service` | `User=otto`, `Restart=always`, binds `127.0.0.1:8787` |
 
 `OTTO_CONFIG_DIR=/etc/otto` is not optional: the default is derived from the bundle location and
 would look for `.dev.vars` above `/opt/otto`.
+
+### The watchdog ask (off unless asked for)
+
+`WATCHDOG_LLM=1` in `/etc/otto/.dev.vars` lets the steward take one look at a run that has gone
+quiet for 20 minutes and re-plan it (`start_worker` with a rewritten brief) or ask the owner —
+before the deterministic 45-minute verdict decides. Unset keeps the old behaviour exactly. It
+costs one model call per silent stretch, and it rides the ordinary wake queue, so
+`DAILY_BUDGET_USD` caps it like everything else. Turn it off again by deleting the line and
+restarting `otto`.
 
 ## Model
 

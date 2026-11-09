@@ -94,7 +94,7 @@ import {
   type FauxRequestRecord,
   type StewardModels,
 } from "./llm/models.ts";
-import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type TimelineRow, type WakeRow } from "./ledger.ts";
+import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type TimelineRow, type WakeRow, type WorkerRow } from "./ledger.ts";
 import { DeploymentAuth, deploymentSecrets, ownerAuthorized } from "./deployment-auth.ts";
 import { loginPage } from "./login-page.ts";
 import { renderChangeReports } from "./notes.ts";
@@ -127,7 +127,7 @@ import {
 } from "./report-template.ts";
 import { MIGRATIONS, runMigrations } from "./schema.ts";
 import { openSecret, sealSecret } from "./secretbox.ts";
-import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText, wakeOwnerNotified } from "./wake-text.ts";
+import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText, wakeOwnerNotified, watchdogWakeText } from "./wake-text.ts";
 import { WorkspaceError, cardOpen, cardView, type WorkspaceActionInput, type WorkspaceInput } from "./workspace.ts";
 import type { MachineDirectoryBrowseInput, MachineDirectoryInput, MachineDirectoryResult } from "./workspace-api.ts";
 import { WorkspaceStream } from "./workspace-stream.ts";
@@ -2854,6 +2854,9 @@ export class Steward extends Agent<Env> {
   protected reapOfflineMs = REAP_OFFLINE_MS;
   protected reapSilentMs = REAP_SILENT_MS;
   protected workerSweepIntervalS = WORKER_SWEEP_INTERVAL_S;
+  /** Issue #3: ask the model for a re-plan at the stall alarm (env WATCHDOG_LLM). `undefined`
+   *  means "read the deploy var"; tests set it directly, like the thresholds above. */
+  protected watchdogLlm: boolean | undefined;
   /** In-memory dedupe of pending schedule() rows (the SDK fires every row; see armWorkerSweeps). */
   private lastSweepArmAt = 0;
   /** Set while onStart drops the predecessor isolate's sweep rows; arming waits it out. */
@@ -3023,7 +3026,13 @@ export class Steward extends Agent<Env> {
           continue;
         }
         if (silentMs >= this.stallAlarmMs) {
-          if (this.ledger.workers.notifyStall(worker.workerId, silentMs)) stalled += 1;
+          if (this.ledger.workers.notifyStall(worker.workerId, silentMs)) {
+            stalled += 1;
+            // Issue #3: the owner's notice has gone out deterministically; the model now gets
+            // ONE look at the same silence while there is still time before the 45-min
+            // verdict. It changes nothing about that verdict — see reapWatchdogMinute.
+            if (this.watchdogLlmOn) this.queueWatchdogWake(worker, silentMs);
+          }
         }
       }
       // A settled queue-timeout queues a failure push (markStartFailed); drain for reaps too.
@@ -3033,6 +3042,45 @@ export class Steward extends Agent<Env> {
       this.armWorkerSweeps();
     }
     return { stalled, reaped };
+  }
+
+  /** Whether the watchdog ask is enabled for this deployment (env WATCHDOG_LLM, issue #3). */
+  private get watchdogLlmOn(): boolean {
+    if (this.watchdogLlm !== undefined) return this.watchdogLlm;
+    const raw = this.env.WATCHDOG_LLM;
+    return raw === true || raw === "1" || raw === "true";
+  }
+
+  /**
+   * The LLM half of the §8.4 stall alarm (issue #3): queue one ⟦watchdog⟧ wake so the model
+   * can re-plan a stuck run before it is lost. Deliberately NOT a new verdict path:
+   * - the wake rides the ordinary wake queue, so the daily budget gate and the merge windows
+   *   apply unchanged (over budget → skipped, and nothing else on the path changes);
+   * - the dedupe key carries lastEventAt, exactly like the stall notice it follows, so a
+   *   stretch of silence is looked at once even across DO restarts, and a real event re-arms;
+   * - the reap sweep is untouched: 45 minutes of silence still ends the run whether the model
+   *   answered, re-planned, or never ran at all.
+   */
+  private queueWatchdogWake(worker: WorkerRow, silentMs: number): void {
+    const thread = this.ledger.threads.get(worker.threadId);
+    if (thread === null) return;
+    const machine = this.ledger.machines.get(worker.deviceId);
+    const origin = thread.createdFromMsg;
+    this.ledger.wakes.queue(
+      "watchdog",
+      `watchdog:${worker.workerId}:${worker.lastEventAt ?? 0}`,
+      watchdogWakeText({
+        thread,
+        worker,
+        machine: machine ?? null,
+        silentMinutes: Math.max(1, Math.round(silentMs / 60_000)),
+        verdictMinutes: Math.max(0, Math.round((this.reapSilentMs - silentMs) / 60_000)),
+        provenanceRef: origin === null || origin === undefined ? null : `user:${origin}`,
+      }),
+      { mergeMs: 0 },
+    );
+    this.logChannel("watchdog_asked", `${worker.workerId} silent=${Math.round(silentMs / 60_000)}m thread=${thread.threadId}`);
+    void this.drainWakes();
   }
 
   /** The outbox row's state/failReason for a worker's start_worker command, if it exists. */

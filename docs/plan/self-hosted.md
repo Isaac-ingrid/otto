@@ -98,6 +98,17 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## Log
 
+- **2026-11-09 (later, 2)** — **P4 item 1 landed: the ⟦watchdog⟧ ask** (#3, off by default).
+  `sweepWorkers` reuses the stall pass it already runs: the same silence that emits the template
+  notice now also queues one `⟦watchdog⟧` wake per stretch (`dedupeKey =
+  watchdog:<workerId>:<lastEventAt>`, durable like the notice), quoting the minutes left before
+  the 45-minute reap and the `user:<msgId>` a re-plan needs. The model decides with ordinary tools
+  (`start_worker` / `ask_user` / `no_action`); nothing can postpone the verdict and the ask passes
+  through the same budget gate as every other wake. 6 new tests pin both halves — off ⇒ no wake
+  and the old path untouched; on ⇒ one ask per stretch, re-armed by a real event, skipped over
+  budget, and a re-plan that really dispatches (verified through the scripted model, which resumes
+  the session and restarts the stall clock). Typecheck clean, full suite green.
+
 - **2026-11-09 (later)** — **P4 item 2 landed and is live** (#1): `subscribe_thread` →
   `thread_events` / `thread_state` over the owner socket, `sh_timeline.id` as the resume cursor,
   protocol §6.9. Deployed the rebuilt `dist/node/steward-node.mjs` (previous one kept on the box as
@@ -211,8 +222,12 @@ machine that was paired against the tunnel URL (the URL is part of the pairing).
 Only after the flows above are boring:
 
 1. **LLM watchdog session** — the current watchdog is deterministic; the interesting Super-agent
-   idea is a second model pass that decides whether a stuck run should be re-planned. (#3;
-   the deterministic path must stay the floor.)
+   idea is a second model pass that decides whether a stuck run should be re-planned. ✅ landed
+   (#3, steward.md §8.4): at the 20-minute stall alarm the core queues one `⟦watchdog⟧` ask per
+   silent stretch (durable dedupe on `lastEventAt`) carrying the dispatch's `provenanceRef` and
+   the deadline left; the model may re-plan (`start_worker`), ask the owner, or do nothing. The
+   45-minute verdict is untouched, the ask rides the ordinary wake queue (budget gate included),
+   and `WATCHDOG_LLM` unset = today's behaviour byte for byte — hence shipped **off**.
 2. **Thread subscription passthrough** — let a watcher subscribe to a running thread instead of
    polling the ledger. ✅ DO side landed (#1, protocol §6.9): `subscribe_thread` → `thread_events`
    with `sh_timeline.id` as the resume cursor, plus `thread_state` on change. The workspace page

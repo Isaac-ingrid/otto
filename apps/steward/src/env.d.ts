@@ -26,6 +26,10 @@ interface Env {
   // Issue #28 (steward.md §12): USD per UTC day for the daily budget soft cap. Unset →
   // budget.ts DEFAULT_DAILY_BUDGET_USD; 0 disables automatic model wakes entirely.
   DAILY_BUDGET_USD?: string | number;
+  // Issue #3 (steward.md §8.4): let the model look at a stalled run once per silent stretch
+  // and re-plan it before the deterministic 45-minute verdict. Unset/0 = off (today's path
+  // exactly); 1 = ask. Either way the verdict itself stays deterministic.
+  WATCHDOG_LLM?: string | boolean;
   // Preview deployments can loosen the shared PR sign-in link. Unset values keep the
   // production policy: 15 minutes and one use.
   LOGIN_LINK_TTL_MS?: string | number;
@@ -41,6 +45,10 @@ declare namespace Cloudflare {
     MODEL_KEY?: string;
     STEWARD_MODEL?: string | { provider?: unknown; modelId?: unknown; baseUrl?: unknown };
     DAILY_BUDGET_USD?: string | number;
+  // Issue #3 (steward.md §8.4): let the model look at a stalled run once per silent stretch
+  // and re-plan it before the deterministic 45-minute verdict. Unset/0 = off (today's path
+  // exactly); 1 = ask. Either way the verdict itself stays deterministic.
+  WATCHDOG_LLM?: string | boolean;
     LOGIN_LINK_TTL_MS?: string | number;
     LOGIN_LINK_REUSABLE?: string | boolean;
   }

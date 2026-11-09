@@ -431,7 +431,7 @@ Workers in the `lost` / `broken` states do not count as running; `broken` produc
 | Command `ambiguous` (§4.2/#15) | timeline note | none | yes (high priority; `ask_user` whether to re-issue; never re-send) |
 | `cmd_result` failed `session_in_use` / `not_delivered` (#15) | timeline note | none | yes (high priority; tell the user; re-issue only on their confirmation) |
 | Machine offline / online | Mark that machine's workers `unreachable` | Only when in-flight tasks are affected; 2-minute debounce | no |
-| Stall (§8.4) | timeline | Reports once: "X has shown no activity for N minutes" | no |
+| Stall (§8.4) | timeline | Reports once: "X has shown no activity for N minutes" | only with `WATCHDOG_LLM=1`, once per stretch, and never to postpone the 45-minute verdict (§8.4) |
 
 > **Machine status, as implemented (issue #14).** A real disconnect marks the machine's
 > in-flight workers `unreachable` — a flag alongside the execution state, so nothing
@@ -596,6 +596,14 @@ A non-null `createdFromMsg` is the data-layer guarantee of the spec's rule that 
 ### 8.4 Stall detection
 
 Every running worker gets an alarm at `lastEventAt + 20 minutes` (configurable). Every arriving event rewrites that time. If the alarm fires and the worker still has no events → the core emits one stall notification (template) and writes a timeline entry; a given stall notifies only once, and the timer resets once the worker emits again. `progress` events are already throttled on the connector side, so 20 straight minutes of total silence means the agent is stuck in a very long tool call or the process is dead — worth a nudge.
+
+**The stalled run also gets one look from the steward** (`WATCHDOG_LLM=1`; off by default — issue #3). In the same pass that emits the notice, the core queues a `⟦watchdog⟧` wake for that worker with three facts: what is silent and since when, the deadline left before the verdict, and the user message that authorized the original dispatch (as the `provenanceRef` a re-plan needs, §7.2 — a Thread with no such message offers no re-plan at all). The model's options are the ordinary tools: `start_worker` in the same Thread with a rewritten brief, `ask_user` when the owner should decide, or `no_action`. Three boundaries hold this in place:
+
+- **The verdict does not move.** 45 minutes of silence (or a measured 10-minute offline) still ends the run, whatever the model did — so "wait a bit longer" is not an action, and the wake says so in as many words. Nothing here can postpone a reap, and no test may grow such a path.
+- **Bounded by construction.** The wake's dedupe key carries `lastEventAt`, exactly like the notice it rides behind: one ask per silent stretch, durable across DO restarts, re-armed only by a real event.
+- **No new gate.** The ask is an ordinary wake row, so the daily budget cap and its `skipped` outcome (§12) apply unchanged. Budget exhausted → the model is never asked and the deterministic half runs alone.
+
+The answer is auditable after the fact: the run exists with `kind=watchdog` in `sh_run` and its tool calls (dispatch, question) are in the timeline like any other. `WATCHDOG_LLM` unset keeps today's behaviour byte for byte, which is what every non-watchdog test asserts.
 
 ### 8.5 Suggesting new routines
 
