@@ -33,6 +33,8 @@ curl -X POST https://otto.example.com/api/login-link  -H "$KEY"   # → one-time
 
 Follow-up work continues relay-style (spec §5.3): the same agent on the same machine **resumes the previous session**, while a machine/agent switch, a bloated context (≥ 80%), or your explicit ask for a fresh perspective starts a **new session on the previous worker's branch**, prefixed with a deterministic handoff brief. You can also reach a worker mid-run — 「改用 pnpm」 goes out as a steer, 「停下那个」 aborts, and stopping only ever follows your explicit instruction.
 
+The owner API has no stop route: ending a reply is a workspace action ([ADR-0017](adr/0017-turns-are-serial-and-cancellable.md)), and a `POST /api/messages` sent while Otto is answering queues behind that reply instead of interrupting it.
+
 Two exact phrases stay deterministic and never reach the model — they mint credentials, so they must work without one: `/加机器` (also `/添加机器`, `/add-machine`) answers with the connect command, and `/网页` (also `/web`, `/login`) answers with a one-time login link. The same things exist as the `/api/pairing` and `/api/login-link` routes above.
 
 ## Local coding agents
@@ -41,7 +43,11 @@ Two exact phrases stay deterministic and never reach the model — they mint cre
 
 ## The web workspace
 
-`/app` is the owner's everyday entry ([ADR-0004](adr/0004-web-workspace.md)): one continuous conversation — the same local channel the owner API serves — with the Threads behind it, a "Needs you" view over open decisions (questions, PR consent, offline asks, routine and memory suggestions), machines and pairing, and the day's model spend against the budget cap. The page is plain HTML/CJS/ES modules with no frontend build and a CSP that forbids inline script and every other origin; it stays current over a browser WebSocket nudge and can show a reply as it is being written. The interface is English by default with an in-page EN/中文 switch.
+`/app` is the owner's everyday entry ([ADR-0004](adr/0004-web-workspace.md)): one continuous conversation — the same local channel the owner API serves — with the Threads behind it, a "Needs you" view over open decisions (questions, PR consent, offline asks, routine and memory suggestions), machines and pairing, and the day's model spend against the budget cap. The page is plain HTML/CJS/ES modules with no frontend build and a CSP that forbids inline script and every other origin; it stays current over a browser WebSocket nudge and can show a reply as it is being written. The interface is English by default with an in-page EN/中文 switch, on one dark instrument-panel surface ([ADR-0016](adr/0016-dark-instrument-panel-theme.md)).
+
+One turn at a time, and you can end it ([ADR-0017](adr/0017-turns-are-serial-and-cancellable.md)). A message sent while Otto is answering is queued — it is written to the run ledger before it is handed to the agent, so it survives a restart, and it is answered after the current reply rather than interrupting it. The "Otto is working" row carries a **stop** control: it withdraws a queued turn, or aborts the one being written, and answers with one line saying so. A stopped turn is not a failure — nothing is dispatched a second time, no failure notice arrives, and dispatches already made keep running (stopping a worker is `interrupt_worker`'s job, and the notice says so). Typing "stop" into the conversation is not a command yet; it would queue behind the turn it wants to end.
+
+A Thread that is open in the workspace is also **followed live** ([protocol §6.9](design/connector-do-protocol.md)): the page asks the steward to subscribe the connection to that Thread, and new timeline rows, worker states and events are pushed as they happen instead of being polled. The snapshot stays authoritative — pushed rows are merged into it by id, so a row is never drawn twice — and an explicit refetch still follows every workspace change, just later and coalesced while the subscription is live.
 
 Open the deployment URL and sign in with the deployment password or a registered passkey. Either method creates a seven-day browser session. Existing explicit-key deployments can still use `POST /api/login-link` for a single-use login link. See [browser access and recovery](deploy.md#opening-the-web-workspace).
 

@@ -34,7 +34,10 @@ script or style — `test/ui-modules.test.ts`), the CSP stays `default-src 'none
 pure CSS plus two `<meta>` tags, so it deploys with the static `ui/` copy and needs no bundle swap.
 
 Consequences. Legacy light-era rules stay in `workspace.css` underneath the dark root block and the
-appended "instrument panel" layer; the mechanical conversion of 270 colour literals is complete, but
-dead selectors (`decision-*`, `attention-item`, `process`, `raw-entry`, `machine-help`, `text-button`,
-`tiny-mark`, `brand-wordmark`) can still be pruned. Dark is now the only theme — there is no
-`prefers-color-scheme` branch to maintain.
+appended "instrument panel" layer; the mechanical conversion of 270 colour literals is complete. The
+dead selectors listed here were pruned later (`decision-*`, `attention-*`, `process`, `raw-entry`,
+`machine-help`, `machine-work`, `model-advanced`, `model-preview`, `live-label`, `stop-button`,
+`tiny-mark`, `brand-wordmark` — 18 classes, 43 lines of rules, 960 → 917 lines of CSS); `text-button` turned out to
+be live and stayed. What remains unreferenced is only what a template builds at runtime
+(`is-${speaker}`, `.machine-card`, `.scope-option`, `.connection-result`). Dark is now the only
+theme — there is no `prefers-color-scheme` branch to maintain.

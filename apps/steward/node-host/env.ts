@@ -5,6 +5,11 @@
  * and `wrangler secret put` (secrets). Here it is assembled from the same sources a local
  * `wrangler dev` would read — `process.env` first, then `.dev.vars` — plus a filesystem-backed
  * `ASSETS` binding over `apps/steward/ui` and an in-memory login rate limiter.
+ *
+ * The name list below is the `process.env` half only (a var set in the unit or shell); anything
+ * present in `.dev.vars` is read too, whatever its name. A new var the steward reads must be
+ * added here as well, or it will be silently invisible when it is exported rather than written
+ * to the file. `src/env.d.ts` is the list of record.
  */
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
@@ -38,6 +43,7 @@ export async function loadVars(options: { cwd: string; devVarsPath?: string }): 
     "MODEL_KEY",
     "STEWARD_MODEL",
     "DAILY_BUDGET_USD",
+    "WATCHDOG_LLM",
     "LOGIN_LINK_TTL_MS",
     "LOGIN_LINK_REUSABLE",
   ];

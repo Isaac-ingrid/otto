@@ -8,7 +8,9 @@
 
 <p align="center">English · <a href="README.zh-CN.md">简体中文</a></p>
 
-Otto is a self-hosted **personal agent** built on **pi-durable** and **Cloudflare Durable Objects**. It lives in your Cloudflare account, remembers your conversations and ongoing work, and connects to coding agents on your own machines.
+Otto is a self-hosted **personal agent** built on **pi-durable** and **Cloudflare Durable Objects**. It remembers your conversations and ongoing work, and connects to coding agents on your own machines.
+
+It runs either **in your own Cloudflare account** — one Worker and a Durable Object, nothing to operate — or as **a single Node process on a machine you own**, with one SQLite file you can copy ([self-hosted guide](docs/self-hosted.md)). The web workspace, the connector and the two surfaces are the same in both.
 
 The name is just a name: short, the same word in every language, and quick to type as a command. The mark is the same word, drawn.
 
@@ -16,11 +18,12 @@ Talk to Otto in its web workspace. Ask it to work on a repository, follow up on 
 
 - **One conversation across machines.** Keep track of tasks, follow-ups, and decisions in one place.
 - **Your agents, on your computers.** Use pi, or Claude Code when installed, in repositories you choose to connect.
-- **Context that lasts.** Conversation and task state persist in the Durable Object. Full coding-agent session records stay on the machine and can be viewed while it is online.
+- **Context that lasts.** Conversation and task state persist server-side (a Durable Object, or the SQLite file on your own box). Full coding-agent session records stay on the machine and can be viewed while it is online.
+- **Say what you meant, then stop it if you didn't.** One reply runs at a time; a queued message waits its turn, and the working row carries a stop control.
 
 ## Get started
 
-Deploy Otto into your Cloudflare account first, then connect a machine where you want work to run. You will need a Cloudflare account and a model-provider API key for Otto; Node.js **22.18+** is needed only for the agent path below and for the connector. The connector supports **macOS and Linux** and needs a local coding agent with its own authentication configured.
+Deploy Otto first — into your own Cloudflare account, or on a machine you own — then connect a machine where you want work to run. You will need a model-provider API key for Otto, and a Cloudflare account unless you self-host; Node.js **22.18+** is needed only for the agent path below, and for the connector. The connector supports **macOS and Linux** and needs a local coding agent with its own authentication configured.
 
 ### 1. Deploy your personal agent
 
@@ -56,6 +59,15 @@ separately using the connector setup prompt.
 ```
 
 **Done when:** the web workspace opens and Otto replies to your first message. You can talk to Otto before connecting any machines.
+
+**Or run it on your own machine.** No Cloudflare account: the same steward runs as one Node process beside its SQLite file, behind nginx or an SSH tunnel.
+
+```sh
+pnpm install && pnpm --filter @isaac2ingrid/steward build:node
+# → ship dist/node/steward-node.mjs + ui/, set LOGIN_PASSWORD, start it under systemd
+```
+
+The [self-hosted guide](docs/self-hosted.md) covers the secrets file, the unit, TLS, upgrades, rollback and backups.
 
 ### 2. Connect your computer
 
@@ -93,7 +105,7 @@ Once a machine is connected, try:
 >
 > “Continue the previous task, and use pnpm this time.”
 
-The workspace brings together messages, task threads, decisions that need you, connected machines, and session records. Its interface supports English and Chinese.
+The workspace brings together messages, task threads, decisions that need you, connected machines, and session records. Replies appear as they are written, a message sent mid-answer queues behind it instead of interrupting, and the working row can stop that answer. Its interface supports English and Chinese.
 
 ## How it fits together
 
@@ -101,10 +113,13 @@ The workspace brings together messages, task threads, decisions that need you, c
 
 The cloud agent uses **`@earendil-works/pi-durable`** for its agent runtime and a **Cloudflare Durable Object** for persistent state and coordination. Each connector maintains a WebSocket connection, starts local coding-agent sessions, and reports progress back to Otto. Your code and full session files stay on the machine; local coding agents use their configured model providers as usual.
 
+The Cloudflare binding is the default, not a requirement: `apps/steward/node-host/` provides `ctx.storage`, alarms and sockets over `node:sqlite`, so the same `src/` runs on a plain Node process ([design](docs/design/node-host.md)).
+
 ## Go further
 
 - [Deploy runbook](docs/agent-deploy.md) · [Connector runbook](docs/agent-connect.md) — instructions for your coding agent.
 - [Deployment guide](docs/deploy.md) — manual deployment, model configuration, custom domains, costs, and updates.
+- [Self-hosted runbook](docs/self-hosted.md) — the same steward on your own box: systemd, nginx, TLS, backups, upgrades.
 - [Usage and API](docs/usage.md) — owner API, local agent behavior, and session viewing.
 - [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Routing eval](docs/routing-eval.md) — for contributors.
 

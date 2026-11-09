@@ -4,6 +4,8 @@ A Otto deployment lives entirely in **your own Cloudflare account**: one Worker 
 
 Open the deployment URL to use the web workspace. Sign in with your deployment password or a registered passkey. Existing deployments can also use their `SERVER_KEY`-gated [owner API](usage.md#the-owner-api). [ADR-0010](adr/0010-browser-password-authentication.md) describes browser authentication and recovery.
 
+Cloudflare is one of two shapes. If you would rather not use it at all, the same steward runs as a single Node process beside its SQLite file on a machine you own — same workspace, same connector, no `wrangler`: [running Otto on your own machine](self-hosted.md).
+
 ## Two ways to deploy
 
 - **From a checkout** — deploy from your local clone straight into your own account. The hosted Deploy-to-Cloudflare button needs a public mirror of this repository; [ADR-0012](adr/0012-deploy-button-primary.md) records that channel.

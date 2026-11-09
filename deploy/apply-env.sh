@@ -6,6 +6,9 @@
 #
 # Only the keys the steward reads are forwarded; SSH settings (and anything else in the file)
 # stay local. No value is ever printed — the summary is name + length.
+#
+# It rewrites /etc/otto/.dev.vars wholesale: a key set by hand on the server disappears unless it
+# is also in aliyun.env and in WANTED below. Keep the two lists in step with src/env.d.ts.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -13,7 +16,8 @@ cd "$(dirname "$0")/.."
 python3 - <<'PY' > /tmp/otto-dev-vars.$$
 import re
 WANTED = ["SERVER_KEY", "SERVER_KEY_PREVIOUS", "LOGIN_PASSWORD", "MODEL_KEY",
-          "STEWARD_MODEL", "DAILY_BUDGET_USD", "LOGIN_LINK_TTL_MS", "LOGIN_LINK_REUSABLE"]
+          "STEWARD_MODEL", "DAILY_BUDGET_USD", "WATCHDOG_LLM", "LOGIN_LINK_TTL_MS",
+          "LOGIN_LINK_REUSABLE"]
 values = {}
 for line in open("deploy/aliyun.env"):
     match = re.match(r"^([A-Z_]+)=(.*)$", line.rstrip("\n"))

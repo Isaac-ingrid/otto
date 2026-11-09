@@ -24,6 +24,10 @@ _Avoid_: calling it "the bot" or "the webhook".
 One rendered item the owner reads (text plus optional opaque-action buttons) — an outbound row settled locally; a quiet-merged group shares one id and reads as one message.
 _Avoid_: "card" for anything chat-provider-specific.
 
+**Turn**:
+One owner message together with the steward’s answer to it, from the moment it is queued to the moment it is answered. Turns in the root conversation are **serial** ([ADR-0017](docs/adr/0017-turns-are-serial-and-cancellable.md)): a message sent while one is running queues behind it, and the owner can end the running turn, which cancels it — a cancelled turn is not a failed one, and work already dispatched keeps running. A turn is durable before it can run, so a queued turn survives a restart.
+_Avoid_: request, job; a *task* is the work a worker does.
+
 **Thread (事项)**:
 An ongoing matter with a goal and history, potentially carried by several worker sessions. It remains available for follow-up when idle.
 _Avoid_: A separate chat, completed task.

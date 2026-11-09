@@ -98,6 +98,36 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## Log
 
+- **2026-11-10 (docs pass)** — **The docs caught up with the code, and the dead CSS is gone.**
+  Everything since P1 had been recorded in this plan and in ADRs but not where a reader starts:
+
+  - **[docs/self-hosted.md](../self-hosted.md) is new** — the box-agnostic runbook for running the
+    same steward as one Node process (what to build and ship, the secrets file, the systemd unit,
+    nginx and TLS with the two headers that are not optional, first sign-in and pairing, upgrades
+    and rollback, backups, cost behaviour, hardening, and a troubleshooting table). `deploy/NOTES.md`
+    stays this box's record and now points at it.
+  - **README (both languages)** no longer claims Otto *lives in* a Cloudflare account: the two
+    deployment shapes are named up front, the self-hosted path is an alternative under "Get
+    started", and the workspace description says replies stream, a mid-answer message queues, and
+    the working row can stop the answer.
+  - **usage.md** gained three paragraphs' worth of behaviour that existed only in ADRs: serial turns
+    and the stop control, live Thread following (§6.9), and the fact that the owner API has no stop
+    route.
+  - **Two real bugs the docs pass turned up.** `node-host/env.ts`'s `process.env` whitelist was
+    missing `WATCHDOG_LLM`, so enabling the watchdog by exporting it (in the unit) was silently
+    ignored — only `.dev.vars` worked. And `deploy/apply-env.sh`'s `WANTED` list would have dropped
+    the box's hand-set `WATCHDOG_LLM=1` on the next rewrite of `/etc/otto/.dev.vars`; it is in both
+    lists now, and in `aliyun.env`, so a re-apply is idempotent rather than quietly disabling it.
+  - **CSS prune (ADR-0016 consequence).** 18 classes with no reference anywhere — `decision-*`,
+    `attention-*`, `process`, `raw-entry`, `machine-help`, `machine-work`, `model-advanced`,
+    `model-preview`, `live-label`, `stop-button`, `tiny-mark`, `brand-wordmark` — 43 lines, 960 → 917.
+    The audit is worth re-running by hand: two classes only *look* dead (`is-*` is built as
+    `` `sv-item is-${speaker}` ``, and `machine-card`/`scope-option`/`connection-result` live inside
+    template literals), so a naive grep for "not found" would have deleted live rules.
+  - **Smaller:** CONTEXT.md defines **Turn** (serial, durable, cancellable); spec.md's status block
+    records ADR-0016/0017; the Pip-era design sketch is marked historical; ADR-0016's consequence
+    paragraph records what was pruned and why the list it contained was slightly wrong.
+
 - **2026-11-10 (later)** — **P4 item 3 resolved: turns are serial and cancellable (ADR-0017, #2).**
   The issue asked to start the next turn before the previous one settles; the ADR explains why that
   is the wrong trade for this steward and what replaces it. The root transcript *is* the memory

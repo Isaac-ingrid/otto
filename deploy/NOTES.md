@@ -1,5 +1,9 @@
 # Otto on 115.29.164.8 (Aliyun ECS, Hangzhou)
 
+This is *this box's* record. The box-agnostic version of the same runbook — secrets file, unit,
+TLS, upgrades, backups, troubleshooting — is [docs/self-hosted.md](../docs/self-hosted.md); keep
+the two in step when a step changes shape rather than only changing here.
+
 Fresh notes for this box. Secrets live only in `deploy/aliyun.env` (untracked) and, on the
 server, `/etc/otto/.dev.vars` (root:otto, 0640). Nothing here is a credential.
 
@@ -57,7 +61,8 @@ quiet for 20 minutes and re-plan it (`start_worker` with a rewritten brief) or a
 before the deterministic 45-minute verdict decides. Unset keeps the old behaviour exactly. It
 costs one model call per silent stretch, and it rides the ordinary wake queue, so
 `DAILY_BUDGET_USD` caps it like everything else. Turn it off again by deleting the line and
-restarting `otto`.
+restarting `otto`. It lives in `deploy/aliyun.env` too, so `apply-env.sh` putting the file back
+cannot silently turn the watchdog off (it rewrites `.dev.vars` wholesale).
 
 ## Model
 
@@ -110,6 +115,11 @@ bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
 
 Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
 `apps/steward/ui` only needs re-copying when the page itself changes.
+
+What was shipped, newest first: `c11d787` — turns are serial and the working row can stop one
+(ADR-0017); the live check with a real turn streaming is recorded in `docs/plan/self-hosted.md`.
+Before that, `9d09ffa` — the dark instrument-panel theme (ADR-0016) — and `93c2b6a` — thread
+frames rendered in place of refetching.
 
 ## Access today
 

@@ -14,6 +14,11 @@
 > **Update (ADR-0010):** browser access now uses a deployment password or passkey at the public
 > root URL. The one-time-link statements below record the earlier Feishu-era design. Card detail
 > links remain; API-issued login links are now an explicit-key compatibility path.
+>
+> **Update (ADR-0016/0017):** the workspace is a dark instrument-panel surface, and the owner's
+> conversation is strictly **serial** — one turn at a time, queued by durability rather than
+> concurrency, and endable by the owner. §11 below is about workers running in parallel on a
+> machine, which is unaffected.
 > This document defines only **product requirements and boundaries** and does not cover specific technical implementation approaches. Technology-related assumptions and items to verify are collected in the "Items to Verify" section.
 
 ## 1. Overview

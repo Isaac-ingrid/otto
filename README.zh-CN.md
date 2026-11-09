@@ -8,7 +8,9 @@
 
 <p align="center"><a href="README.md">English</a> · 简体中文</p>
 
-Otto 是一个可自行部署的 **Personal Agent（个人智能体）**，基于 **pi-durable** 和 **Cloudflare Durable Objects** 构建。它运行在你自己的 Cloudflare 账号里，记住对话和进行中的任务，并连接你各台电脑上的 coding agent。
+Otto 是一个可自行部署的 **Personal Agent（个人智能体）**，基于 **pi-durable** 和 **Cloudflare Durable Objects** 构建。它记住你的对话和进行中的任务，并连接你各台电脑上的 coding agent。
+
+它既可以跑在**你自己的 Cloudflare 账号**里（一个 Worker 加一个 Durable Object，无需运维），也可以**是你自己机器上的一个 Node 进程**，状态就是一个可以随时拷走的 SQLite 文件（[自托管指南](docs/self-hosted.md)）。两种方式下，网页工作台、connector 和两个对外接口完全一致。
 
 名字没有缩写含义：短、在中英文里都读得顺，作为命令 `otto` 也顺手。图标就是这个词本身。
 
@@ -16,11 +18,12 @@ Otto 是一个可自行部署的 **Personal Agent（个人智能体）**，基�
 
 - **多台机器，一处对话。** 在同一个地方跟进任务、继续讨论、处理需要你决定的事情。
 - **用你自己的电脑和 agent。** 支持 pi，以及已安装的 Claude Code；由你选择开放哪些仓库。
-- **上下文持续保留。** 对话和任务状态保存在 Durable Object 中；coding agent 的完整会话记录留在本机，机器在线时可以查看。
+- **上下文持续保留。** 对话和任务状态保存在服务端（Durable Object，或自托管机器上的 SQLite 文件）；coding agent 的完整会话记录留在本机，机器在线时可以查看。
+- **说错了可以停下。** 回复一次只跑一条，中途发的消息会排在后面，正在回答的那一行上有停止按钮。
 
 ## 开始使用
 
-先把 Otto 部署到你的 Cloudflare 账号，再连接实际执行任务的电脑。你需要准备：Cloudflare 账号和供 Otto 使用的模型 API key；**Node.js 22.18+** 只有下面的 agent 路径和 connector 需要。Connector 支持 **macOS 和 Linux**，本地 coding agent 也需要安装并完成它自己的登录或模型配置。
+先把 Otto 部署起来——到你的 Cloudflare 账号，或到你自己的机器——再连接实际执行任务的电脑。你需要准备：供 Otto 使用的模型 API key；除自托管外还需要 Cloudflare 账号；**Node.js 22.18+** 只有下面的 agent 路径和 connector 需要（自托管的主机需要 Node 24）。连接器支持 **macOS 和 Linux**，本地 coding agent 也需要安装并完成它自己的登录或模型配置。
 
 ### 1. 部署你的 Personal Agent
 
@@ -56,6 +59,15 @@ wrangler deploy
 
 **完成标志：** 能打开网页工作台，Otto 能回复你的第一条消息。还没连接电脑时，也可以先和 Otto 对话。
 
+**或者部署到自己的机器上。** 不需要 Cloudflare 账号：同一个 steward 作为一个 Node 进程运行在它的 SQLite 文件旁边，前面挂 nginx 或直接走 SSH 隧道。
+
+```sh
+pnpm install && pnpm --filter @isaac2ingrid/steward build:node
+# → 把 dist/node/steward-node.mjs 和 ui/ 拷到目标机，配置 LOGIN_PASSWORD，用 systemd 启动
+```
+
+密钥文件、systemd 单元、TLS、升级回滚和备份都在[自托管指南](docs/self-hosted.md)里。
+
 ### 2. 连接你的电脑
 
 在**你希望 Otto 执行任务的那台电脑上**打开 coding agent，复制这段：
@@ -90,7 +102,7 @@ Connector 会主动连接 Otto，你无需给电脑开放入站端口。本地 a
 >
 > 「接着上次的任务做，这次用 pnpm。」
 
-工作台把消息、任务线程、待决事项、已连接的机器和会话记录放在一起，界面支持中英文切换。
+工作台把消息、任务线程、待决事项、已连接的机器和会话记录放在一起。回复会边写边出现，中途发的消息排在当前回答之后，正在回答的那一行可以停下这次回答。界面支持中英文切换。
 
 ## 它如何工作
 
@@ -98,10 +110,13 @@ Connector 会主动连接 Otto，你无需给电脑开放入站端口。本地 a
 
 云端 agent 使用 **`@earendil-works/pi-durable`** 运行，借助 **Cloudflare Durable Object** 持久化状态并协调任务。Connector 通过 WebSocket 保持连接，在本地启动 coding agent 会话，再把进度回传给 Otto。代码和完整会话文件留在本机；本地 coding agent 仍会照常使用它配置的模型服务。
 
+Cloudflare 是默认形态而不是前置条件：`apps/steward/node-host/` 用 `node:sqlite` 提供了 `ctx.storage`、定时器和 socket，同一份 `src/` 也能跑在普通 Node 进程上（[设计说明](docs/design/node-host.md)）。
+
 ## 进一步了解
 
 - [部署操作文档](docs/agent-deploy.md) · [Connector 操作文档](docs/agent-connect.md)：供你的 coding agent 执行。
 - [部署指南](docs/deploy.md)：手动部署、模型配置、自定义域名、费用和更新。
+- [自托管操作手册](docs/self-hosted.md)：在自己的机器上跑同一个 steward——systemd、nginx、TLS、备份与升级。
 - [使用说明与 API](docs/usage.md)：Owner API、本地 agent 行为和会话查看。
 - [架构设计](docs/design/steward.md) · [产品规格](docs/spec.md) · [路由评测](docs/routing-eval.md)：面向贡献者。
 
