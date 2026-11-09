@@ -98,6 +98,32 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## Log
 
+- **2026-11-10 (later)** — **P4 item 3 resolved: turns are serial and cancellable (ADR-0017, #2).**
+  The issue asked to start the next turn before the previous one settles; the ADR explains why that
+  is the wrong trade for this steward and what replaces it. The root transcript *is* the memory
+  (§1), so a forked second session would answer without the exchange it never saw and double the
+  chance of two turns dispatching the same work — the acceptance criterion the issue was actually
+  protecting ("one run per intent") holds better without it. What landed:
+
+  - **Stop.** `POST /app/api/turn/stop` (session + CSRF, idempotent on the browser's request id,
+    200 with the verdict) aborts the session: pi withdraws queued inputs and aborts the placed run.
+    `settleRun` maps pi's `aborted` to `sh_run.status = 'cancelled'` — its own terminal state, so
+    the failure notice, the settle-time dispatch check, and the reply-side relays (memory
+    ChangeReports, the once-a-day budget note) are all bypassed; the owner gets one deterministic
+    line instead, and workers already dispatched keep running (`interrupt_worker` owns those).
+  - **Ordering.** Two owner messages in quick succession still queue behind the live turn and answer
+    in submission order, each `reply:<operationId>` bound to its own message; `MAX_OPEN_USER_RUNS`
+    still refuses the 11th.
+  - **UI.** The "Otto is working" row carries a mono `STOP` control (`.stop-turn`), disabled while
+    the request is in flight; the copy is code-authored, uppercase by the label rule.
+
+  `test/turn-stop.test.ts` (6) pins all of it against the real Worker/DO with the scripted model,
+  including the withdrawal of a *queued* turn and the replayed "nothing is running" answer.
+  Verified on the box through the tunnel in a real browser: with a real turn streaming, the row
+  showed `Otto is working… STOP`; the click produced the stopped notice as the reply, `busy` went
+  false, `sh_run` read `cancelled/cancelled/aborted`, and exactly one `reply:` row was sent (no
+  failure notice, no partial reply). Cost of the probe: one short real turn.
+
 - **2026-11-10** — **P4 item 2 finished in the UI (#4) and the workspace restyled** (ADR-0016).
   `ui/thread-frames.js` is the pure half: `mergeTimeline` folds pushed rows into the snapshot by
   `sh_timeline.id` (dedupe + sort, so a row is never drawn twice), `applyThreadState` patches
