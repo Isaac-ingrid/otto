@@ -166,8 +166,21 @@ otto uninstall              # 移除服务，保留本地状态
 npm login --registry=https://registry.npmjs.org
 npm whoami --registry=https://registry.npmjs.org   # 应打印 isaac2ingrid
 cd apps/connector
-npm publish        # publishConfig.registry 已固定为 registry.npmjs.org
+npm publish --otp=123456   # publishConfig.registry 已固定为 registry.npmjs.org
 ```
+
+`--otp` 是必需的：账号 2FA 若是 "auth-and-writes"，一次性的登录 token 只够读，`npm publish`
+会被 403 拒绝（`Two-factor authentication or granular access token with bypass 2fa enabled is
+required to publish packages`），必须当场补上验证器里的 6 位码。
+
+不想每次翻验证器，就在 npmjs.com 上新建一个 **granular access token**：权限选 read and write、
+包范围只勾 `@isaac2ingrid/otto`、勾上 *bypass 2FA*（这类 token 最长 90 天），然后写进 `~/.npmrc`：
+
+```
+//registry.npmjs.org/:_authToken=npm_xxx
+```
+
+CI 和 `npm publish` 都能直接用。代价是它绕过 2FA，别往外传。
 
 镜像对 `/login`、`/adduser` 一律返回 `Public registration is not allowed`（npmmirror 上连
 `PUT /-/user/...` 都是 `[FORBIDDEN]`），所以这条报错跟账号无关，只说明命令打到了镜像。发布同理：
