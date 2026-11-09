@@ -151,9 +151,29 @@ Aliyun console (cloud monitor, threshold 80 %) — nothing on the box can raise 
 
 ## Secret hygiene
 
-`SERVER_KEY` is the root of every session, device token and sealed secret. If it was ever
-written somewhere it should not have been, rotate it *and* reset the database, since `sh_model`
-is sealed under it:
+`SERVER_KEY` is the root of every session, device token and sealed secret — and on this box it is
+an *explicit* key (`sh_auth_deployment.mode = explicit`), so it is also the owner API bearer. If it
+was ever written somewhere it should not have been, rotate it. Use the window, not a rebuild:
+
+```bash
+./deploy/rotate-key.sh status    # which key is where — ids only, never a secret
+./deploy/rotate-key.sh open      # SERVER_KEY=new, SERVER_KEY_PREVIOUS=old, restart
+./deploy/rotate-key.sh verify    # sealed row + connector token must both show the new id
+./deploy/rotate-key.sh close     # drop the previous key; the rotation is final
+```
+
+Why a window and not a reset: `sh_model.apiKeyEnc` is sealed as `v2.<keyId>…` and each connector’s
+device token is `st1.<keyId>…`, and both verifiers accept the previous key while
+`SERVER_KEY_PREVIOUS` is set (issue #27, `test/rotation.test.ts`). The sealed model key re-seals
+onto the primary on read; a reconnect makes the steward hand the connector a rekeyed token it
+persists (`client.ts` → `store.updateToken`). Restarting `otto` is what forces that reconnect.
+Swap under a single key without the window and the sealed model key stops opening (no model until
+`MODEL_KEY` is entered again) and every paired machine that has not reconnected must re-pair.
+`rollback` puts the old key back and is only meaningful while the window is open; after `close`
+the old key exists solely in the `0600` backup under `~/.local/state/otto-key-rotation/`.
+
+Reset the database instead — accepting that machines re-pair — only when the old key must die
+*now*, or on a generated-key deployment (no `SERVER_KEY` in the env, keys live in the owner DO):
 
 ```bash
 ./deploy/remote.sh 'systemctl stop otto && rm -f /var/lib/otto/steward.sqlite*'
