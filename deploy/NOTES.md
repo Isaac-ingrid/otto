@@ -27,6 +27,14 @@ mints a fresh device id). The stale `dev_c482db6a4879` rows — `sh_machine`, `s
 `sh_worker`, `outbox`, `device` — were deleted so the workspace shows one machine, not two.
 
 
+## Cloudflare side (optional, ADR-0014 follow-up)
+
+Nothing to clean up: `npx wrangler delete --name sig-steward` answers
+`This Worker does not exist on your account [code: 10007]` — the pre-rename Worker was never
+deployed to this account (the Cloudflare path stays as the upstream default, unused here). If a
+Cloudflare deployment ever becomes interesting again, `wrangler.jsonc` already says
+`name: otto-steward`, so it would land as a new Worker with a fresh DO.
+
 ## What is installed
 
 | Path | What |
