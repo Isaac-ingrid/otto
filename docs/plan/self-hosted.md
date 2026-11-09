@@ -76,7 +76,41 @@ Real behaviour observed on the VPS that is not what a reader would assume:
    five attempts from `203.0.113.5` then `429`, while `198.51.100.9` and the tunnel got their own
    `401`s and only the global 20/min bucket counted all of them.
 
+5. ~~**A rotation window could be opened but never closed.**~~ **Fixed 2026-11-09.**
+   `secretbox.ts` claims "callers re-seal under the primary key after a non-primary open (the
+   steward does this lazily on read)", but the only `openSecret` caller, `sealedKeyFor`, returned
+   the plaintext and never wrote it back — `setModelConfig` is the sole sealer, and it runs on an
+   owner-side save, not on a rotation. So the window worked, and closing it silently emptied the
+   model key: the selection survived as a keyless row (`apiKey: ""`) and runs would settle
+   `no_model` until the key was typed in again. `sealedKeyFor` now re-seals onto the primary when a
+   non-primary key opened the row, refreshing the legacy `sh_model` mirror in the same breath so
+   nothing stays sealed under a dead key. `test/rotation.test.ts` covers converge-on-read and the
+   read-never-happened case; the assertion that used to encode the loss is rewritten. Verified on
+   the box: the read moved both rows to `v2.3eb860d0…`, a real turn answered through the gateway,
+   and only then was `SERVER_KEY_PREVIOUS` dropped.
+6. **`test/generated-auth.test.ts` can never pass on this config.** Not VPS-specific, but it shows
+   up as 1 failed / 681 passed in the full suite: the file's header says it "runs in its own
+   no-`SERVER_KEY` workerd", yet `vitest.config.ts` binds `SERVER_KEY` for every file there is, so
+   its first assertion (`expect(env.SERVER_KEY).toBeUndefined()`) fails regardless of the change
+   under test. Confirmed pre-existing by stashing the working tree. Either the config needs a
+   second project with `SERVER_KEY` unset or the file needs a different way to reach generated-key
+   mode.
+
 ## Log
+
+- **2026-11-09** — **`SERVER_KEY` rotated** (`f4bc1a3d` → `3eb860d0`), the security item that was
+  still open. Sequence, all through `deploy/rotate-key.sh`: `open` (new key as primary, old kept as
+  `SERVER_KEY_PREVIOUS`, `/etc/otto/.dev.vars` rewritten, `otto` restarted), verify (the connector
+  reconnected on its own and stored a rekeyed `st1.3eb860d0…` token — `lastSeen` 2 s), deploy of
+  the Fix in Finding 5, one owner message (`在吗？…` → `在，Otto 在线待命，没有派发任何任务。`, so the
+  re-sealed key really does reach the gateway), `close` (window dropped, restart). Post-conditions
+  checked: new bearer `200`, old-style bearer `401`, `sh_provider_key` and `sh_model` both
+  `v2.3eb860d0…`, local token `st1.3eb860d0…`, one machine row, one thread. `git status` clean of
+  secrets; the old key now lives only in the `0600` backup under `~/.local/state/otto-key-rotation/`.
+  Two other things fell out: `deploy/aliyun.env` still named the pre-rename paths (`/opt/sig`,
+  `/var/lib/sig`) and said "Caddy"; and a leftover `sig.js connect … P9SAGY92 --foreground` test
+  process from 00:00 was still running on the Mac — killed before the window closed, since a stale
+  process reconnecting after it would have failed `4401`.
 
 - **2026-11-09** — **Login flows verified** and one real bug fixed. Wrong password → `401
   invalid_password`, right password → `200` with `otto_session` (HttpOnly, SameSite=Lax, 7 days),
@@ -142,10 +176,10 @@ Done by `deploy/harden.sh` (idempotent, re-runnable; details in NOTES.md):
   `active`, `http 200`, DB intact (3 threads), and an owner message after boot answered from
   the gateway — so `SERVER_KEY` unsealing still works on a cold start. Note the SSH tunnel dies
   with the box; `ssh -f -N -L 18787:127.0.0.1:8787 …` has to be re-run after any reboot.
-- **Rotate `SERVER_KEY`** — open, and it is the one remaining item with real exposure: the
-  current value was echoed into a chat transcript. Rotation is *not* just an env edit —
-  `sh_model` is sealed under it, so either reset the DB (`NOTES.md` → Secret hygiene) or set
-  `SERVER_KEY_PREVIOUS` to the old value to keep the sealed secrets and device tokens open.
+- **Rotate `SERVER_KEY`** ✅ **Done 2026-11-09** — rotated in place with the issue #27 window
+  (`deploy/rotate-key.sh open|verify|close`), no DB reset and no re-pairing: `f4bc1a3d` →
+  `3eb860d0`, and both the sealed provider key and the connector token had converged onto the new
+  id before the window was closed. Blocked until then by Finding 5.
 
 ## P3 · Public entry point (blocked on 备案)
 
