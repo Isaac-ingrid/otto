@@ -1,6 +1,6 @@
 # Sig branding with stable deployment and session identities
 
-Status: the keep-stable compatibility list below was superseded by [ADR-0009](0009-drop-shepherd-compatibility.md) once it became clear there would be no pre-rename users; the branding decisions (name, mark, `sig` command) stand.
+Status: the keep-stable compatibility list below was superseded by [ADR-0009](0009-drop-shepherd-compatibility.md) once it became clear there would be no pre-rename users; the branding decisions (name, mark, `sig` command) stood until [ADR-0014](0014-rename-to-otto.md) renamed the product to Otto.
 
 The product is **Sig**, derived from Sigma (∑). The public connector command is `sig`, superseding ADR-0001 decision 10; its npm scope is recorded in [ADR-0008](0008-nightboats-npm-scope.md). The original `bin/shepherd.js` entry remains a forwarding wrapper for service definitions pointing into a checkout. `SIG_HOME` and `SIG_MACHINE_NAME` take precedence over their `SHEPHERD_*` aliases. The default state directory stays `~/.shepherd`, so existing pairing credentials, workers and logs remain available without moving files.
 

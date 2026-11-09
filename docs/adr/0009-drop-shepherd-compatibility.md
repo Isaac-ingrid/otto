@@ -1,6 +1,6 @@
 # Drop the Shepherd compatibility layer
 
-Status: accepted and implemented. Supersedes the keep-stable list of [ADR-0002](0002-sig-brand-and-compatibility.md); ADR-0002's branding decisions (the name Sig, the ∑ mark, the `sig` command) stand unchanged.
+Status: accepted and implemented. Supersedes the keep-stable list of [ADR-0002](0002-sig-brand-and-compatibility.md); ADR-0002's branding decisions (the name Sig, the ∑ mark, the `sig` command) stood unchanged until [ADR-0014](0014-rename-to-otto.md) renamed the product to Otto.
 
 ADR-0002 kept every Shepherd-era identifier — the `~/.shepherd` state directory, `SHEPHERD_*` environment aliases, the `dev.shepherd.connector` service label, the `shepherd_session` cookie, the `shepherd-steward` Worker name, `@shepherd/*` package names, the `shepherd:keyid:v1` / `shepherd:channel-secret:v1` derivation strings, the `shepherd/` worker branch prefix, and the `/shepherd` extension command with its `shepherd.command` / `shepherd.report-reminder` entry types — so existing deployments, credentials and resumable sessions would keep working. The product has since had no external release and no users beyond the owner's own machines, so nothing in the wild depends on those names, while the mixed vocabulary was a standing source of confusion (user-facing copy still told the owner to run `shepherd upgrade` / `shepherd repo-config`, commands no fresh install ships). Everything ADR-0002 pinned is now renamed in one break:
 
