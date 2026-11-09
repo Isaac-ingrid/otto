@@ -185,6 +185,12 @@ codes——存进密码管理器，丢了要走 72 小时安全冻结的找回�
 npm publish --otp=123456
 ```
 
+改过 2FA 设置之后本机的旧 token 会立即失效（`npm profile get` 开始回 403），重新登录一次：
+
+```sh
+npm login --registry=https://registry.npmjs.org
+```
+
 不想每次翻验证器，就在 npmjs.com 上新建 granular access token：read and write、包范围只勾
 `@isaac2ingrid/otto`、勾 *bypass 2FA*（最长 90 天），写进 `~/.npmrc`：
 
