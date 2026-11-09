@@ -1,0 +1,29 @@
+[Unit]
+Description=Otto steward (Node host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otto
+Group=otto
+WorkingDirectory=/opt/otto
+Environment=OTTO_DB_PATH=/var/lib/otto/steward.sqlite
+Environment=OTTO_CONFIG_DIR=/etc/otto
+Environment=PORT=8787
+Environment=HOST=127.0.0.1
+Environment=NODE_ENV=production
+ExecStart=/usr/local/bin/node /opt/otto/dist/node/steward-node.mjs
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/otto
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=otto
+
+[Install]
+WantedBy=multi-user.target

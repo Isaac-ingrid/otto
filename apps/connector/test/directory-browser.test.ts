@@ -13,7 +13,7 @@ import { tmpDir } from "./helpers.ts";
 let dir: string;
 
 beforeEach(() => {
-  dir = realpathSync(tmpDir("sig-directory-browser"));
+  dir = realpathSync(tmpDir("otto-directory-browser"));
   vi.spyOn(os, "homedir").mockReturnValue(dir);
 });
 

@@ -290,11 +290,11 @@ describe("role fence (protocol §5.3)", () => {
 
   it("refuses a web-role upgrade without a valid session cookie (Worker-layer pre-check)", async () => {
     // The HMAC check in the Worker's onBeforeConnect rejects before the DO is ever woken.
-    await expect(connectWeb("sig_session=ws1.garbage.deadbeef")).rejects.toThrow(/web role connect failed: 401/);
+    await expect(connectWeb("otto_session=ws1.garbage.deadbeef")).rejects.toThrow(/web role connect failed: 401/);
   });
 
   it("closes a web-role upgrade whose session no longer exists (DO-layer liveness)", async () => {
-    const dead = `sig_session=${await sessionCookieValue("test-server-key-not-a-secret", "ab".repeat(32))}`;
+    const dead = `otto_session=${await sessionCookieValue("test-server-key-not-a-secret", "ab".repeat(32))}`;
     const res = await SELF.fetch("https://example.com/agents/steward/owner?role=web", {
       headers: { Upgrade: "websocket", cookie: dead },
     });

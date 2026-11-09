@@ -139,7 +139,7 @@ export function scriptForStartWorker(
     return { ok: false, error: { code: "bad_worker_id" } };
   }
   const threadId = typeof args.threadId === "string" ? args.threadId.replace(/[^a-zA-Z0-9._-]/g, "") : "preview";
-  const branch = `sig/${threadId || "preview"}-1`;
+  const branch = `otto/${threadId || "preview"}-1`;
   return {
     ok: true,
     workerId,

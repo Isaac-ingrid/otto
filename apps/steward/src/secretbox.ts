@@ -72,7 +72,7 @@ function deriveKey(serverKeySecret: string): Promise<CryptoKey> {
     .importKey("raw", enc.encode(serverKeySecret), "HKDF", false, ["deriveKey"])
     .then((hkdf) =>
       crypto.subtle.deriveKey(
-        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: enc.encode("sig:channel-secret:v1") },
+        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: enc.encode("otto:channel-secret:v1") },
         hkdf,
         { name: "AES-GCM", length: 256 },
         false,

@@ -65,7 +65,7 @@ let piLog: string;
 const workerIds = new Set<string>();
 
 beforeEach(async () => {
-  dir = tmpDir("sig-intervention-test");
+  dir = tmpDir("otto-intervention-test");
   stateDir = join(dir, "state");
   repo = await makeGitRepo(dir);
   store = new LocalStore(join(stateDir, "connector.sqlite"));

@@ -1,5 +1,5 @@
 // Build for the published npm package (issue #26): bundle the CLI into a single plain-JS
-// ESM file so `npx @alexlikevibe/sig` needs no TypeScript stripping and no workspace deps
+// ESM file so `npx @alexlikevibe/otto` needs no TypeScript stripping and no workspace deps
 // (@alexlikevibe/protocol and ws are bundled in; node: builtins stay external). The pi
 // extension is NOT bundled — pi loads it as a file — so it is copied verbatim to
 // dist/ext/, where install.ts resolves it via import.meta.url.
@@ -26,7 +26,7 @@ await build({
   logLevel: "info",
 });
 
-copyFileSync("src/ext/sig-pi.ts", "dist/ext/sig-pi.ts");
+copyFileSync("src/ext/otto-pi.ts", "dist/ext/otto-pi.ts");
 // The MCP report server is likewise loaded as a FILE (Claude Code spawns it per its
 // mcp-config), so it ships verbatim next to the extension (issue #17).
 copyFileSync("src/mcp/report-server.mjs", "dist/mcp/report-server.mjs");

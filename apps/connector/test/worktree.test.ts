@@ -10,7 +10,7 @@ let repo: string;
 let manager: WorktreeManager;
 
 beforeEach(async () => {
-  dir = tmpDir("sig-worktree-test");
+  dir = tmpDir("otto-worktree-test");
   repo = await makeGitRepo(dir);
   manager = new WorktreeManager({ worktreesRoot: join(dir, "worktrees") });
 });
@@ -20,9 +20,9 @@ afterEach(() => {
 });
 
 describe("WorktreeManager (connector-pi.md §8.2)", () => {
-  it("creates sig/<slug>-<n> from the local default-branch HEAD by default", async () => {
+  it("creates otto/<slug>-<n> from the local default-branch HEAD by default", async () => {
     const created = await manager.create({ repoPath: repo, threadId: "Fix the LOGIN bug!" });
-    expect(created.branch).toBe("sig/fix-the-login-bug-1");
+    expect(created.branch).toBe("otto/fix-the-login-bug-1");
     expect(created.path).toContain(join(dir, "worktrees"));
     expect(created.path).toMatch(/repo-a-[0-9a-f]{8}\/fix-the-login-bug-1$/);
     expect(created.base).toBe("main");
@@ -37,9 +37,9 @@ describe("WorktreeManager (connector-pi.md §8.2)", () => {
 
   it("increments n for the same thread and respects an explicit base", async () => {
     const first = await manager.create({ repoPath: repo, threadId: "fix-the-login-bug" });
-    expect(first.branch).toBe("sig/fix-the-login-bug-1");
+    expect(first.branch).toBe("otto/fix-the-login-bug-1");
     const second = await manager.create({ repoPath: repo, threadId: "fix-the-login-bug" });
-    expect(second.branch).toBe("sig/fix-the-login-bug-2");
+    expect(second.branch).toBe("otto/fix-the-login-bug-2");
 
     // Explicit base: a feature branch tip.
     await git(repo, ["branch", "feature-x"]);
@@ -98,7 +98,7 @@ describe("identifyWorkspace (issue #88: Git is a detected capability, not a requ
   });
 
   it("resolves a plain (non-Git) directory to its realpath, with a plain capability", async () => {
-    const plain = tmpDir("sig-plain-workspace-test");
+    const plain = tmpDir("otto-plain-workspace-test");
     const identity = await identifyWorkspace(plain);
     expect(identity.capability).toEqual({ kind: "plain" });
     expect(identity.repoId).toBe(await realpath(plain));

@@ -13,7 +13,7 @@ let mock: MockSteward;
 let port: number;
 
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "sig-connector-commands-"));
+  dir = mkdtempSync(join(tmpdir(), "otto-connector-commands-"));
   store = new LocalStore(join(dir, "connector.sqlite"));
   mock = startMockSteward();
   port = await mock.listen();

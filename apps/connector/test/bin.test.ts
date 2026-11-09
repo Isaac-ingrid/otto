@@ -1,6 +1,6 @@
-// Subprocess tests against the built bin (bin/sig.js → dist/cli.js), which pretest
-// builds. This is the `npx @alexlikevibe/sig` surface: the Node gate, --version, usage, and
-// the read-only subcommands on a clean SIG_HOME.
+// Subprocess tests against the built bin (bin/otto.js → dist/cli.js), which pretest
+// builds. This is the `npx @alexlikevibe/otto` surface: the Node gate, --version, usage, and
+// the read-only subcommands on a clean OTTO_HOME.
 import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,14 +12,14 @@ import { VERSION } from "../src/version.ts";
 import { LocalStore } from "../src/store.ts";
 
 const exec = promisify(execFile);
-const bin = join(import.meta.dirname, "..", "bin", "sig.js");
+const bin = join(import.meta.dirname, "..", "bin", "otto.js");
 
 let home: string;
 let stateDir: string;
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "sig-bin-home-"));
-  stateDir = mkdtempSync(join(tmpdir(), "sig-bin-state-"));
+  home = mkdtempSync(join(tmpdir(), "otto-bin-home-"));
+  stateDir = mkdtempSync(join(tmpdir(), "otto-bin-state-"));
 });
 
 afterEach(() => {
@@ -35,7 +35,7 @@ interface RunResult {
 
 function run(args: string[], extraEnv: Record<string, string | undefined> = {}): Promise<RunResult> {
   return exec(process.execPath, [bin, ...args], {
-    env: { ...process.env, HOME: home, SIG_HOME: stateDir, ...extraEnv },
+    env: { ...process.env, HOME: home, OTTO_HOME: stateDir, ...extraEnv },
     timeout: 30_000,
   }).then(
     ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
@@ -57,7 +57,7 @@ function seedRegisteredRepo(repo: string, directory = stateDir): void {
   }
 }
 
-describe("bin/sig.js (skipped when dist has not been built)", () => {
+describe("bin/otto.js (skipped when dist has not been built)", () => {
   beforeEach(() => {
     if (!existsSync(join(import.meta.dirname, "..", "dist", "cli.js"))) {
       throw new Error("dist/cli.js missing; run `npm run build` (pretest does this)");
@@ -89,7 +89,7 @@ describe("bin/sig.js (skipped when dist has not been built)", () => {
     expect(res.code).toBe(2);
     expect(res.stderr).toContain("Machines > Add directory");
     expect(existsSync(join(stateDir, "connector.sqlite"))).toBe(false);
-    expect(existsSync(join(home, ".sig", "connector.sqlite"))).toBe(false);
+    expect(existsSync(join(home, ".otto", "connector.sqlite"))).toBe(false);
   });
 
   it("rejects add-repo without changing existing registrations or local settings", async () => {
@@ -112,7 +112,7 @@ describe("bin/sig.js (skipped when dist has not been built)", () => {
   it("status on a clean machine reports unpaired and not installed", async () => {
     const res = await run(["status"]);
     expect(res.code).toBe(0);
-    expect(res.stdout).toContain(`sig ${VERSION}`);
+    expect(res.stdout).toContain(`otto ${VERSION}`);
     expect(res.stdout).toContain("not installed");
     expect(res.stdout).toContain("not paired");
   });
@@ -129,23 +129,23 @@ describe("bin/sig.js (skipped when dist has not been built)", () => {
     expect(res.stderr).toContain("no log file");
   });
 
-  it("SIG_HOME overrides the ~/.sig default", async () => {
+  it("OTTO_HOME overrides the ~/.otto default", async () => {
     const repo = await makeGitRepo(home);
     const defaultRepo = await makeGitRepo(home, "default-repo");
     seedRegisteredRepo(repo);
-    seedRegisteredRepo(defaultRepo, join(home, ".sig"));
+    seedRegisteredRepo(defaultRepo, join(home, ".otto"));
     const res = await run(["status"]);
     expect(res.code).toBe(0);
     expect(res.stdout).toContain("repo-a");
     expect(res.stdout).not.toContain("default-repo");
   });
 
-  it("continues using ~/.sig when no home setting is present", async () => {
+  it("continues using ~/.otto when no home setting is present", async () => {
     const repo = await makeGitRepo(home);
     const customRepo = await makeGitRepo(home, "custom-repo");
-    seedRegisteredRepo(repo, join(home, ".sig"));
+    seedRegisteredRepo(repo, join(home, ".otto"));
     seedRegisteredRepo(customRepo);
-    const res = await run(["status"], { SIG_HOME: undefined });
+    const res = await run(["status"], { OTTO_HOME: undefined });
     expect(res.code).toBe(0);
     expect(res.stdout).toContain("repo-a");
     expect(res.stdout).not.toContain("custom-repo");

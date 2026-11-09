@@ -1,4 +1,4 @@
-// The Sig web workspace: one continuous conversation, the threads behind it, and the decisions
+// The Otto web workspace: one continuous conversation, the threads behind it, and the decisions
 // waiting for the owner. This file is the view and the wiring; what to show is decided by the
 // pure helpers in model.js and format.js. Data comes from /app/api/workspace and is kept
 // current by a WebSocket that only says "something changed" (the page then refetches).
@@ -34,7 +34,7 @@ const state = {
   connection: 'connecting',
   fatal: null, // 'signed_out' | 'logged_out' | 'unreachable'
   knownAttention: new Set(),
-  live: null, // the reply Sig is writing right now: { text, threadId, ending }
+  live: null, // the reply Otto is writing right now: { text, threadId, ending }
   skew: 0, // server clock minus this browser's clock, so relative times agree with the server's timestamps
   session: null, // within the selected thread: the worker whose recorded session fills the main pane
   viewer: null, // { workerId, handle } while that pane is mounted
@@ -229,7 +229,7 @@ function userMessage(message) {
 
 function assistantMessage(message) {
   return h('article', { class: 'message', id: message.id },
-    h('div', { class: 'message-header' }, h('img', { class: 'agent-avatar', src: '/brand/sig.svg', width: 26, height: 26, alt: '' }), 'Sig', h('span', { class: 'message-time' }, formatClock(message.at))),
+    h('div', { class: 'message-header' }, h('img', { class: 'agent-avatar', src: '/brand/otto.svg', width: 26, height: 26, alt: '' }), 'Otto', h('span', { class: 'message-time' }, formatClock(message.at))),
     h('div', { class: 'message-body' },
       state.selected ? null : threadReference(message.threadId),
       message.card ? cardNode(message.card, message.id, message.open === true) : markup(message.text ?? '')));
@@ -238,7 +238,7 @@ function assistantMessage(message) {
 /** The reply being written, shown as it arrives; the finished message replaces it. */
 function liveMessage(live) {
   return h('article', { class: 'message live', id: 'live-reply' },
-    h('div', { class: 'message-header' }, h('img', { class: 'agent-avatar', src: '/brand/sig.svg', width: 26, height: 26, alt: '' }), 'Sig'),
+    h('div', { class: 'message-header' }, h('img', { class: 'agent-avatar', src: '/brand/otto.svg', width: 26, height: 26, alt: '' }), 'Otto'),
     h('div', { class: 'message-body' }, markup(trimOpenMarkup(live.text)), h('span', { class: 'working-dots' }, h('i'), h('i'), h('i'))));
 }
 
@@ -996,7 +996,7 @@ function renderOnboarding() {
       const security = state.onboarding?.step === 'security';
       page.replaceChildren(
         h('header', { class: 'onboarding-header' },
-          h('div', { class: 'brand' }, h('img', { class: 'brand-mark', src: '/brand/sig.svg', width: 32, height: 32, alt: '' }), h('span', { class: 'brand-word' }, 'Sig')),
+          h('div', { class: 'brand' }, h('img', { class: 'brand-mark', src: '/brand/otto.svg', width: 32, height: 32, alt: '' }), h('span', { class: 'brand-word' }, 'Otto')),
           h('div', { class: 'language-switch' }, ['en', 'zh'].map((locale) => h('button', { type: 'button', dataset: { locale }, 'aria-pressed': String(getLocale() === locale) }, locale === 'en' ? 'EN' : '中文')))),
         h('div', { class: 'onboarding-content' },
           !state.setupChecked ? [h('h1', null, t(state.settingsError ? 'settingsLoadFailed' : 'settingsLoading')),
@@ -1024,7 +1024,7 @@ function setSetupStep(step) {
 
 function finishSetup() {
   if (!state.settings?.model?.apiKey || state.onboarding?.passkeyAdd === 'creating') return;
-  try { localStorage.setItem('sig.setup.securitySkipped', 'true'); } catch { /* Storage may be unavailable. */ }
+  try { localStorage.setItem('otto.setup.securitySkipped', 'true'); } catch { /* Storage may be unavailable. */ }
   state.onboarding = null;
   const type = state.initialDialog;
   state.initialDialog = null;
@@ -1133,7 +1133,7 @@ function renderFatal() {
   releaseDetailsOverlay({ restoreFocus: false });
   const [title, body] = FATAL_COPY[state.fatal];
   const next = h('div', { class: 'fatal', id: 'fatal', role: 'alertdialog', 'aria-labelledby': 'fatal-title' },
-    h('div', { class: 'fatal-box' }, h('img', { src: '/brand/sig.svg', alt: '' }), h('h2', { id: 'fatal-title' }, t(title)), h('p', null, t(body))));
+    h('div', { class: 'fatal-box' }, h('img', { src: '/brand/otto.svg', alt: '' }), h('h2', { id: 'fatal-title' }, t(title)), h('p', null, t(body))));
   if (current) current.replaceWith(next);
   else document.body.append(next);
 }
@@ -1421,7 +1421,7 @@ async function loadSettings(initial = false) {
     if (initial || !state.setupChecked) {
       state.setupChecked = true;
       let skipped = false;
-      try { skipped = localStorage.getItem('sig.setup.securitySkipped') === 'true'; } catch { /* Storage may be unavailable. */ }
+      try { skipped = localStorage.getItem('otto.setup.securitySkipped') === 'true'; } catch { /* Storage may be unavailable. */ }
       const step = initialSetupStep(data, state.snapshot.messages.length > 0, skipped);
       if (step) setSetupStep(step);
       else if (state.initialDialog) {
@@ -1625,8 +1625,8 @@ async function addPasskey() {
       credential = await navigator.credentials.create({
         publicKey: {
           challenge: b64urlToBuffer(data.challenge),
-          rp: { id: data.rpId, name: 'Sig' },
-          user: { id: b64urlToBuffer(data.userId), name: 'owner', displayName: 'Sig' },
+          rp: { id: data.rpId, name: 'Otto' },
+          user: { id: b64urlToBuffer(data.userId), name: 'owner', displayName: 'Otto' },
           pubKeyCredParams: [{ alg: -7, type: 'public-key' }, { alg: -257, type: 'public-key' }],
           authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
           excludeCredentials: data.excludeCredentials.map((entry) => ({ id: b64urlToBuffer(entry.id), type: 'public-key', transports: entry.transports })),
@@ -1731,7 +1731,7 @@ function sidebarOpen() {
 function toggleSidebar() {
   if (matchMedia('(max-width: 650px)').matches) return setMobile(sidebarOpen() ? 'chat' : 'threads');
   $('#workspace').classList.toggle('sidebar-hidden');
-  try { localStorage.setItem('sig.sidebar.hidden', String(!sidebarOpen())); } catch { /* Storage may be unavailable. */ }
+  try { localStorage.setItem('otto.sidebar.hidden', String(!sidebarOpen())); } catch { /* Storage may be unavailable. */ }
   syncDetailButton();
   resizeInput();
 }
@@ -1782,7 +1782,7 @@ function openDetails() {
     focusDetails();
   } else {
     $('#workspace').classList.remove('context-hidden');
-    try { localStorage.setItem('sig.context.hidden', 'false'); } catch { /* Storage may be unavailable. */ }
+    try { localStorage.setItem('otto.context.hidden', 'false'); } catch { /* Storage may be unavailable. */ }
   }
   syncDetailButton();
 }
@@ -1791,7 +1791,7 @@ function closeDetails() {
   releaseDetailsOverlay();
   if (!detailsMedia.matches) {
     $('#workspace').classList.add('context-hidden');
-    try { localStorage.setItem('sig.context.hidden', 'true'); } catch { /* Storage may be unavailable. */ }
+    try { localStorage.setItem('otto.context.hidden', 'true'); } catch { /* Storage may be unavailable. */ }
   }
   syncDetailButton();
 }
@@ -2046,8 +2046,8 @@ document.addEventListener('submit', (event) => {
 applyStatic();
 paintIcons();
 try {
-  $('#workspace').classList.toggle('sidebar-hidden', localStorage.getItem('sig.sidebar.hidden') === 'true');
-  $('#workspace').classList.toggle('context-hidden', localStorage.getItem('sig.context.hidden') === 'true');
+  $('#workspace').classList.toggle('sidebar-hidden', localStorage.getItem('otto.sidebar.hidden') === 'true');
+  $('#workspace').classList.toggle('context-hidden', localStorage.getItem('otto.context.hidden') === 'true');
 } catch { /* Storage may be unavailable. */ }
 {
   const route = routeFromLocation();

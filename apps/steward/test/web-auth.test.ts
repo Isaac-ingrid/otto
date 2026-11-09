@@ -111,7 +111,7 @@ describe("the Durable Object gate: invalid links never open a session", () => {
 describe("/网页 → one-time link → session cookie → /app", () => {
   it("replies with a one-time URL that logs in and redirects to /app", async () => {
     const { cookie } = await loginViaChat();
-    expect(cookie).toMatch(/^sig_session=ws1\.[0-9a-f]{64}\.[0-9a-f]{64}$/);
+    expect(cookie).toMatch(/^otto_session=ws1\.[0-9a-f]{64}\.[0-9a-f]{64}$/);
 
     const res = await SELF.fetch("https://example.com/app", { headers: { cookie } });
     expect(res.status).toBe(200);
@@ -148,14 +148,14 @@ describe("/网页 → one-time link → session cookie → /app", () => {
       expect(html).toContain('id="password-form"');
       expect(html).toContain('id="passkey-signin"');
     }
-    const res2 = await SELF.fetch("https://example.com/app", { headers: { cookie: "sig_session=ws1.deadbeef.notamac" } });
+    const res2 = await SELF.fetch("https://example.com/app", { headers: { cookie: "otto_session=ws1.deadbeef.notamac" } });
     expect(res2.status).toBe(200);
     expect((await SELF.fetch("https://example.com/app/unknown")).status).toBe(404);
   });
 
   it("a well-formed but unknown session sid falls back to the login page", async () => {
     const fakeSid = "ab".repeat(32);
-    const cookie = `sig_session=${await sessionCookieValue("test-server-key-not-a-secret", fakeSid)}`;
+    const cookie = `otto_session=${await sessionCookieValue("test-server-key-not-a-secret", fakeSid)}`;
     expect(await parseSessionCookie(["test-server-key-not-a-secret"], cookie.split("=")[1]!)).toBe(fakeSid);
     const res = await SELF.fetch("https://example.com/app", { headers: { cookie } });
     expect(res.status).toBe(200);

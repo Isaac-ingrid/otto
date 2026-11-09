@@ -57,7 +57,7 @@ let store: LocalStore;
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
-  dir = mkdtempSync(join(tmpdir(), "sig-connector-client-test-"));
+  dir = mkdtempSync(join(tmpdir(), "otto-connector-client-test-"));
   store = new LocalStore(join(dir, "connector.sqlite"));
   store.saveCredentials({ serverUrl: "https://example.com", deviceId: "dev_abc", token: "st1.dev_abc.1.100.deadbeef" });
 });

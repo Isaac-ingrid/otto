@@ -76,7 +76,7 @@ function pipe(tag, stream, out) {
 
 const runtime = process.env.STEWARD_TEST_RUNTIME === "node" ? "node" : "workerd";
 // The Node host is not workerd: its suite answers `cloudflare:test` from node-host/testing/ and
-// gets bindings per profile from SIG_TEST_PROFILE (see node-host/testing/harness.ts).
+// gets bindings per profile from OTTO_TEST_PROFILE (see node-host/testing/harness.ts).
 const configArgs = runtime === "node" ? ["--config", "vitest.node.config.ts"] : [];
 const generatedAuthConfig = runtime === "node" ? "vitest.node.config.ts" : "vitest.generated-auth.config.ts";
 

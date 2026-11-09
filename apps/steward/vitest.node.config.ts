@@ -12,7 +12,7 @@ export default defineConfig({
   // it to the native ESM loader. Answer the three ids from a pre plugin so they never get there.
   plugins: [
     {
-      name: "sig-cloudflare-scheme",
+      name: "otto-cloudflare-scheme",
       enforce: "pre",
       resolveId(id) {
         const map: Record<string, string> = {

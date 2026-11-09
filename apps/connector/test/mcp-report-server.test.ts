@@ -1,4 +1,4 @@
-// The Sig MCP report server (issue #17): stdio JSON-RPC 2.0, one tool (`report`),
+// The Otto MCP report server (issue #17): stdio JSON-RPC 2.0, one tool (`report`),
 // §7.2 fields — driven over its real stdio pipe exactly like Claude Code drives it
 // (initialize → notifications/initialized → tools/list → tools/call).
 import { spawnSync } from "node:child_process";
@@ -40,7 +40,7 @@ function lines(stdout: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-describe("sig MCP report server (issue #17, spike §2: ~40 lines of JSON-RPC)", () => {
+describe("otto MCP report server (issue #17, spike §2: ~40 lines of JSON-RPC)", () => {
   it("initializes, lists the report tool, and answers ping", () => {
     const { stdout } = drive([
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {} } },
@@ -61,7 +61,7 @@ describe("sig MCP report server (issue #17, spike §2: ~40 lines of JSON-RPC)", 
   });
 
   it("accepts a valid report call and persists it to the audit file", () => {
-    workDir = mkdtempSync(join(tmpdir(), "sig-mcp-"));
+    workDir = mkdtempSync(join(tmpdir(), "otto-mcp-"));
     const audit = join(workDir, "w-1.json");
     const { stdout } = drive(
       [
@@ -96,7 +96,7 @@ describe("sig MCP report server (issue #17, spike §2: ~40 lines of JSON-RPC)", 
 
   it("is installed by installClaudeAssets under the state dir", async () => {
     const { installClaudeAssets } = await import("../src/install.ts");
-    workDir = mkdtempSync(join(tmpdir(), "sig-mcp-"));
+    workDir = mkdtempSync(join(tmpdir(), "otto-mcp-"));
     const { serverPath } = installClaudeAssets(workDir, "test-version");
     expect(serverPath).toContain("mcp");
     expect(existsSync(serverPath)).toBe(true);

@@ -182,7 +182,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       const { id } = await readJson(request);
       if (typeof id !== "string" || !REQUEST_ID.test(id)) return json({ error: "bad_request" }, 400);
       const pair = await deps.pairing(id);
-      return json({ ...pair, command: `npx @alexlikevibe/sig connect ${url.origin} ${pair.code}` });
+      return json({ ...pair, command: `npx @alexlikevibe/otto connect ${url.origin} ${pair.code}` });
     }
     if (url.pathname === "/app/api/settings/model/selection" && deps.selectModel) {
       const input = parseModelSwitch(await readJson(request));
@@ -250,7 +250,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     if (url.pathname === "/app/api/logout") {
       deps.endSession(session.sid);
       const secure = url.protocol === "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1";
-      const cookie = ["sig_session=", "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0", ...(secure ? ["Secure"] : [])].join("; ");
+      const cookie = ["otto_session=", "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0", ...(secure ? ["Secure"] : [])].join("; ");
       return json({ ok: true }, 200, { "set-cookie": cookie });
     }
     const read = /^\/app\/api\/threads\/([\w-]{1,128})\/read$/.exec(url.pathname);

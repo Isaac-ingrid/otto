@@ -1,40 +1,40 @@
-// Sig's injected pi extension, docs/design/connector-pi.md §7.1 and ADR-0001.
+// Otto's injected pi extension, docs/design/connector-pi.md §7.1 and ADR-0001.
 //
-// The connector writes this file into ~/.sig/ext/ with each version and loads it via
+// The connector writes this file into ~/.otto/ext/ with each version and loads it via
 // `--extension`; it never references in-repo files, so project content cannot swap it out.
 // It does exactly three things:
 //
 // 1. Register the `report` tool (§7.2 fields).
 // 2. In `agent_before_settle`, when this run window completed without any `report` call and
-//    has not been reminded yet, append a `sig.report-reminder` custom message with
+//    has not been reminded yet, append a `otto.report-reminder` custom message with
 //    `continue: true`, forcing one more model request. At most one reminder per window.
 //    (Measured: 5/6 → 6/6 report call rate, no duplicate calls — research #11.)
 // 3. Write the steward `commandId` into a `custom` session entry (ADR-0001), replacing the
 //    old "last user message text matches" ambiguity heuristic (connector-pi.md §15.2).
-//    The connector delivers prompts as `/sig <commandId>\n<text>`; this command records
+//    The connector delivers prompts as `/otto <commandId>\n<text>`; this command records
 //    the marker and re-sends the clean text as a normal user message. Steer/follow_up
-//    deliveries cannot be extension commands, so they carry a `[sig:command <id>]`
+//    deliveries cannot be extension commands, so they carry a `[otto:command <id>]`
 //    preamble that the input handler below strips and persists as the same custom entry.
 
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** `custom` entry customType for the command marker (ADR-0001). */
-export const COMMAND_ENTRY_TYPE = "sig.command";
+export const COMMAND_ENTRY_TYPE = "otto.command";
 /** `custom_message` customType for the forced re-report reminder (§7.1). */
-export const REMINDER_ENTRY_TYPE = "sig.report-reminder";
+export const REMINDER_ENTRY_TYPE = "otto.report-reminder";
 /** Extension command name; prompts are delivered as `/<name> <commandId>\n<text>`. */
-export const COMMAND_NAME = "sig";
+export const COMMAND_NAME = "otto";
 
-/** §6.3 steer/follow_up marker preamble: `[sig:command <commandId>]\n<text>`. */
-export const MARKER_PREAMBLE = "[sig:command ";
+/** §6.3 steer/follow_up marker preamble: `[otto:command <commandId>]\n<text>`. */
+export const MARKER_PREAMBLE = "[otto:command ";
 
 function appendCommandEntry(pi: ExtensionAPI, commandId: string): void {
   pi.appendEntry(COMMAND_ENTRY_TYPE, { commandId, at: Date.now() });
 }
 
 const REMINDER_TEXT =
-  "[Sig] You finished without calling the `report` tool. Call `report` now as your " +
+  "[Otto] You finished without calling the `report` tool. Call `report` now as your " +
   "final action: status (done | blocked | needs_decision), summary, changes " +
   "(or `answer` when nothing was modified), decisions, " +
   "leftovers, and — when blocked or needs_decision — the question for the user in `question`. " +
@@ -72,7 +72,7 @@ interface WindowState {
   reminded: boolean;
 }
 
-export default function sigExtension(pi: ExtensionAPI): void {
+export default function ottoExtension(pi: ExtensionAPI): void {
   // In-memory run-window state. A new user prompt opens a new window; the reminder's forced
   // continuation deliberately does not (it is part of the same window, so `reportCalled` and
   // `reminded` persist across it — that is what makes the reminder fire at most once).
@@ -87,7 +87,7 @@ export default function sigExtension(pi: ExtensionAPI): void {
     name: "report",
     label: "Report",
     description:
-      "Report the outcome of this task to the user via Sig. This must be your LAST " +
+      "Report the outcome of this task to the user via Otto. This must be your LAST " +
       "action when the task is finished, blocked, or needs a user decision. Put questions " +
       "for the user in `question` (with status needs_decision); do not ask in plain text.",
     parameters: reportParameters,
@@ -104,7 +104,7 @@ export default function sigExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description: "Internal: deliver a Sig-dispatched prompt with its command marker.",
+    description: "Internal: deliver a Otto-dispatched prompt with its command marker.",
     handler: async (args: string) => {
       const newline = args.indexOf("\n");
       const commandId = newline === -1 ? null : args.slice(0, newline).trim();

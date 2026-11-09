@@ -43,7 +43,7 @@ const options = {
 if (process.argv.includes("--watch")) {
   const ctx = await context(options);
   await ctx.watch();
-  console.log("[sig] watching node-host bundle");
+  console.log("[otto] watching node-host bundle");
 } else {
   await build(options);
 }

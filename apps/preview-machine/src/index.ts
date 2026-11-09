@@ -307,7 +307,7 @@ export class PreviewMachine extends Agent<Env> {
     }
 
     if (kind === "pr_worker") {
-      const data = { url: `https://example.com/sig/preview/${encodeURIComponent(String(args.workerId ?? "worker"))}` };
+      const data = { url: `https://example.com/otto/preview/${encodeURIComponent(String(args.workerId ?? "worker"))}` };
       this.finishCommand(cmdId, true, data);
       this.send({ t: "cmd_result", re: cmdId, ok: true, data });
       return;

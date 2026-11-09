@@ -13,7 +13,7 @@
 // memory module (ledger.ts); this class only wires it to the transports.
 //
 // The steward LLM (issue #6, steward.md §4-§6): a PiHarness root session with the
-// `sig-steward` extension — user messages get their reply from the model (sh_run + alarm
+// `otto-steward` extension — user messages get their reply from the model (sh_run + alarm
 // poll, §6.3), worker events wake it for bookkeeping through the durable wake queue (§5.1/
 // §5.4), and in event-triggered runs its plain text is discarded by structure (§6.2): only
 // notify_user / ask_user reach the user.
@@ -1271,8 +1271,8 @@ export class Steward extends Agent<Env> {
     if (params.get("role") === "web") {
       const raw = (ctx.request.headers.get("cookie") ?? "")
         .split(/;\s*/)
-        .find((part) => part.startsWith("sig_session="))
-        ?.slice("sig_session=".length) ?? null;
+        .find((part) => part.startsWith("otto_session="))
+        ?.slice("otto_session=".length) ?? null;
       const sid = await parseSessionCookie(this.deploymentKeySecrets(), raw);
       if (!sid || !this.web.sessionAlive(sid)) return [];
       return params.get("view") === "workspace" ? ["web", WORKSPACE_TAG] : ["web"];
@@ -1293,8 +1293,8 @@ export class Steward extends Agent<Env> {
       await this.deploymentAuth.ready();
       const raw = (ctx.request.headers.get("cookie") ?? "")
         .split(/;\s*/)
-        .find((part) => part.startsWith("sig_session="))
-        ?.slice("sig_session=".length) ?? null;
+        .find((part) => part.startsWith("otto_session="))
+        ?.slice("otto_session=".length) ?? null;
       const sid = await parseSessionCookie(this.deploymentKeySecrets(), raw);
       if (!sid || !this.web.sessionAlive(sid)) {
         connection.close(CloseCode.UNAUTHORIZED, "unauthorized");
@@ -3300,7 +3300,7 @@ export class Steward extends Agent<Env> {
     if (!origin) return Response.json({ error: "origin_unknown" }, { status: 409 });
     const { code } = await this.createPairing();
     this.logChannel("pairing_minted", "api");
-    return Response.json({ code, command: `npx @alexlikevibe/sig connect ${origin} ${code}` });
+    return Response.json({ code, command: `npx @alexlikevibe/otto connect ${origin} ${code}` });
   }
 
   /** POST /api/login-link — a fresh one-time web login link (was the chat /网页 command). */

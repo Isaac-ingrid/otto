@@ -1,6 +1,6 @@
 // Write-task worktrees, docs/design/connector-pi.md §8.2:
-// - location ~/.sig/worktrees/<repoName>-<pathHash>/<branchSlug>;
-// - branch sig/<threadSlug>-<n>; starting point is `base` (on relay, the previous
+// - location ~/.otto/worktrees/<repoName>-<pathHash>/<branchSlug>;
+// - branch otto/<threadSlug>-<n>; starting point is `base` (on relay, the previous
 //   worker's branch), defaulting to the local tip of the repository's default branch
 //   (no network access);
 // - one worktree per write task; no automatic deletion (§8.2).
@@ -76,7 +76,7 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
   }
 }
 
-/** Canonicalizes a user-selected path into the identity Sig uses as `repoId`, plus whatever
+/** Canonicalizes a user-selected path into the identity Otto uses as `repoId`, plus whatever
  *  Git capability is detected there. Git-backed: identity = git top-level (byte-identical to
  *  what `repoTopLevel` alone returned before this change — every existing repo's `repoId` is
  *  unaffected). Not Git-backed: identity = realpath(path) — a plain workspace has no repo
@@ -133,7 +133,7 @@ export class WorktreeManager {
   constructor(private readonly options: { worktreesRoot: string; maxBranchTries?: number }) {}
 
   /**
-   * Creates a dedicated worktree for one write task. Branch: `sig/<threadSlug>-<n>`
+   * Creates a dedicated worktree for one write task. Branch: `otto/<threadSlug>-<n>`
    * with the smallest unused n; directory: `<root>/<repoName>-<pathHash>/<branchSlug>`.
    */
   async create(spec: WorktreeSpec): Promise<WorktreeResult> {
@@ -148,14 +148,14 @@ export class WorktreeManager {
     let branch = "";
     let dir = "";
     for (let n = 1; n <= maxTries; n++) {
-      const candidate = `sig/${slug}-${n}`;
+      const candidate = `otto/${slug}-${n}`;
       if (!(await branchExists(spec.repoPath, candidate))) {
         branch = candidate;
         dir = joinDir(this.options.worktreesRoot, spec.repoPath, `${slug}-${n}`);
         break;
       }
     }
-    if (!branch) throw new GitError(`no free sig/${slug}-<n> branch within ${maxTries} tries`);
+    if (!branch) throw new GitError(`no free otto/${slug}-<n> branch within ${maxTries} tries`);
 
     await git(spec.repoPath, ["worktree", "add", "-b", branch, dir, base]);
     return { path: dir, branch, base };

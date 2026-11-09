@@ -1,6 +1,6 @@
 // Native proxy support (issue #68): URL normalization, no_proxy matching, env export,
 // precedence resolution, process-wide activation, and a real forward-proxy round trip for
-// the fetch channel (the wiring `sig doctor` and the daemon rely on).
+// the fetch channel (the wiring `otto doctor` and the daemon rely on).
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getGlobalDispatcher, setGlobalDispatcher, EnvHttpProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
@@ -68,14 +68,14 @@ describe("no_proxy matching", () => {
   });
 
   it("proxies everything else by default and honors exact-host entries", () => {
-    expect(shouldProxy("wss://sig.example.workers.dev/agents/steward/owner", config)).toBe(true);
+    expect(shouldProxy("wss://otto.example.workers.dev/agents/steward/owner", config)).toBe(true);
     // A bare host matches itself, not its subdomains (curl semantics).
     expect(shouldProxy("https://example.com/x", { ...config, noProxy: "example.com" })).toBe(false);
-    expect(shouldProxy("https://sig.example.com/x", { ...config, noProxy: "example.com" })).toBe(true);
+    expect(shouldProxy("https://otto.example.com/x", { ...config, noProxy: "example.com" })).toBe(true);
   });
 
   it("suffix-matches subdomains with a leading dot or wildcard, not look-alikes", () => {
-    expect(shouldProxy("https://sig.example.com/x", { ...config, noProxy: ".example.com" })).toBe(false);
+    expect(shouldProxy("https://otto.example.com/x", { ...config, noProxy: ".example.com" })).toBe(false);
     expect(shouldProxy("https://example.com/x", { ...config, noProxy: ".example.com" })).toBe(false);
     expect(shouldProxy("https://notexample.com/x", { ...config, noProxy: ".example.com" })).toBe(true);
     expect(shouldProxy("https://a.b.example.com/x", { ...config, noProxy: "*.example.com" })).toBe(false);
@@ -170,11 +170,11 @@ describe("applyProxy", () => {
       expect(process.env.NO_PROXY).toBe("localhost,127.0.0.1,::1,.corp.example");
       expect(getGlobalDispatcher()).toBeInstanceOf(EnvHttpProxyAgent);
 
-      const remote = application.wsAgentFor("wss://sig.example.workers.dev/agents/steward/owner");
+      const remote = application.wsAgentFor("wss://otto.example.workers.dev/agents/steward/owner");
       expect(remote).toBeDefined(); // an agent for a proxied target…
       expect(application.wsAgentFor("ws://127.0.0.1:8787/dev-steward")).toBeUndefined(); // …none for loopback
       expect(application.wsAgentFor("wss://intranet.corp.example/x")).toBeUndefined(); // …none for no_proxy hosts
-      expect(application.wsAgentFor("wss://sig.example.workers.dev/agents/steward/owner")).toBe(remote); // stable per target
+      expect(application.wsAgentFor("wss://otto.example.workers.dev/agents/steward/owner")).toBe(remote); // stable per target
     });
   });
 });

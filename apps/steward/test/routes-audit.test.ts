@@ -134,16 +134,16 @@ describe("routes audit: no unauthenticated surface beyond the documented entry p
   });
 
   it("serves the public logo and avatar without a session, with no channel side effects", async () => {
-    const logo = await request("/brand/sig.svg");
+    const logo = await request("/brand/otto.svg");
     expect(logo.status).toBe(200);
     expect(logo.headers.get("content-type")).toContain("image/svg+xml");
     expect(await logo.text()).toContain("<svg");
-    const avatar = await request("/brand/sig-avatar.png");
+    const avatar = await request("/brand/otto-avatar.png");
     expect(avatar.status).toBe(200);
     expect(avatar.headers.get("content-type")).toContain("image/png");
     const bytes = new Uint8Array(await avatar.arrayBuffer());
     expect([...bytes.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
-    for (const path of ["/brand/sig.svg", "/brand/sig-avatar.png"]) {
+    for (const path of ["/brand/otto.svg", "/brand/otto-avatar.png"]) {
       const head = await request(path, { method: "HEAD" });
       expect(head.status).toBe(200);
       expect(await head.text()).toBe("");

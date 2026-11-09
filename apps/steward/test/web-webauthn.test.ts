@@ -210,7 +210,7 @@ describe("signing in with a passkey (full ceremony)", () => {
     const verify = await signIn(auth, 1);
     expect(verify.status).toBe(200);
     const setCookie = verify.headers.get("set-cookie") ?? "";
-    expect(setCookie).toMatch(/^sig_session=ws1\.[0-9a-f]{64}\.[0-9a-f]{64}/);
+    expect(setCookie).toMatch(/^otto_session=ws1\.[0-9a-f]{64}\.[0-9a-f]{64}/);
     expect(setCookie).toContain("HttpOnly");
 
     // The new cookie opens the workspace exactly like a link-issued one.

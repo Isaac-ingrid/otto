@@ -58,7 +58,7 @@ async function waitForWorkerIdle(timeoutMs = 8000): Promise<string> {
 describe("report cards carry the one-time 查看详情 link", () => {
   it("a done card links to the Thread timeline, and the link opens it after login", async () => {
     const fake = await pairFakeConnector("mac-studio", {
-      run: { status: "done", summary: "登录 bug 修好，测试通过", changes: ["auth/session.ts 补上过期刷新"], branch: "sig/login-1" },
+      run: { status: "done", summary: "登录 bug 修好，测试通过", changes: ["auth/session.ts 补上过期刷新"], branch: "otto/login-1" },
     });
     await fake.connect();
     // The steward LLM owns natural language now (issue #6); the deterministic dispatch path
@@ -94,7 +94,7 @@ describe("report cards carry the one-time 查看详情 link", () => {
     expect(thread.timeline.map((entry) => entry.kind)).toEqual(expect.arrayContaining(["user_instruction", "dispatch", "report"]));
     expect(thread.timeline.map((entry) => entry.text).join("\n")).toContain("登录 bug 修好，测试通过");
     expect(thread.workers[0]).toMatchObject({ machine: "mac-studio" });
-    expect(thread.workers[0]!.branch).toContain("sig/login");
+    expect(thread.workers[0]!.branch).toContain("otto/login");
   });
 
   it("in the workspace a finished report is an ordinary message, not a card; a PR ask stays a card", async () => {
@@ -102,7 +102,7 @@ describe("report cards carry the one-time 查看详情 link", () => {
     for (const [pushed, kind] of [[true, "text"], [false, "card"]] as const) {
       await resetLedgerState();
       await configureAndBind("ou_owner");
-      const fake = await pairFakeConnector("mac-studio", { run: { status: "done", summary: "调研完成", answer, branch: "sig/research-1", pushed } });
+      const fake = await pairFakeConnector("mac-studio", { run: { status: "done", summary: "调研完成", answer, branch: "otto/research-1", pushed } });
       await fake.connect();
       await ownerStub().dispatchForTest({ prompt: "调研一下", repoRef: "repo-a", newTitle: "调研" });
       await waitForWorkerIdle();
@@ -147,10 +147,10 @@ describe("report cards carry the one-time 查看详情 link", () => {
 });
 
 describe("/加机器: chat-issued pairing (protocol §5.2)", () => {
-  it("replies with npx @alexlikevibe/sig connect <url> <code>, single-use", async () => {
+  it("replies with npx @alexlikevibe/otto connect <url> <code>, single-use", async () => {
     await ownerDm("/加机器");
     const text = (await sentTexts()).join("\n");
-    const match = text.match(/npx @alexlikevibe\/sig connect (\S+) (\w{8})/);
+    const match = text.match(/npx @alexlikevibe\/otto connect (\S+) (\w{8})/);
     expect(match).not.toBeNull();
     expect(match![1]).toBe("https://example.com"); // origin learned from the webhook hit
 

@@ -6,7 +6,7 @@
  * file supplies the platform they expect — a SQLite-backed `ctx.storage`, an alarm timer, a
  * `WebSocketPair`, and an `env` with the same bindings `wrangler.jsonc` declares.
  *
- *   SIG_DB_PATH   SQLite file (default ./data/steward.sqlite)
+ *   OTTO_DB_PATH   SQLite file (default ./data/steward.sqlite)
  *   PORT          listen port (default 8787)
  *   HOST          bind address (default 0.0.0.0)
  *   .dev.vars     SERVER_KEY / LOGIN_PASSWORD / STEWARD_MODEL / DAILY_BUDGET_USD ...
@@ -26,9 +26,9 @@ import { NodeDurableObjectStorage } from "./storage.ts";
 installGlobals();
 
 const appDir = resolve(import.meta.dirname, "..");
-const cwd = process.env.SIG_CONFIG_DIR ?? resolve(appDir, "../..");
+const cwd = process.env.OTTO_CONFIG_DIR ?? resolve(appDir, "../..");
 
-const dbPath = resolve(process.env.SIG_DB_PATH ?? resolve(appDir, "data/steward.sqlite"));
+const dbPath = resolve(process.env.OTTO_DB_PATH ?? resolve(appDir, "data/steward.sqlite"));
 const port = Number(process.env.PORT ?? 8787);
 const hostname = process.env.HOST ?? "0.0.0.0";
 
@@ -72,13 +72,13 @@ const server = await startServer({
   hostname,
 });
 
-console.log(`[sig] steward listening on http://${hostname}:${port} (db ${dbPath})`);
+console.log(`[otto] steward listening on http://${hostname}:${port} (db ${dbPath})`);
 
 let closing = false;
 async function shutdown(signal: string): Promise<void> {
   if (closing) return;
   closing = true;
-  console.log(`[sig] ${signal} — shutting down`);
+  console.log(`[otto] ${signal} — shutting down`);
   await runtime.stop();
   server.close();
   db.close();

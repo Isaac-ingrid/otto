@@ -14,7 +14,7 @@ let mock: MockSteward;
 let app: ConnectorApp;
 
 beforeEach(async () => {
-  dir = realpathSync(tmpDir("sig-register-directory"));
+  dir = realpathSync(tmpDir("otto-register-directory"));
   repo = await makeGitRepo(dir);
   const stateDir = join(dir, "state");
   store = new LocalStore(join(stateDir, "connector.sqlite"));

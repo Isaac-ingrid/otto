@@ -35,8 +35,8 @@ function sameOrigin(request: Request, url: URL): boolean {
 function sessionCookie(request: Request): string | null {
   return (request.headers.get("cookie") ?? "")
     .split(/;\s*/)
-    .find((part) => part.startsWith("sig_session="))
-    ?.slice("sig_session=".length) ?? null;
+    .find((part) => part.startsWith("otto_session="))
+    ?.slice("otto_session=".length) ?? null;
 }
 
 function wellFormedSessionCookie(value: string | null): boolean {
@@ -196,10 +196,10 @@ export default {
     if ((url.pathname === "/app" || url.pathname.startsWith("/app/")) && (request.method === "GET" || request.method === "POST")) {
       const stub = await getAgentByName(env.Steward, "owner");
       const response = await stub.fetch(request);
-      if (request.method === "GET" && response.status === 204 && response.headers.get("x-sig-workspace-shell") === "1") {
+      if (request.method === "GET" && response.status === 204 && response.headers.get("x-otto-workspace-shell") === "1") {
         return workspaceShell(env, url);
       }
-      if (request.method === "GET" && response.status === 204 && response.headers.get("x-sig-asset") === "1") {
+      if (request.method === "GET" && response.status === 204 && response.headers.get("x-otto-asset") === "1") {
         return serveAppAsset(env, request, url);
       }
       return response;

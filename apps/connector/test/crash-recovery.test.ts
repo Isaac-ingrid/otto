@@ -75,7 +75,7 @@ let mock: MockSteward;
 const apps: ConnectorApp[] = [];
 
 beforeEach(async () => {
-  dir = tmpDir("sig-crash-recovery");
+  dir = tmpDir("otto-crash-recovery");
   stateDir = join(dir, "state");
   sessionsDir = join(dir, "sessions");
   repo = await makeGitRepo(dir);
@@ -154,7 +154,7 @@ describe("crash during `sending`, recovered from the session tail (§6.3)", () =
     await waitFor(
       () => {
         const file = join(sessionsDir, "w-crash-after-prompt.jsonl");
-        return existsSync(file) && readFileSync(file, "utf8").includes("sig.command") ? true : undefined;
+        return existsSync(file) && readFileSync(file, "utf8").includes("otto.command") ? true : undefined;
       },
       15_000,
       "marker + prompt on disk",

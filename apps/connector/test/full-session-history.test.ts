@@ -13,7 +13,7 @@ let dir: string;
 let file: string;
 
 beforeEach(() => {
-  dir = tmpDir("sig-full-history");
+  dir = tmpDir("otto-full-history");
   file = join(dir, "session.jsonl");
 });
 

@@ -8,7 +8,7 @@ let dir: string;
 let dbPath: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "sig-connector-test-"));
+  dir = mkdtempSync(join(tmpdir(), "otto-connector-test-"));
   dbPath = join(dir, "connector.sqlite");
 });
 

@@ -41,7 +41,7 @@ let events: EmittedEvent[];
 let manager: WorkerManager;
 
 beforeEach(async () => {
-  dir = tmpDir("sig-claude-manager-test");
+  dir = tmpDir("otto-claude-manager-test");
   stateDir = join(dir, "state");
   repo = await makeGitRepo(dir);
   store = new LocalStore(join(stateDir, "connector.sqlite"));

@@ -20,7 +20,7 @@ import { WorkspaceError } from "./workspace.ts";
 
 export const LINK_TTL_MS = 15 * 60_000;
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60_000;
-export const SESSION_COOKIE = "sig_session";
+export const SESSION_COOKIE = "otto_session";
 /**
  * One ceremony, one round trip (candidate-2 design): short enough that a stolen challenge is
  * useless within seconds of being issued. 60s is a guess, not a measurement — the `agents` SDK's
@@ -595,7 +595,7 @@ export class WebApp {
     }
 
     if (asset) {
-      return new Response(null, { status: 204, headers: { "x-sig-asset": "1", "cache-control": "no-store" } });
+      return new Response(null, { status: 204, headers: { "x-otto-asset": "1", "cache-control": "no-store" } });
     }
 
     // The workspace: /app is the whole conversation; a Thread URL (the card links and the
@@ -615,7 +615,7 @@ export class WebApp {
 
   /** The edge Worker supplies assets from the current deployment after this session gate. */
   private workspaceShell(): Response {
-    return new Response(null, { status: 204, headers: { "x-sig-workspace-shell": "1", "cache-control": "no-store" } });
+    return new Response(null, { status: 204, headers: { "x-otto-workspace-shell": "1", "cache-control": "no-store" } });
   }
 
   #deviceViews(): DeviceView[] {

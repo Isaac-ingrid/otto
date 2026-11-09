@@ -55,7 +55,7 @@ describe("a fresh deployment without SERVER_KEY", () => {
     const response = await login(PASSWORD, "203.0.113.10");
     expect(response.status).toBe(200);
     const cookie = response.headers.get("set-cookie")?.split(";")[0];
-    expect(cookie).toMatch(/^sig_session=ws1\./);
+    expect(cookie).toMatch(/^otto_session=ws1\./);
     const app = await SELF.fetch(`${BASE}/app`, { headers: { cookie: cookie! } });
     expect(app.status).toBe(200);
     expect(await app.text()).toContain('id="workspace"');

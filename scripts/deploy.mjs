@@ -13,7 +13,7 @@ if (nameFlag !== -1) {
     args.splice(nameFlag, 1);
   }
   if (!overrideName) {
-    console.error("sig: --name needs a value");
+    console.error("otto: --name needs a value");
     process.exit(1);
   }
 }
@@ -26,7 +26,7 @@ if (dryRun) {
 
 const name = overrideName ?? JSON.parse(readFileSync("wrangler.jsonc", "utf8").replace(/\/\/[^\n]*/g, "")).name;
 console.log(`
-Sig is deployed as "${name}" at the URL wrangler printed above.
+Otto is deployed as "${name}" at the URL wrangler printed above.
 
 1. Open that URL and sign in with the password from the deployment form.
    If you deployed from a terminal, set a password interactively:

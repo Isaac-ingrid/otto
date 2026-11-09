@@ -9,7 +9,7 @@ let dir: string;
 let store: LocalStore;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "sig-connector-pairing-test-"));
+  dir = mkdtempSync(join(tmpdir(), "otto-connector-pairing-test-"));
   store = new LocalStore(join(dir, "connector.sqlite"));
 });
 

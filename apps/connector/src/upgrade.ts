@@ -1,16 +1,16 @@
-// `sig upgrade` (issue #26): replace the npm package and restart the background service.
+// `otto upgrade` (issue #26): replace the npm package and restart the background service.
 //
 // The upgrade always ends with the service running the code from the global npm install, so
 // an npx-launched `connect` becomes a durable global install on first upgrade. The process
 // running `upgrade` is by definition the OLD code — it cannot write the new version's assets.
 // The restarted daemon runs the new package and calls installAssets() at boot, which writes
-// the new versioned extension/prompt files under ~/.sig/ (old versions stay on disk for
+// the new versioned extension/prompt files under ~/.otto/ (old versions stay on disk for
 // sessions still referencing them).
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaultExec, type Exec, type ServiceInstaller } from "./service.ts";
 
-export const PACKAGE_NAME = "@alexlikevibe/sig";
+export const PACKAGE_NAME = "@alexlikevibe/otto";
 
 export interface UpgradeOptions {
   /** Explicit version; default "latest". */
@@ -59,7 +59,7 @@ export async function runUpgrade(print: (line: string) => void, options: Upgrade
   }
 
   const pkgRoot = join(npmRoot, PACKAGE_NAME);
-  const entryPath = join(pkgRoot, "bin", "sig.js");
+  const entryPath = join(pkgRoot, "bin", "otto.js");
   if (!existsSync(entryPath)) {
     throw new Error(`npm reported success but ${entryPath} is missing; install layout unexpected`);
   }

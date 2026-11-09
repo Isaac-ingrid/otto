@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Sig's MCP server for Claude Code workers (issue #17, spike-conclusions §2 "Claude
+// Otto's MCP server for Claude Code workers (issue #17, spike-conclusions §2 "Claude
 // Code headless"): a minimal stdio MCP server exposing exactly one tool — `report` — with
 // the connector-pi.md §7.2 fields. LF-delimited JSON-RPC 2.0; initialize → tools/list →
 // tools/call is the whole conversation (~40 lines in the spike, kept that small here).
@@ -11,20 +11,20 @@
 // so this server stays a dumb acknowledge-and-persist endpoint: argv[2] receives the last
 // report's args as JSON (best-effort audit trail; nothing reads it in anger).
 //
-// Like every agent child it gets no SIG_* env and no connector credentials, and it
+// Like every agent child it gets no OTTO_* env and no connector credentials, and it
 // touches nothing on disk except argv[2].
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const AUDIT_FILE = process.argv[2] ?? null;
 const PROTOCOL_VERSION = "2024-11-05";
-const SERVER_INFO = { name: "sig-report", version: "1.0.0" };
+const SERVER_INFO = { name: "otto-report", version: "1.0.0" };
 
 /** §7.2 (v1) — the same fields the pi extension's `report` tool takes. */
 const REPORT_TOOL = {
   name: "report",
   description:
-    "Report the outcome of this task to the user via Sig. This must be your LAST " +
+    "Report the outcome of this task to the user via Otto. This must be your LAST " +
     "action when the task is finished, blocked, or needs a user decision. Put questions " +
     "for the user in `question` (with status needs_decision); do not ask in plain text.",
   inputSchema: {

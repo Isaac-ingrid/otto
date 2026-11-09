@@ -63,7 +63,7 @@ export interface TestingHarness {
 }
 
 function profileFromEnv(): TestProfile {
-  return process.env.SIG_TEST_PROFILE === "generated" ? "generated" : "explicit";
+  return process.env.OTTO_TEST_PROFILE === "generated" ? "generated" : "explicit";
 }
 
 export async function createHarness(profile: TestProfile = profileFromEnv()): Promise<TestingHarness> {
