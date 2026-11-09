@@ -166,33 +166,34 @@ otto uninstall              # 移除服务，保留本地状态
 npm login --registry=https://registry.npmjs.org
 npm whoami --registry=https://registry.npmjs.org   # 应打印 isaac2ingrid
 cd apps/connector
-npm publish --otp=123456   # publishConfig.registry 已固定为 registry.npmjs.org
+npm publish        # publishConfig.registry 已固定为 registry.npmjs.org
 ```
 
-`--otp` 是必需的：账号 2FA 若是 "auth-and-writes"，一次性的登录 token 只够读，`npm publish`
-会被 403 拒绝（`Two-factor authentication or granular access token with bypass 2fa enabled is
-required to publish packages`），必须当场补上验证器里的 6 位码。
+发布前账号必须先启用 2FA —— npm 现在对所有发包强制要求 2FA（或一个开了 bypass 2FA 的
+granular access token），账号上是 `disabled` 就直接 403，跟权限无关。先查、再开：
 
-不想每次翻验证器，就在 npmjs.com 上新建一个 **granular access token**：权限选 read and write、
-包范围只勾 `@isaac2ingrid/otto`、勾上 *bypass 2FA*（这类 token 最长 90 天），然后写进 `~/.npmrc`：
+```sh
+npm profile get --registry=https://registry.npmjs.org   # 看 two-factor auth 一行
+npm profile enable-2fa auth-and-writes --registry=https://registry.npmjs.org
+```
+
+`enable-2fa` 会在终端打印密钥/二维码，用验证器 App（macOS「密码」App、1Password、
+Google Authenticator 都行）扫进去，再把 App 上的 6 位贴回终端，最后它会打印一组 recovery
+codes——存进密码管理器，丢了要走 72 小时安全冻结的找回流程。之后每次发包补一个当场的码：
+
+```sh
+npm publish --otp=123456
+```
+
+不想每次翻验证器，就在 npmjs.com 上新建 granular access token：read and write、包范围只勾
+`@isaac2ingrid/otto`、勾 *bypass 2FA*（最长 90 天），写进 `~/.npmrc`：
 
 ```
 //registry.npmjs.org/:_authToken=npm_xxx
 ```
 
-CI 和 `npm publish` 都能直接用。代价是它绕过 2FA，别往外传。
-
-镜像对 `/login`、`/adduser` 一律返回 `Public registration is not allowed`（npmmirror 上连
-`PUT /-/user/...` 都是 `[FORBIDDEN]`），所以这条报错跟账号无关，只说明命令打到了镜像。发布同理：
-`publishConfig.registry` 是必要的，否则写入会失败而报错看起来像网络问题。发布前先改 `package.json` 的 `version`（升级版本时用
-`otto upgrade`；当前是 0.2.0）。
-
-`@alexlikevibe/*` 那一支（`@alexlikevibe/sig@0.1.3` 等）属于上游作者自己的 npm 身份，不归本项目，
-也 deprecate 不了——那是别人的包。本项目从 `@isaac2ingrid/otto@0.2.0` 重新起算，没有要迁移的
-旧包：这台机器跑的是 checkout 里的 `bin/otto.js`，不是 npm 包。
-
-发布不属于自动化流程：本仓库没有 git remote，`.github/workflows/release.yml` 的 tag 触发路径
-只对带 `NPM_TOKEN` 的克隆有效。
+注意创建这种 token 本身也要过一次交互式 2FA，所以省不掉开启 2FA 这一步；它绕过 2FA，等同账号
+写权限，别外传。CI 也可以改用 npm 的 trusted publishing（无需 token）。
 
 ## 许可证
 
