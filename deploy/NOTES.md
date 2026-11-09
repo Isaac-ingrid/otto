@@ -11,15 +11,20 @@ sig`; create the `otto` user and `/var/lib/otto`, `/etc/otto`, `/opt/otto`; inst
 `deploy/otto.service` (now the source of truth for the unit, it used to live only on the box);
 copy the bundle and `apps/steward/ui`; `deploy/apply-env.sh` to write `/etc/otto/.dev.vars`;
 then `deploy/harden.sh` again for the limits, journal cap and backup timer under their new names.
-The connector was re-paired (`dev_c482db6a4879`) and `tstock` re-registered.
+The connector was re-paired and `tstock` re-registered.
 
-The old layout is still on disk untouched — `/opt/sig`, `/etc/sig`, `/var/lib/sig`, the `sig`
-user, and the `sig`-era code in the bundle — costing about 11 MB plus the database. Delete it
-once a week of the new instance has passed:
+The old layout (`/opt/sig`, `/etc/sig`, `/var/lib/sig`, the `sig` user — 11 MB plus the
+database) was removed after the new instance proved itself; its database and `.dev.vars` were
+archived off the box first (`~/otto-archive/old-sig-state-20261109.tar.gz`, mode 600). Nothing
+under `/opt`, `/etc` or `/var/lib` is named `sig` any more:
 
 ```bash
-./deploy/remote.sh 'rm -rf /opt/sig /etc/sig /var/lib/sig && userdel sig'
+./deploy/remote.sh 'rm -rf /opt/sig /etc/sig /var/lib/sig && userdel sig'   # what was run
 ```
+
+Renaming the connector's machine left a second `sh_machine` row for the same box (the pairing
+mints a fresh device id). The stale `dev_c482db6a4879` rows — `sh_machine`, `sh_repo`,
+`sh_worker`, `outbox`, `device` — were deleted so the workspace shows one machine, not two.
 
 
 ## What is installed
