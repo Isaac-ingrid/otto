@@ -98,7 +98,7 @@ import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerS
 import { DeploymentAuth, deploymentSecrets, ownerAuthorized } from "./deployment-auth.ts";
 import { loginPage } from "./login-page.ts";
 import { renderChangeReports } from "./notes.ts";
-import { FAILED_RUN_NOTICE, failedRunNotice } from "./owner-notices.ts";
+import { FAILED_RUN_NOTICE, TURN_STOPPED_NOTICE, failedRunNotice } from "./owner-notices.ts";
 import { RoutineService } from "./routines.ts";
 import {
   type LocalMessage,
@@ -135,6 +135,13 @@ import { WebApp, linkTargetForThread, loginLinkPolicyFromEnv, parseSessionCookie
 
 /** Messages the workspace will queue before telling the owner to wait for the steward to catch up. */
 const MAX_OPEN_USER_RUNS = 10;
+/** ADR-0017: what the workspace is told after the owner stops a turn. `cancelled` lists the run
+ *  operation ids that ended cancelled, so the caller can tell "nothing was running" from "one turn
+ *  and its queue went away". */
+export interface TurnStopResult {
+  stopped: "running" | "queued" | "none";
+  cancelled: string[];
+}
 /** Connection tag of browsers that opened the workspace (`?role=web&view=workspace`). */
 const WORKSPACE_TAG = "workspace";
 /** How long a burst of ledger writes is coalesced into one `workspace_changed` frame. */
@@ -781,6 +788,7 @@ export class Steward extends Agent<Env> {
         budget: () => this.budgetState(),
         submitMessage: (input) => this.submitWorkspaceMessage(input),
         submitAction: (input) => this.submitWorkspaceAction(input),
+        stopTurn: (input) => this.stopTurn(input),
         settings: async () => ({
           model: await this.llmSelection(),
           passkeys: this.web.listPasskeys(),
@@ -3609,6 +3617,76 @@ export class Steward extends Agent<Env> {
   }
 
   /**
+   * ADR-0017: the owner stops the turn they are watching. There is one conversation, so there is
+   * one abort: pi withdraws its queued inputs and asks the placed run to stop, and the settler
+   * (`settleRun`) records what pi settled — never a guess about what pi was doing. Workers already
+   * dispatched keep running: they are processes on the owner's machines, and stopping one is
+   * `interrupt_worker`'s job, not the conversation's.
+   *
+   * Idempotent on the browser's request id, and the answer is kept, so a retried tap replays the
+   * verdict instead of aborting a turn the owner has since started.
+   */
+  private async stopTurn(input: { id: string }): Promise<TurnStopResult> {
+    const key = `stop:${input.id}`;
+    const previous = this.ledger.webRequests.get(key);
+    if (previous?.status === "done") return JSON.parse(previous.payload) as TurnStopResult;
+    // A submission still in flight has not reached pi yet. Let it land first, so the abort can see
+    // it — otherwise the settler's crash repair (§11) would faithfully resubmit the very turn the
+    // owner just stopped.
+    await Promise.allSettled([...this.webInputs.values()]);
+    const open = this.ledger.runs.openRows();
+    if (open.length === 0) return this.recordTurnStop(key, { stopped: "none", cancelled: [] });
+    const known = new Map((await this.piHarness.pending()).map((entry) => [entry.operationId, entry.status]));
+    // A row pi never saw can only be settled here: no abort reaches it.
+    for (const run of open) if (!known.has(run.operationId)) this.cancelRun(run, "stopped");
+    const wasRunning = open.some((run) => known.get(run.operationId) === "running");
+    this.logChannel("turn_stop", `${wasRunning ? "running" : "queued"} ${open.map((run) => run.operationId).join(",")}`);
+    if (known.size > 0) {
+      try {
+        await this.piHarness.session().abort();
+      } catch (err) {
+        this.logChannel("turn_stop_failed", errorText(err));
+      }
+      await this.pollRuns();
+    }
+    // Anything the abort did not settle (a wait that timed out, an op pi dropped) is still a turn
+    // the owner stopped: no reply arrives for it, so no row may stay open waiting for one.
+    for (const run of open) this.cancelRun(run, "stopped");
+    const cancelled = open.map((run) => run.operationId).filter((operationId) => this.ledger.runs.get(operationId)?.status === "cancelled");
+    return this.recordTurnStop(key, { stopped: wasRunning ? "running" : "queued", cancelled });
+  }
+
+  private recordTurnStop(key: string, answer: TurnStopResult): TurnStopResult {
+    this.ctx.storage.transactionSync(() => {
+      this.ledger.webRequests.start(key, JSON.stringify(answer));
+      this.ledger.webRequests.complete(key);
+    });
+    return answer;
+  }
+
+  /**
+   * ADR-0017: end one turn the owner stopped. The row gets its own terminal state (so no settler
+   * pass mistakes it for a run still to settle, and an aborted input is never resubmitted), and a
+   * user turn answers with one deterministic line. The reply-side relays (memory notes, the
+   * once-a-day budget note) are deliberately NOT consumed: they belong on an answer that says
+   * something, not on a stop.
+   */
+  private cancelRun(run: RunRow, reason: string): void {
+    if (this.ledger.runs.get(run.operationId)?.status !== "open") return;
+    this.ledger.runs.cancel(run.operationId, reason);
+    const owner = run.kind === "user" ? this.ownerOpenIdSync() : null;
+    if (!owner) return;
+    void this.enqueueOutbound({
+      id: `reply:${run.operationId}`,
+      kind: "text",
+      to: owner,
+      text: TURN_STOPPED_NOTICE,
+      threadId: run.routedThreadId,
+      urgency: "push",
+    }).catch((err) => this.logChannel("reply_enqueue_failed", `${run.operationId} ${errorText(err)}`));
+  }
+
+  /**
    * A button pressed on a card in the workspace. It enters the same handlers an API action
    * does — the outbound row behind the card, not the browser, decides what the button means.
    * The button must be one the card really carries, and the decision must still be open:
@@ -3746,6 +3824,15 @@ export class Steward extends Agent<Env> {
     // §8.6: every fire leaves a result. An explicit in-run outcome (no_action) was recorded
     // during the run; the settle summary is the fallback for everything else.
     this.recordSettledProactiveOutcome(run, result);
+    // ADR-0017: pi settled a withdrawn input or an aborted run as unanswered/aborted. `stopTurn` is
+    // the only thing that aborts the session, so `aborted` means the owner stopped this turn — not
+    // a failure. No failure notice, no dispatch verification, and nothing on the reply path
+    // consumed. Handled before the user-reply branch so a cancelled turn can never be reported as
+    // "the model could not answer".
+    if (result.status !== "done" && result.reason === "aborted") {
+      this.cancelRun(run, "aborted");
+      return;
+    }
     if (run.kind === "user") {
       const owner = this.ownerOpenIdSync();
       const hasText = Boolean(result.text && result.text.trim().length > 0);

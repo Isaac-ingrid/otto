@@ -263,6 +263,7 @@ export interface WebDeps {
     | "budget"
     | "submitMessage"
     | "submitAction"
+    | "stopTurn"
     | "settings"
     | "saveModel"
     | "selectModel"

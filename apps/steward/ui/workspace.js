@@ -48,6 +48,7 @@ const state = {
   initialDialog: null,
   settingsError: false,
   changingModel: false,
+  stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
 
 };
@@ -246,7 +247,7 @@ function liveMessage(live) {
 
 function workingNode() {
   const queued = [...state.pending.values()].filter((entry) => entry.status === 'sending').length;
-  return h('div', { class: 'working', role: 'status' }, h('span', { class: 'working-dots' }, h('i'), h('i'), h('i')), queued > 1 ? t('workingQueued', { count: queued - 1 }) : t('working'));
+  return h('div', { class: 'working', role: 'status' }, h('span', { class: 'working-dots' }, h('i'), h('i'), h('i')), h('span', { class: 'working-label' }, queued > 1 ? t('workingQueued', { count: queued - 1 }) : t('working')), h('button', { type: 'button', class: 'stop-turn', dataset: { action: 'stop-turn' }, disabled: state.stopping ? '' : null }, t(state.stopping ? 'stopping' : 'stopTurn')));
 }
 
 function renderFeed(stick) {
@@ -255,7 +256,7 @@ function renderFeed(stick) {
   const thread = state.selected ? threadById(state.selected) : null;
   const titles = snapshot.threads.map((entry) => [entry.id, entry.title, entry.state]);
   const live = state.live && (!state.selected || state.live.threadId === state.selected) ? state.live : null;
-  redraw('feed', [getLocale(), state.selected, snapshot.messages, snapshot.busy, [...state.pending.values()], [...state.busyCards], titles, dayKey(serverNow()), live?.text], () => {
+  redraw('feed', [getLocale(), state.selected, snapshot.messages, snapshot.busy, state.stopping, [...state.pending.values()], [...state.busyCards], titles, dayKey(serverNow()), live?.text], () => {
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
     const oldTop = feed.scrollTop;
 
@@ -1450,6 +1451,29 @@ function send() {
   void postMessage(entry);
 }
 
+/**
+ * ADR-0017: stop the turn that is running. The server answers what it stopped ('none' when the
+ * turn had already finished), and the cancelled reply arrives through the ordinary feed — the
+ * stop itself only has to clear the working row.
+ */
+async function stopTurn() {
+  if (state.stopping) return;
+  state.stopping = true;
+  renderFeed(false);
+  try {
+    const { status, data } = await request('/app/api/turn/stop', { id: uuid() });
+    const copy = data?.stopped === 'none' ? 'stopTurnNone' : 'stopTurnDone';
+    if (status !== 200) toast(t('stopTurnFailed'));
+    else toast(t(copy));
+    await refresh();
+  } catch {
+    toast(t('stopTurnFailed'));
+  } finally {
+    state.stopping = false;
+    renderFeed(false);
+  }
+}
+
 async function act(cardId, action) {
   if (state.busyCards.has(cardId)) return;
   state.busyCards.add(cardId);
@@ -2001,6 +2025,7 @@ document.addEventListener('click', (event) => {
   }
   if (dataset.jump) return jumpTo(dataset.jump);
   switch (dataset.action) {
+    case 'stop-turn': return void stopTurn();
     case 'provider': return openProvider(dataset.provider);
     case 'provider-variant': return selectProviderVariant(dataset.provider);
     case 'test-model': return void testModel();

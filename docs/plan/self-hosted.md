@@ -253,4 +253,13 @@ Only after the flows above are boring:
    snapshot timeline instead of re-rendering it, and only defers `workspace_changed` refetches by
    500 ms (coalesced) instead of dropping them.
 3. **Async start/stop with speculative execution** — start the next turn before the previous one
-   is fully settled. (#2, `ready-for-human`: needs the turn-lifecycle ADR first.)
+   is fully settled. ✅/✗ **Resolved as start-and-stop, not as speculation** (#2, ADR-0017). Turns
+   stay serial on the one root conversation, because that transcript *is* the steward's memory: a
+   forked second turn would answer without the exchange it was never given, and would double the
+   chance of two turns dispatching the same work. What the issue was protecting is delivered at the
+   boundary instead — a turn is durable before it can run (so a queued message survives an eviction
+   and is one run per intent for ever), and the owner can end it: `POST /app/api/turn/stop` aborts
+   the session, maps pi's `aborted` to `sh_run.status = 'cancelled'` (not the failure path, no
+   relays consumed), and a stop control now sits on the workspace's "Otto is working" row. Two
+   messages in quick succession still get two ordered replies under their own ids; over-budget wake
+   gating is untouched.

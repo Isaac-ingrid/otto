@@ -5,6 +5,11 @@
 /** A user-triggered run settled without an answer: the model call failed or was interrupted. */
 export const FAILED_RUN_NOTICE = "⚠️ Otto 暂时无法回复：模型请求未完成。请在「设置 → 模型服务」中测试连接，确认可用后重新发送这条消息。";
 
+/** ADR-0017: the owner stopped the turn from the workspace. Nothing went wrong, so it must not
+ *  read like a failure ("send it again") — but it must not pretend an answer arrived either, and
+ *  it says out loud that stopping a reply is not stopping the workers it already dispatched. */
+export const TURN_STOPPED_NOTICE = "已停止这次回答。已经派发的 worker 不受影响，需要停下请用 interrupt_worker。";
+
 /** A fresh deployment has no model key yet — the first thing a new owner hits, and "try again"
  *  cannot fix it. /网页 and /加机器 are deterministic (they mint credentials without a model),
  *  so the notice points at what already works. */

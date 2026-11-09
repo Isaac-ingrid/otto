@@ -36,6 +36,9 @@ export interface WorkspaceApiDeps {
   now(): number;
   submitMessage(input: WorkspaceInput): Promise<void>;
   submitAction(input: WorkspaceActionInput): Promise<void>;
+  /** ADR-0017: stop the turn the owner is watching (one conversation, so one abort). Absent in
+   *  deployments/test doubles that never open a model session. */
+  stopTurn?(input: { id: string }): Promise<{ stopped: "running" | "queued" | "none"; cancelled: string[] }>;
   endSession(sid: string): void;
   audit(reason: string, detail: string): void;
   requireOrigin?: boolean;
@@ -246,6 +249,13 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       const input = parseAction(await readJson(request));
       await deps.submitAction(input);
       return json({ id: input.id, accepted: true }, 202);
+    }
+    if (url.pathname === "/app/api/turn/stop" && deps.stopTurn) {
+      const { id } = await readJson(request);
+      if (typeof id !== "string" || !REQUEST_ID.test(id)) throw new WorkspaceError("bad_request");
+      // 200, not 202: the abort has already settled the run by the time this returns, and the
+      // answer (what was stopped) is the point of the call.
+      return json(await deps.stopTurn({ id }), 200);
     }
     if (url.pathname === "/app/api/logout") {
       deps.endSession(session.sid);

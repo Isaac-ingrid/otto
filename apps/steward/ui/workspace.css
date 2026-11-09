@@ -889,6 +889,16 @@ code { font-size: 10px; background: rgba(255,255,255,.045); border: 0; border-ra
 .message.live .message-body { border-left: 1px solid var(--green-dark); padding-left: 12px; }
 .working { font-family: var(--mono); font-size: 10px; letter-spacing: .05em; color: var(--green-deep); }
 .working-dots i { box-shadow: 0 0 6px rgba(94,203,74,.6); }
+/* ADR-0017: the stop control lives on the working row — the one place a turn is visibly alive. */
+.working-label { margin-right: 2px; }
+.working .stop-turn {
+  background: none; border: 1px solid var(--line-strong); color: var(--muted); font: inherit;
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px;
+  border-radius: var(--radius); cursor: pointer;
+}
+.working .stop-turn:hover:not([disabled]) { border-color: var(--green-dark); color: var(--green); }
+.working .stop-turn:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+.working .stop-turn[disabled] { opacity: .5; cursor: default; }
 
 /* Cards: a card is a stamped module, tinted by what it wants from you. */
 .card { border-color: var(--line-strong); }

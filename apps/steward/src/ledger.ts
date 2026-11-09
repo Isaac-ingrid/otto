@@ -251,7 +251,9 @@ export interface RunRow {
   channel: string | null;
   routedThreadId: string | null;
   text: string;
-  status: "open" | "settled";
+  /** `cancelled` is ADR-0017's terminal state for a turn the owner stopped: the input was
+   *  withdrawn before it acted (pi settles it `unanswered`/`aborted`), never a failure. */
+  status: "open" | "settled" | "cancelled";
   resultStatus: string | null;
   resultReason: string | null;
   resultText: string | null;
@@ -1991,6 +1993,19 @@ export function createLedger(deps: LedgerDeps) {
       sql`
         UPDATE sh_run SET status = 'settled', resultStatus = ${result.status}, resultReason = ${result.reason ?? null},
                           resultText = ${result.text ?? null}, replyOutboundId = ${replyOutboundId ?? null}, settledAt = ${now()}
+        WHERE operationId = ${operationId} AND status = 'open'
+      `;
+    },
+    /**
+     * ADR-0017: the owner stopped this turn. Its own terminal state, not `settled`, so nothing
+     * downstream mistakes the withdrawal for a failed run and the row is never resubmitted (the
+     * settler only re-submits `not_found`, and only for `open` rows). Idempotent: a turn already
+     * settled or cancelled keeps its row.
+     */
+    cancel(operationId: string, reason: string, replyOutboundId?: string): void {
+      sql`
+        UPDATE sh_run SET status = 'cancelled', resultStatus = 'cancelled', resultReason = ${reason},
+                          replyOutboundId = COALESCE(${replyOutboundId ?? null}, replyOutboundId), settledAt = ${now()}
         WHERE operationId = ${operationId} AND status = 'open'
       `;
     },
