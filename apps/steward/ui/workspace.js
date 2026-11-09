@@ -1,7 +1,8 @@
 // The Otto web workspace: one continuous conversation, the threads behind it, and the decisions
 // waiting for the owner. This file is the view and the wiring; what to show is decided by the
-// pure helpers in model.js and format.js. Data comes from /app/api/workspace and is kept
-// current by a WebSocket that only says "something changed" (the page then refetches).
+// pure helpers in model.js, format.js and thread-frames.js. Data comes from /app/api/workspace;
+// the WebSocket then either hands over the open Thread's own rows (`thread_events`/`thread_state`,
+// protocol §6.9) or says "something changed" and the page refetches in the background.
 //
 // Everything on screen is built with h() (dom.js) from text nodes: nothing a message, an agent
 // or a repository contains is ever parsed as HTML.
@@ -10,6 +11,7 @@ import { applyStatic, getLocale, localeTag, setLocale, t, tOr } from './i18n.js'
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, trimOpenMarkup } from './format.js';
 import { modelPicker } from './model-picker.js';
 import { markup } from './markup.js';
+import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
   ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
@@ -1267,6 +1269,7 @@ function accept(data) {
   renderAll({ stick: first });
   markSelectedRead();
   if (!socket) connect();
+  subscribeThread();
   if (first) {
     void loadSettings(true);
     const dialog = { '/app/machines': 'machines', '/app/settings': 'account' }[location.pathname];
@@ -1310,7 +1313,9 @@ function connect() {
     } catch {
       return; // not a frame of ours
     }
-    if (frame.t === 'workspace_changed') void refresh();
+    if (frame.t === 'workspace_changed') scheduleRefresh();
+    else if (frame.t === 'thread_events') showThreadRows(frame);
+    else if (frame.t === 'thread_state') showThreadState(frame);
     else if (frame.t === 'model_changed') void loadSettings();
     else if (frame.t === 'stream') showLive(frame);
   });
@@ -1322,6 +1327,76 @@ function connect() {
     attempts += 1;
   });
   current.addEventListener('error', () => current.close());
+}
+
+// ---- the open Thread, live (issues #1 and #4) -------------------------------------------------
+// One subscription for whichever Thread the page has open, resumed from the newest row already on
+// screen: `sh_timeline.id` is the cursor, so a reconnect asks for the gap and never repeats a row.
+// The connection holds the cursor (§6.9), which is why the id we ask from is the one we last drew.
+
+const subscription = { threadId: null, lastId: undefined };
+
+function sendFrame(frame) {
+  if (socket?.readyState !== 1) return false;
+  socket.send(JSON.stringify(frame));
+  return true;
+}
+
+/** Follow the open Thread (or stop following, on the whole-conversation view). Called whenever the
+ *  socket opens, the page is refetched, or the reader moves to another Thread. */
+function subscribeThread() {
+  const thread = state.selected ? threadById(state.selected) : null;
+  if (!thread) {
+    if (subscription.threadId !== null) sendFrame({ t: 'unsubscribe_thread' });
+    subscription.threadId = null;
+    subscription.lastId = undefined;
+    return;
+  }
+  const after = lastTimelineId(thread.timeline);
+  if (!sendFrame({ t: 'subscribe_thread', threadId: thread.id, ...(after === undefined ? {} : { after }) })) return;
+  subscription.threadId = thread.id;
+  subscription.lastId = after;
+}
+
+const patchThread = (threadId, change) => {
+  state.snapshot.threads = state.snapshot.threads.map((entry) => (entry.id === threadId ? change(entry) : entry));
+};
+
+/** `thread_events`: rows of the open Thread, oldest first — appended, never refetched. */
+function showThreadRows(frame) {
+  const thread = state.selected ? threadById(state.selected) : null;
+  if (!thread || frame.threadId !== thread.id) return;
+  const timeline = mergeTimeline(thread.timeline, frame.events);
+  patchThread(thread.id, (entry) => ({ ...entry, timeline }));
+  subscription.lastId = lastTimelineId(timeline) ?? subscription.lastId;
+  if (state.snapshot) {
+    renderContext();
+    renderSidebar();
+  }
+}
+
+/** `thread_state`: the chip, the workers' states, the open-question count. */
+function showThreadState(frame) {
+  const thread = state.selected ? threadById(state.selected) : null;
+  if (!thread || frame.threadId !== thread.id) return;
+  const next = applyThreadState(thread, frame);
+  patchThread(thread.id, () => next.thread);
+  if (!state.snapshot) return;
+  renderFeed(false); // the state chip in the heading
+  renderContext();
+  renderSidebar();
+  // A worker this page has never seen arrives only with a snapshot (agent, branch, machine…).
+  if (next.unknownWorkers) void refresh();
+}
+
+/** `workspace_changed` while a Thread is subscribed: the frames above have already shown what is
+ *  new, so the refetch waits a beat and coalesces a burst into one request (it still reconciles
+ *  everything the frames do not carry: cards, other Threads, settings). Without a subscription
+ *  nothing else is coming, so it refetches at once, exactly as before. */
+let refreshTimer = null;
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => { refreshTimer = null; void refresh(); }, subscription.threadId ? 500 : 0);
 }
 
 let liveTimer;
@@ -1703,6 +1778,7 @@ function go({ thread = null, worker = null } = {}, { push = true } = {}) {
   resizeInput();
   renderAll({ stick: true });
   markSelectedRead();
+  subscribeThread();
 }
 
 const select = (threadId, options) => go({ thread: threadId }, options);

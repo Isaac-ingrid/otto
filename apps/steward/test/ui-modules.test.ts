@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
 import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
+import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
 import { askUserCard, noteDecisionCard, offlineAskCard, reportCardFor, routineOfferCard, workerQuestionCard } from "../src/report-template.ts";
@@ -25,7 +26,7 @@ const asset = async (name: string): Promise<string> => (await fetchAsset(name)).
 // design §6) — it is included here for the sink scan and the import-export check (it has no
 // imports, so that check is a no-op for it) but NOT in the i18n-completeness scan below, whose
 // own file list is separate and intentionally does not reach it.
-const SCRIPTS = ["workspace.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "login.js"];
+const SCRIPTS = ["workspace.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
 
 /** The text between the parentheses of every call to `fn(…)` (not `x.fn(…)`, not `prefixfn(…)`). */
 function callArguments(source: string, fn: string): string[] {
@@ -395,5 +396,56 @@ describe("composer model choices", () => {
     expect(thinkingAfterModelChange(model, "max")).toBe("max");
     expect(thinkingAfterModelChange(model, "low")).toBe("off");
     expect(thinkingAfterModelChange({ thinkingLevels: ["high"], defaultThinkingLevel: "high" }, "off")).toBe("high");
+  });
+});
+
+
+// The open Thread's live rows (protocol §6.9, issue #4). The page holds a snapshot and the
+// steward pushes what came after it; these are the merges that must never lose or repeat a row.
+describe("thread frames", () => {
+  const row = (id: number, kind = "note") => ({ id, ts: 1000 + id, kind, text: `row ${id}` });
+  const rendered = (id: number) => ({ id, at: 1000 + id, kind: "note", text: `row ${id}` });
+
+  it("maps a pushed row to the shape the snapshot uses", () => {
+    expect(timelineEntry({ id: 7, ts: 1007, kind: "report", text: "done", refs: null })).toEqual({ id: 7, at: 1007, kind: "report", text: "done" });
+  });
+
+  it("resumes from the newest row on screen, or from nothing", () => {
+    expect(lastTimelineId([rendered(3), rendered(9)])).toBe(9);
+    expect(lastTimelineId([])).toBeUndefined();
+    expect(lastTimelineId(undefined)).toBeUndefined();
+  });
+
+  it("appends pushed rows and never repeats one the snapshot already had", () => {
+    const merged = mergeTimeline([rendered(1), rendered(2)], [row(2), row(3)]);
+    expect(merged).toEqual([rendered(1), rendered(2), rendered(3)]);
+  });
+
+  it("keeps rows ordered by id however they arrive", () => {
+    expect(mergeTimeline([rendered(5)], [row(6), row(7)])).toEqual([rendered(5), rendered(6), rendered(7)]);
+    expect(mergeTimeline([rendered(5)], [])).toEqual([rendered(5)]);
+    expect(mergeTimeline([], [row(2)])).toEqual([rendered(2)]);
+  });
+
+  it("renders each row exactly once across a reconnect", () => {
+    // Snapshot after the drop, then the gap the reconnect asked for (which the snapshot may cover).
+    const afterReconnect = mergeTimeline([rendered(1), rendered(2), rendered(3)], [row(3), row(4)]);
+    expect(afterReconnect.map((entry) => entry.id)).toEqual([1, 2, 3, 4]);
+    expect(mergeTimeline(afterReconnect, [row(4), row(5)]).map((entry) => entry.id)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("applies a state frame to the chip, the workers it names and the question count", () => {
+    const thread = { id: "t_1", state: "running", workers: [{ id: "w1", state: "running", agent: "pi" }, { id: "w2", state: "idle", agent: "claude-code" }] };
+    const { thread: next, unknownWorkers } = applyThreadState(thread, { state: "waiting_you", openQuestions: 2, workers: [{ workerId: "w2", state: "reported" }] });
+    expect(next.state).toBe("waiting_you");
+    expect(next.openQuestions).toBe(2);
+    expect(next.workers).toEqual([{ id: "w1", state: "running", agent: "pi" }, { id: "w2", state: "reported", agent: "claude-code" }]);
+    expect(unknownWorkers).toBe(false);
+    expect(thread.state).toBe("running"); // the caller decides what to replace, not this function
+  });
+
+  it("asks for a snapshot when a state frame names a worker the page has never seen", () => {
+    const thread = { id: "t_1", state: "running", workers: [{ id: "w1", state: "running" }] };
+    expect(applyThreadState(thread, { state: "running", openQuestions: 0, workers: [{ workerId: "w2", state: "running" }] }).unknownWorkers).toBe(true);
   });
 });
