@@ -672,14 +672,14 @@ export class FakeConnector {
 /** Pairs a device for the fake connector and returns it, ready to connect. */
 export async function pairFakeConnector(
   name = "mac-studio",
-  options: { run?: FakeWorkerRun | null; repos?: FakeRepo[]; autorun?: boolean; machineName?: string; agents?: string[] } = {},
+  options: { run?: FakeWorkerRun | null; repos?: FakeRepo[]; repoId?: string; autorun?: boolean; machineName?: string; agents?: string[] } = {},
 ): Promise<FakeConnector> {
   const { deviceId, token } = await pairDevice(name);
   const connector = new FakeConnector({
     deviceId,
     token,
     machineName: options.machineName ?? name,
-    repos: options.repos ?? [{ repoId: "/srv/repo-a", name: "repo-a" }],
+    repos: options.repos ?? [{ repoId: options.repoId ?? "/srv/repo-a", name: "repo-a" }],
     run: options.run,
     ...(options.autorun === undefined ? {} : { autorun: options.autorun }),
   });
