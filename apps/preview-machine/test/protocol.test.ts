@@ -1,4 +1,4 @@
-import { HelloMessageSchema } from "@alexlikevibe/protocol";
+import { HelloMessageSchema } from "@isaac2ingrid/protocol";
 import { describe, expect, it } from "vitest";
 import { browseDirectory, buildHello, registerRepository, scriptForStartWorker, workerEvent } from "../src/protocol.ts";
 

@@ -1,5 +1,5 @@
 {
-  "name": "@alexlikevibe/steward",
+  "name": "@isaac2ingrid/steward",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -18,7 +18,7 @@
     "typecheck:node-host": "tsc -p tsconfig.node-host.json"
   },
   "dependencies": {
-    "@alexlikevibe/protocol": "workspace:*",
+    "@isaac2ingrid/protocol": "workspace:*",
     "@earendil-works/pi-ai": "1.3.0",
     "@earendil-works/pi-durable": "1.3.0",
     "@simplewebauthn/server": "^14.0.3",

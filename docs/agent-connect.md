@@ -15,10 +15,10 @@ Do not read credential stores or ask the owner to paste SERVER_KEY, model keys, 
 
 ## 1 · Install the connector
 
-If the public npm package is available (`npm view @alexlikevibe/otto version`), install it to a stable location:
+If the public npm package is available (`npm view @isaac2ingrid/otto version`), install it to a stable location:
 
 ```sh
-npm install --global @alexlikevibe/otto
+npm install --global @isaac2ingrid/otto
 otto --version
 ```
 
@@ -31,10 +31,10 @@ An npm 404 is not a successful installation. Use your local checkout of otto. Fr
 ```sh
 cd <your checkout of otto>
 pnpm install
-pnpm --filter @alexlikevibe/otto build
+pnpm --filter @isaac2ingrid/otto build
 otto_package_dir="$(mktemp -d)"
 npm pack ./apps/connector --ignore-scripts --pack-destination "$otto_package_dir"
-npm install --global "$otto_package_dir"/alexlikevibe-otto-*.tgz
+npm install --global "$otto_package_dir"/isaac2ingrid-otto-*.tgz
 otto --version
 ```
 
@@ -47,7 +47,7 @@ Have the owner open the existing Otto web workspace and go to **Machines → Add
 The workspace generates a command shaped like:
 
 ```sh
-npx @alexlikevibe/otto connect https://otto.example.com <pairing-code>
+npx @isaac2ingrid/otto connect https://otto.example.com <pairing-code>
 ```
 
 Use the installed CLI with the URL and code from that command (append `--proxy <url>` on filtered networks — see step 0):

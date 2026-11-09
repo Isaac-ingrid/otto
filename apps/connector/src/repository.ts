@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import { promisify } from "node:util";
-import type { RegisterRepoResult } from "@alexlikevibe/protocol";
+import type { RegisterRepoResult } from "@isaac2ingrid/protocol";
 import type { LocalStore } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
 

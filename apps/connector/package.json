@@ -1,5 +1,5 @@
 {
-  "name": "@alexlikevibe/otto",
+  "name": "@isaac2ingrid/otto",
   "version": "0.2.0",
   "description": "Otto connector: pairs this machine with your steward and runs pi workers as a background service.",
   "type": "module",
@@ -29,7 +29,7 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "1.2.0",
     "@earendil-works/pi-coding-agent": "1.2.0",
-    "@alexlikevibe/protocol": "workspace:*",
+    "@isaac2ingrid/protocol": "workspace:*",
     "@types/node": "26.6.5",
     "@types/ws": "8.18.2",
     "esbuild": "0.28.2",

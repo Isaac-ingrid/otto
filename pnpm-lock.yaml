@@ -14,7 +14,7 @@ importers:
 
   apps/connector:
     devDependencies:
-      '@alexlikevibe/protocol':
+      '@isaac2ingrid/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       '@earendil-works/pi-ai':
@@ -53,7 +53,7 @@ importers:
 
   apps/preview-machine:
     dependencies:
-      '@alexlikevibe/protocol':
+      '@isaac2ingrid/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       agents:
@@ -78,7 +78,7 @@ importers:
 
   apps/steward:
     dependencies:
-      '@alexlikevibe/protocol':
+      '@isaac2ingrid/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       '@earendil-works/pi-ai':

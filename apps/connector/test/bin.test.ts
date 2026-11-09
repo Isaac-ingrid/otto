@@ -1,5 +1,5 @@
 // Subprocess tests against the built bin (bin/otto.js → dist/cli.js), which pretest
-// builds. This is the `npx @alexlikevibe/otto` surface: the Node gate, --version, usage, and
+// builds. This is the `npx @isaac2ingrid/otto` surface: the Node gate, --version, usage, and
 // the read-only subcommands on a clean OTTO_HOME.
 import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";

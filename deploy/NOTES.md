@@ -83,7 +83,7 @@ ssh -N -L 8787:127.0.0.1:8787 root@115.29.164.8   # then http://127.0.0.1:8787
 ```
 
 `GET /` renders the sign-in page; `POST /api/pairing` with `authorization: Bearer $SERVER_KEY`
-returns the `npx @alexlikevibe/otto connect …` line.
+returns the `npx @isaac2ingrid/otto connect …` line.
 
 ## Going public: `deploy/enable-tls.sh`
 

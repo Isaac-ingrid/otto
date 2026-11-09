@@ -7,7 +7,7 @@ import {
   type DirectoryBrowseArgs,
   type DirectoryBrowseResult,
   type DirectoryListing,
-} from "@alexlikevibe/protocol";
+} from "@isaac2ingrid/protocol";
 
 const MAX_SCANNED_ENTRIES = 10_000;
 

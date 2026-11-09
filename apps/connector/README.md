@@ -6,7 +6,7 @@
 
 **English** · [简体中文](#otto-connector-简体中文)
 
-`@alexlikevibe/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs in your Cloudflare account; the connector runs on a macOS or Linux computer and connects that computer to Otto. It keeps a WebSocket connection to your deployment, starts local coding agents such as pi and Claude Code, and reports their progress back to your personal agent.
+`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs in your Cloudflare account; the connector runs on a macOS or Linux computer and connects that computer to Otto. It keeps a WebSocket connection to your deployment, starts local coding agents such as pi and Claude Code, and reports their progress back to your personal agent.
 
 The connector makes only an outbound connection. You do not need to open an inbound port on your computer.
 
@@ -23,7 +23,7 @@ The connector makes only an outbound connection. You do not need to open an inbo
 Install the connector globally on the machine that will run your coding agents:
 
 ```sh
-npm install --global @alexlikevibe/otto
+npm install --global @isaac2ingrid/otto
 otto --version
 ```
 
@@ -34,7 +34,7 @@ Use a user-writable npm prefix. Do not use `sudo` to work around an npm permissi
 Open your Otto web workspace and go to **Machines → Add a machine → Create pairing command**. The workspace creates a one-time command:
 
 ```sh
-npx @alexlikevibe/otto connect https://otto.example.com <pairing-code>
+npx @isaac2ingrid/otto connect https://otto.example.com <pairing-code>
 ```
 
 If the connector is already installed globally, use the shorter form:
@@ -89,7 +89,7 @@ The deployment and connector runbooks live in the Otto repository checkout:
 
 # Otto connector 简体中文
 
-`@alexlikevibe/otto` 会安装 `otto` 命令。Otto 是部署在你 Cloudflare 账号里的 personal agent；connector 运行在 macOS 或 Linux 电脑上，把这台电脑接入 Otto。它保持到你部署地址的 WebSocket 连接，启动本地的 pi、Claude Code 等 coding agent，并把进展回传给 personal agent。
+`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是部署在你 Cloudflare 账号里的 personal agent；connector 运行在 macOS 或 Linux 电脑上，把这台电脑接入 Otto。它保持到你部署地址的 WebSocket 连接，启动本地的 pi、Claude Code 等 coding agent，并把进展回传给 personal agent。
 
 Connector 只主动发起出站连接，不需要在电脑上开放入站端口。
 
@@ -106,7 +106,7 @@ Connector 只主动发起出站连接，不需要在电脑上开放入站端口�
 在需要运行 coding agent 的电脑上全局安装：
 
 ```sh
-npm install --global @alexlikevibe/otto
+npm install --global @isaac2ingrid/otto
 otto --version
 ```
 
@@ -117,7 +117,7 @@ otto --version
 打开 Otto 网页工作台，进入 **机器 → 添加机器 → 生成配对命令**。工作台会生成一次性命令：
 
 ```sh
-npx @alexlikevibe/otto connect https://otto.example.com <pairing-code>
+npx @isaac2ingrid/otto connect https://otto.example.com <pairing-code>
 ```
 
 如果已经全局安装 connector，可以直接运行：
@@ -158,21 +158,21 @@ otto uninstall              # 移除服务，保留本地状态
 
 ## 发布（维护者）
 
+发布的是 `@isaac2ingrid/otto`，scope 就是 npm 账号名本身，所以账号必须先存在。
+
 ```sh
+npm login          # 先在 npmjs.com 注册 isaac2ingrid，再登录
 cd apps/connector
-npm login          # 账号：alexlikevibe
 npm publish        # publishConfig.registry 固定为 registry.npmjs.org
 ```
 
 `publishConfig.registry` 是必要的：本机 `~/.npmrc` 指向 `registry.npmmirror.com`，那是只读镜像，
-写入会失败，而报错看起来像网络问题。发布前记得先改 `package.json` 的 `version`（改名后的第一个版本
-是 0.2.0）。
+写入会失败，而报错看起来像网络问题。发布前先改 `package.json` 的 `version`（升级版本时用
+`otto upgrade`；当前是 0.2.0）。
 
-旧包 `@alexlikevibe/sig` 已在 npm 上（0.1.3），不要 unpublish——会打断已安装的机器，改用：
-
-```sh
-npm deprecate @alexlikevibe/sig "Renamed to @alexlikevibe/otto"
-```
+`@alexlikevibe/*` 那一支（`@alexlikevibe/sig@0.1.3` 等）属于上游作者自己的 npm 身份，不归本项目，
+也 deprecate 不了——那是别人的包。本项目从 `@isaac2ingrid/otto@0.2.0` 重新起算，没有要迁移的
+旧包：这台机器跑的是 checkout 里的 `bin/otto.js`，不是 npm 包。
 
 发布不属于自动化流程：本仓库没有 git remote，`.github/workflows/release.yml` 的 tag 触发路径
 只对带 `NPM_TOKEN` 的克隆有效。

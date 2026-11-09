@@ -11,7 +11,7 @@ import {
   HISTORY_WINDOW_SIZE,
   type HistoryChunkMessage,
   type HistoryPage,
-} from "@alexlikevibe/protocol";
+} from "@isaac2ingrid/protocol";
 
 export interface HistoryStreamDeps {
   /** Wire out (the transport's current socket). Dropping frames (closed socket) is fine. */

@@ -1,5 +1,5 @@
 {
-  "name": "@alexlikevibe/preview-machine",
+  "name": "@isaac2ingrid/preview-machine",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@alexlikevibe/protocol": "workspace:*",
+    "@isaac2ingrid/protocol": "workspace:*",
     "agents": "0.28.1"
   },
   "devDependencies": {

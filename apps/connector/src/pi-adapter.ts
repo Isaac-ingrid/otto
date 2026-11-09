@@ -21,7 +21,7 @@ import { installAssets, type InstalledAssets } from "./install.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PiProcess } from "./pi-process.ts";
-import type { HistoryPage } from "@alexlikevibe/protocol";
+import type { HistoryPage } from "@isaac2ingrid/protocol";
 
 /** Must match COMMAND_NAME in ./ext/otto-pi.ts (locked together by a test). */
 const OTTO_COMMAND = "otto";

@@ -1,5 +1,5 @@
 import { getAgentByName, routeAgentRequest } from "agents";
-import { parseToken } from "@alexlikevibe/protocol";
+import { parseToken } from "@isaac2ingrid/protocol";
 import { bearer, resolveServerKeys } from "./auth.ts";
 import { AVATAR_PATH, LOGO_PATH } from "./brand.ts";
 import { ownerAuthorized } from "./deployment-auth.ts";

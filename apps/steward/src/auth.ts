@@ -1,4 +1,4 @@
-import { serverKey, type ServerKey } from "@alexlikevibe/protocol";
+import { serverKey, type ServerKey } from "@isaac2ingrid/protocol";
 
 export function bearer(request: Request): string | null {
   return request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;

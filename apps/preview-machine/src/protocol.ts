@@ -1,5 +1,5 @@
-import { PROTOCOL_VERSION } from "@alexlikevibe/protocol";
-import type { DirectoryBrowseResult, DirectoryListing } from "@alexlikevibe/protocol";
+import { PROTOCOL_VERSION } from "@isaac2ingrid/protocol";
+import type { DirectoryBrowseResult, DirectoryListing } from "@isaac2ingrid/protocol";
 
 export type MachinePhase = "unpaired" | "connecting" | "welcomed" | "disconnected" | "error";
 
