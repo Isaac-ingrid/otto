@@ -190,7 +190,7 @@ User (Feishu/web)                                  DO                           
 | Role | How it is identified | May send | May receive |
 |---|---|---|---|
 | `connector` | Valid token | `hello`, `cmd_ack`, `cmd_result`, `events`, `history_chunk`, `error` | `welcome`, `cmd`, `events_ack`, `resync`, `history_req`, etc. |
-| `web` | A password/passkey browser session (or a legacy one-time link on an explicit-key deployment) | `subscribe`, `history_open`, `worker_cmd` (§6.8, only for a `workerId` currently subscribed), and other browser-type messages | State pushes, history chunks |
+| `web` | A password/passkey browser session (or a legacy one-time link on an explicit-key deployment) | `subscribe`, `subscribe_thread` (§6.9), `history_open`, `worker_cmd` (§6.8, only for a `workerId` currently subscribed), and other browser-type messages | State pushes, thread frames, history chunks |
 
 A connector connection sending browser-type messages, or a browser connection sending connector-type messages, always gets `error{code:"forbidden"}` back and the violation is counted; repeated violations may get the connection closed. `worker_cmd` for a `workerId` the connection has not subscribed to is likewise `forbidden` — see §6.8.
 
@@ -360,6 +360,40 @@ Values for `code`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `con
 - **Recording, not waking**: `sendToWorker`/`interruptWorker` already add a Thread timeline entry as part of normal dispatch; the `web_direct` provenance is what lets Otto tell, next time it reasons about that Thread, that this one did not come from its own tool call. Otto is not woken synchronously. Otto learns the outcome the ordinary way — the worker's resulting `progress`/`report`/`settled` events flow back through §4.3 and wake Otto under the existing rules, regardless of who issued the command.
 - A `refused` outcome from the `Dispatcher` (unknown/broken worker, empty text) never reaches `outbox`, so the DO answers with `error` directly instead of waiting for a `cmd_ack` that will never come.
 - Otherwise, `cmd_ack`/`cmd_result` follow §6.3 exactly and are relayed verbatim to the subscribed browser connection once the connector answers — the DO does not fabricate an optimistic ack.
+
+### 6.9 Thread subscription (web → DO, no steward step)
+
+A client that wants to follow one Thread — the workspace page, or any headless watcher — subscribes instead of polling `GET /api/messages` and diffing it. Frames carry the `sh_timeline` rows themselves; the row id doubles as the resume cursor.
+
+**`subscribe_thread`** (web → DO):
+
+```json
+{ "t": "subscribe_thread", "threadId": "th…", "after": 1234 }
+```
+
+- `after` is the last `sh_timeline.id` the client already has (reconnect → only the gap). Omitted: the Thread's most recent page, then live — the fresh-watcher case.
+- **Server-verified, like §6.8.** An unknown `threadId` is `error{code:"not_found"}`; a malformed `after` is `bad_request`. The cursor is stored on the connection (`ConnState.threadCursor`), never trusted from a later frame, and it is dropped with the subscription — a re-subscribe rebuilds it from that message's `after`.
+- **Connector connections are refused** (`forbidden`): this is a browser surface, same role fence as §5.3.
+
+**`thread_events`** (DO → web), the only row frame — used for both the subscribe backfill and every incremental push, so a watcher has one code path:
+
+```json
+{ "t": "thread_events", "threadId": "th…", "events": [ { "id": 1234, "ts": 1791965696, "kind": "note", "text": "…" } ], "more": true }
+```
+
+- Oldest first; `more: true` means the page was capped (`THREAD_PAGE` rows) and the remainder follows in the next frame. Nothing is ever dropped in favour of a "refetch everything" — the cursor makes that unnecessary.
+
+**`thread_state`** (DO → web): the part a watcher cannot read off the timeline.
+
+```json
+{ "t": "thread_state", "threadId": "th…", "state": "running", "workers": [ { "workerId": "w…", "state": "running" } ], "openQuestions": 0 }
+```
+
+Sent once on subscribe and then only when it changes (compared against the last frame on that connection), so a state transition reaches the watcher without a per-row cost.
+
+**`unsubscribe_thread`** (web → DO): `{ "t": "unsubscribe_thread" }` — frames stop at once and the cursor goes with it.
+
+Pushes ride the same coalescing nudge as `workspace_changed` (150 ms): one pass per burst, one indexed `(threadId, id)` query per subscribed connection, a bounded number of pages per pass with the remainder re-arming the nudge. That way no ledger write path can forget to notify, a burst does not fan out, and a watcher that fell far behind is caught up rather than silently truncated. No model is involved — this must work with the model unavailable, like the rest of the workspace.
 
 ## 7. Key flows
 

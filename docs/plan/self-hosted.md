@@ -203,8 +203,11 @@ machine that was paired against the tunnel URL (the URL is part of the pairing).
 Only after the flows above are boring:
 
 1. **LLM watchdog session** — the current watchdog is deterministic; the interesting Super-agent
-   idea is a second model pass that decides whether a stuck run should be re-planned.
+   idea is a second model pass that decides whether a stuck run should be re-planned. (#3;
+   the deterministic path must stay the floor.)
 2. **Thread subscription passthrough** — let a watcher subscribe to a running thread instead of
-   polling the ledger.
+   polling the ledger. ✅ DO side landed (#1, protocol §6.9): `subscribe_thread` → `thread_events`
+   with `sh_timeline.id` as the resume cursor, plus `thread_state` on change. The workspace page
+   still refetches on `workspace_changed`; adopting the frames there is a separate UI step.
 3. **Async start/stop with speculative execution** — start the next turn before the previous one
-   is fully settled.
+   is fully settled. (#2, `ready-for-human`: needs the turn-lifecycle ADR first.)

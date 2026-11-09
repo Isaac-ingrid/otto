@@ -44,7 +44,9 @@ import {
   PROTOCOL_VERSION,
   RegisterRepoResultSchema,
   SubscribeMessageSchema,
+  SubscribeThreadMessageSchema,
   UnsubscribeMessageSchema,
+  UnsubscribeThreadMessageSchema,
   WorkerCmdMessageSchema,
   generatePairingCode,
   mintToken,
@@ -92,7 +94,7 @@ import {
   type FauxRequestRecord,
   type StewardModels,
 } from "./llm/models.ts";
-import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type WakeRow } from "./ledger.ts";
+import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type TimelineRow, type WakeRow } from "./ledger.ts";
 import { DeploymentAuth, deploymentSecrets, ownerAuthorized } from "./deployment-auth.ts";
 import { loginPage } from "./login-page.ts";
 import { renderChangeReports } from "./notes.ts";
@@ -137,6 +139,9 @@ const MAX_OPEN_USER_RUNS = 10;
 const WORKSPACE_TAG = "workspace";
 /** How long a burst of ledger writes is coalesced into one `workspace_changed` frame. */
 const WORKSPACE_NUDGE_MS = 150;
+/** Rows per `thread_events` frame (issue #1). A watcher that fell further behind gets the rest
+ *  on the next flush, so the cap bounds one message, never the stream. */
+const THREAD_PAGE = 200;
 
 function clientIp(request: Request): string {
   return request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -186,6 +191,13 @@ interface ConnState {
   /** Set on a browser connection by `subscribe` (issue #84, §6.8): the one worker session
    *  view it currently has open, and the only `workerId` it may send `worker_cmd` to. */
   viewingWorkerId?: string;
+  /** Set by `subscribe_thread` (issue #1): the Thread whose timeline this connection follows,
+   *  with the last `sh_timeline.id` it has been sent — the resume cursor. Both are dropped by
+   *  `unsubscribe_thread`, and a re-subscribe rebuilds them from the watcher's `after`. */
+  viewingThreadId?: string;
+  threadCursor?: number;
+  /** The last `thread_state` frame sent on this subscription: an unchanged state is not resent. */
+  threadStateSig?: string;
 }
 
 type DirectoryReadResult = DirectoryBrowseResult | { ok: false; code: "machine_offline" | "browse_timeout" };
@@ -639,6 +651,7 @@ export class Steward extends Agent<Env> {
       this.workspaceNudge = undefined;
       const frame = JSON.stringify({ t: "workspace_changed" });
       for (const connection of this.getConnections(WORKSPACE_TAG)) if (this.webConnectionAlive(connection)) connection.send(frame);
+      this.pushThreadSubscriptions(); // issue #1: watchers following one Thread get the rows themselves
       this.workspaceStream.ensure(); // a Durable Object that woke after hibernation re-subscribes here
     }, WORKSPACE_NUDGE_MS);
   }
@@ -1416,6 +1429,12 @@ export class Steward extends Agent<Env> {
         case "unsubscribe":
           this.handleUnsubscribe(connection);
           return;
+        case "subscribe_thread":
+          this.handleSubscribeThread(connection, message);
+          return;
+        case "unsubscribe_thread":
+          this.handleUnsubscribeThread(connection, message);
+          return;
         case "worker_cmd":
           this.handleWorkerCmd(connection, message);
           return;
@@ -1424,7 +1443,8 @@ export class Steward extends Agent<Env> {
           return;
       }
     }
-    if (t === "history_open" || t === "history_ack" || t === "subscribe" || t === "unsubscribe" || t === "worker_cmd") {
+    const browserOnly = t === "history_open" || t === "history_ack" || t === "subscribe" || t === "unsubscribe" || t === "worker_cmd" || t === "subscribe_thread" || t === "unsubscribe_thread";
+    if (browserOnly) {
       // §5.3: browser-type messages on a connector connection.
       const id = (message as { id?: unknown }).id;
       this.sendError(
@@ -1630,6 +1650,107 @@ export class Steward extends Agent<Env> {
     if (!state) return;
     const { viewingWorkerId: _drop, ...rest } = state;
     connection.setState(rest as ConnState);
+  }
+
+  // ---- thread subscription (issue #1, P4) ------------------------------------------------------
+
+  /** Rows of one Thread after a cursor — the only read the subscription does per tick, and it
+   *  rides the `(threadId, id)` index. */
+  private threadRowsAfter(threadId: string, after: number, limit: number): TimelineRow[] {
+    return this.sql<TimelineRow>`
+      SELECT id, threadId, ts, kind, text FROM sh_timeline
+      WHERE threadId = ${threadId} AND id > ${after} ORDER BY id LIMIT ${limit}
+    `;
+  }
+
+  /** One `thread_events` frame, oldest first; returns whether the page was capped. Nothing is
+   *  ever dropped: the capped remainder follows on the next push (see `pushThreadSubscriptions`). */
+  private sendThreadRows(connection: Connection, threadId: string, rows: readonly TimelineRow[]): boolean {
+    if (rows.length === 0) return false;
+    const more = this.threadRowsAfter(threadId, rows[rows.length - 1]!.id, 1).length > 0;
+    const events = rows.map(({ id, ts, kind, text }) => ({ id, ts, kind, text }));
+    connection.send(JSON.stringify({ t: "thread_events", threadId, events, ...(more ? { more: true as const } : {}) }));
+    return more;
+  }
+
+  /** The part of a Thread a watcher cannot read off the timeline: its state, its workers, and how
+   *  many questions are open. Sent when it changes (and once on subscribe) — never per row. */
+  private sendThreadState(connection: Connection, threadId: string, state: ConnState | null): void {
+    const thread = this.ledger.threads.get(threadId);
+    if (thread === null) return;
+    const workers = this.sql<{ workerId: string; state: string }>`
+      SELECT workerId, state FROM sh_worker WHERE threadId = ${threadId} ORDER BY workerId`;
+    const openQuestions = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM sh_question WHERE threadId = ${threadId} AND status = 'open'`[0]!.n;
+    const frame = JSON.stringify({ t: "thread_state", threadId, state: thread.state, workers, openQuestions });
+    if (state?.threadStateSig === frame) return;
+    if (state !== null) connection.setState({ ...state, threadStateSig: frame });
+    connection.send(frame);
+  }
+
+  /** browser → DO: follow one Thread’s timeline instead of polling `GET /api/messages` (issue #1).
+   *  Nothing is trusted from the message: the Thread must exist, and the cursor lives on the
+   *  connection — a reconnecting watcher asks for the gap, not the whole history. */
+  private handleSubscribeThread(connection: Connection, raw: unknown): void {
+    const parsed = SubscribeThreadMessageSchema.safeParse(raw);
+    if (!parsed.success) {
+      this.sendError(connection, "bad_request", "invalid subscribe_thread");
+      return;
+    }
+    const { threadId, after } = parsed.data;
+    if (this.ledger.threads.get(threadId) === null) {
+      this.sendError(connection, "not_found", `thread ${threadId} does not exist`);
+      return;
+    }
+    const previous = connection.state as unknown as ConnState | null;
+    // A fresh watcher gets the Thread's most recent page; a reconnecting one gets only the gap.
+    let rows = after === undefined ? this.ledger.timeline.recent(threadId, THREAD_PAGE) : this.threadRowsAfter(threadId, after, THREAD_PAGE);
+    // A long gap is drained in pages rather than truncated; the cap only bounds one message.
+    for (let pages = 1; ; pages += 1) {
+      const cursor = rows.at(-1)?.id ?? after ?? 0;
+      connection.setState({ ...previous, viewingThreadId: threadId, threadStateSig: undefined, threadCursor: cursor } as ConnState);
+      const more = this.sendThreadRows(connection, threadId, rows);
+      if (!more || pages >= 5) break;
+      rows = this.threadRowsAfter(threadId, cursor, THREAD_PAGE);
+    }
+    this.sendThreadState(connection, threadId, connection.state as unknown as ConnState | null);
+  }
+
+  /** Stops the frames at once; the cursor goes with the subscription, so a later re-subscribe
+   *  without `after` starts from the Thread’s recent page again. */
+  private handleUnsubscribeThread(connection: Connection, raw: unknown): void {
+    if (!UnsubscribeThreadMessageSchema.safeParse(raw).success) {
+      this.sendError(connection, "bad_request", "invalid unsubscribe_thread");
+      return;
+    }
+    const state = connection.state as unknown as ConnState | null;
+    if (!state) return;
+    const { viewingThreadId: _thread, threadCursor: _cursor, threadStateSig: _sig, ...rest } = state;
+    connection.setState(rest as ConnState);
+  }
+
+  /** Pushes what is new to every watcher (issue #1). Driven by the same ledger-write nudge as the
+   *  workspace refetch, so a burst collapses into one pass and no write path can forget to notify;
+   *  a watcher that fell further behind than five pages re-arms the nudge instead of stalling. */
+  private pushThreadSubscriptions(): void {
+    let behind = false;
+    for (const connection of this.getConnections<ConnState>("web")) {
+      const state = connection.state as ConnState | null;
+      const threadId = state?.viewingThreadId;
+      if (!threadId) continue;
+      if (!this.webConnectionAlive(connection)) continue;
+      let cursor = state.threadCursor ?? 0;
+      for (let pages = 0; pages < 5; pages += 1) {
+        const rows = this.threadRowsAfter(threadId, cursor, THREAD_PAGE);
+        if (rows.length === 0) break;
+        cursor = rows[rows.length - 1]!.id;
+        connection.setState({ ...state, threadCursor: cursor });
+        if (!this.sendThreadRows(connection, threadId, rows)) break;
+        if (pages === 4) behind = true;
+      }
+      this.sendThreadState(connection, threadId, { ...state, threadCursor: cursor });
+    }
+    if (behind) this.notifyWorkspaces();
   }
 
   /** browser → DO → connector: §6.8. Dispatches through the ordinary Dispatcher path (same

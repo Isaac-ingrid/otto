@@ -278,14 +278,20 @@ export function helloPayload(deviceId: string, connEpoch: number, overrides: Rec
 // dropped the way an attach-after-send `once` listener can be.
 export class MessageReader {
   private readonly queue: Record<string, unknown>[] = [];
-  private readonly waiters: ((m: Record<string, unknown>) => void)[] = [];
+  /** Predicate-carrying waiters: a frame is handed to the first waiter that wanted it, and any
+   *  other frame is queued — so two frames arriving back to back cannot be swapped. */
+  private readonly waiters: Array<{ pred: (m: Record<string, unknown>) => boolean; resolve: (m: Record<string, unknown>) => void }> = [];
 
   constructor(ws: WebSocket) {
     ws.addEventListener("message", (event) => {
       const message = JSON.parse(event.data as string);
-      const waiter = this.waiters.shift();
-      if (waiter) waiter(message);
-      else this.queue.push(message);
+      const index = this.waiters.findIndex((waiter) => waiter.pred(message));
+      if (index < 0) {
+        this.queue.push(message);
+        return;
+      }
+      const [waiter] = this.waiters.splice(index, 1);
+      waiter!.resolve(message);
     });
   }
 
@@ -293,19 +299,27 @@ export class MessageReader {
     return this.nextWhere(() => true, timeoutMs);
   }
 
+  /** Whether a matching frame is already queued — for asserting that something is never sent. */
+  has(pred: (m: Record<string, unknown>) => boolean): boolean {
+    return this.queue.some(pred);
+  }
+
   async nextWhere(pred: (m: Record<string, unknown>) => boolean, timeoutMs = 5000): Promise<Record<string, unknown>> {
     const index = this.queue.findIndex(pred);
     if (index >= 0) return this.queue.splice(index, 1)[0]!;
     return new Promise((resolve, reject) => {
+      const waiter = {
+        pred,
+        resolve: (m: Record<string, unknown>) => {
+          clearTimeout(timer);
+          resolve(m);
+        },
+      };
       const timer = setTimeout(() => {
         const i = this.waiters.indexOf(waiter);
         if (i >= 0) this.waiters.splice(i, 1);
         reject(new Error(`timed out waiting for a matching message (${this.queue.length} queued)`));
       }, timeoutMs);
-      const waiter = (m: Record<string, unknown>) => {
-        clearTimeout(timer);
-        resolve(m);
-      };
       this.waiters.push(waiter);
     });
   }
