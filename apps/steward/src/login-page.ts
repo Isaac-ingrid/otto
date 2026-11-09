@@ -13,8 +13,37 @@ export function loginPage(message = "", status = 200): Response {
 <title>Sign in - Otto</title>
 ${BRAND_HEAD}
 <style>${BRAND_STYLE}
-:root{--page:#fcfcfa;--surface:#fff;--ink:#292e2a;--muted:#777c75;--line:#e8e9e2;--green:#37624d;--green-soft:#eaf0e9}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% 0%,var(--green-soft),transparent 65%),var(--page);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:32px 20px}main{width:100%;max-width:420px}.otto-brand{font-size:24px;margin-bottom:28px}h1{font-size:30px;letter-spacing:-.04em;line-height:1.2;margin:0 0 10px}.intro{color:var(--muted);margin:0 0 28px}.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:28px;box-shadow:0 12px 40px #292e2a06}label{display:block;font-weight:600;margin-bottom:8px}input,button{font:inherit}input{width:100%;border:1px solid #c8cec5;border-radius:8px;padding:12px;background:var(--surface);color:var(--ink);min-width:0}button{width:100%;padding:12px 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;font-weight:600}button.primary{background:var(--green);color:#fff;border-color:var(--green);margin-top:14px}button:disabled{opacity:.6;cursor:default}button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--green);outline-offset:3px}.divider{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:12px;margin:22px 0}.divider:before,.divider:after{content:"";height:1px;background:var(--line);flex:1}.status{font-size:13px;margin:12px 0 0;color:#9b332a}.notice{background:var(--green-soft);padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:13px}.recovery{color:var(--muted);font-size:13px;margin-top:24px}summary{cursor:pointer;color:var(--ink)}details p{margin:12px 0 0}code{font-size:12px;overflow-wrap:anywhere}.footer{color:var(--muted);font-size:12px;text-align:center;margin-top:20px}[hidden]{display:none!important}@media(max-width:440px){.card{padding:22px}body{padding:24px 16px}}
+:root{--page:#070a08;--surface:#0b0f0c;--inset:#0f1410;--ink:#dbe4d7;--ink-strong:#f1f7ee;--muted:#959f98;--muted-dim:#6c7a70;--line:#1e261d;--line-strong:#2b362a;--grid:#10150f;--green:#8dff62;--green-dark:#5ecb4a;--green-wash:#12200f;--red:#ff8871;--mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background-color:var(--page);background-image:linear-gradient(to right,var(--grid) 1px,transparent 1px),linear-gradient(to bottom,var(--grid) 1px,transparent 1px);background-size:76px 76px;color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:32px 20px;-webkit-font-smoothing:antialiased}
+main{width:100%;max-width:420px}
+.otto-brand{font-size:24px;margin-bottom:28px;color:var(--ink-strong)}
+h1{font-size:30px;letter-spacing:-.02em;line-height:1.2;margin:0 0 10px;color:var(--ink-strong)}
+.intro{color:var(--muted);margin:0 0 28px}
+.card{position:relative;background:var(--surface);border:1px solid var(--line-strong);border-radius:4px;padding:28px;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.card::before,.card::after{content:"";position:absolute;width:10px;height:10px;pointer-events:none}
+.card::before{top:-1px;left:-1px;border-top:1px solid var(--green-dark);border-left:1px solid var(--green-dark);border-top-left-radius:4px}
+.card::after{right:-1px;bottom:-1px;border-bottom:1px solid var(--line-strong);border-right:1px solid var(--line-strong);border-bottom-right-radius:4px}
+label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:8px}
+input,button{font:inherit}
+input{width:100%;border:1px solid var(--line-strong);border-radius:3px;padding:12px;background:var(--inset);color:var(--ink-strong);font-family:var(--mono);font-size:13px;min-width:0}
+button{width:100%;padding:12px 16px;border-radius:3px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);cursor:pointer;font-family:var(--mono);font-size:12px;letter-spacing:.04em;font-weight:600}
+button:hover{border-color:var(--green-dark);color:var(--green)}
+button.primary{background:var(--green);color:#06110a;border-color:var(--green);margin-top:14px;box-shadow:0 0 18px rgba(141,255,98,.14)}
+button.primary:hover{background:var(--green);color:#06110a}
+button:disabled{opacity:.55;cursor:default}
+button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{outline:1px solid var(--green);outline-offset:2px;box-shadow:0 0 0 3px rgba(141,255,98,.12)}
+.divider{display:flex;align-items:center;gap:14px;color:var(--muted-dim);font:10px var(--mono);letter-spacing:.12em;text-transform:uppercase;margin:22px 0}
+.divider:before,.divider:after{content:"";height:1px;background:var(--line);flex:1}
+.status{font-size:12px;margin:12px 0 0;color:var(--red)}
+.notice{background:var(--green-wash);border:1px solid #26351f;color:var(--green);padding:12px 16px;border-radius:3px;margin-bottom:20px;font:11px/1.7 var(--mono);letter-spacing:.02em}
+.recovery{color:var(--muted);font-size:13px;margin-top:24px}
+summary{cursor:pointer;color:var(--ink)}
+details p{margin:12px 0 0}
+code{font-family:var(--mono);font-size:12px;background:rgba(255,255,255,.045);border-radius:2px;padding:1px 4px;color:#a9b6ae;overflow-wrap:anywhere}
+.footer{color:var(--muted-dim);font:10px var(--mono);letter-spacing:.1em;text-transform:uppercase;text-align:center;margin-top:20px}
+[hidden]{display:none!important}
+@media(max-width:440px){.card{padding:22px}body{padding:24px 16px}}
 </style></head>
 <body><main>
 ${BRAND_LOCKUP}

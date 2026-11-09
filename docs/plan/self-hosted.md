@@ -98,6 +98,24 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## Log
 
+- **2026-11-10** — **P4 item 2 finished in the UI (#4) and the workspace restyled** (ADR-0016).
+  `ui/thread-frames.js` is the pure half: `mergeTimeline` folds pushed rows into the snapshot by
+  `sh_timeline.id` (dedupe + sort, so a row is never drawn twice), `applyThreadState` patches
+  workers by `workerId` and reports `unknownWorkers`; `ui/workspace.js` subscribes on
+  `accept()`/`go()`, writes `thread_events` straight into the context panel's timeline (and the
+  sidebar) without a refetch, patches `thread_state`, and
+  coalesces `workspace_changed` behind a 500 ms timer while subscribed — delayed, never dropped,
+  with a forced refetch when a state frame names a worker the snapshot does not have yet. 7 new
+  tests in `test/ui-modules.test.ts` (42 in the file).
+
+  The same session restyled every surface the owner sees: the dark "instrument panel" palette
+  replaces the light one in `workspace.css` (tokens, mono readouts, corner brackets, 4 px radii),
+  `src/login-page.ts` and `src/brand.ts` follow it, and `workspace.html` declares
+  `color-scheme: dark`. Checked against a live copy of the box's database served by the node host —
+  all-messages, thread, settings dialog, onboarding, login, plus 390 px layouts — which is how the
+  last defects were found: an uppercased repo name and thread title (`text-transform` reaching
+  text a person wrote), the UA focus ring on the onboarding heading, and a 48 px mobile composer.
+
 - **2026-11-09 (later, 2)** — **P4 item 1 landed: the ⟦watchdog⟧ ask** (#3, off by default).
   `sweepWorkers` reuses the stall pass it already runs: the same silence that emits the template
   notice now also queues one `⟦watchdog⟧` wake per stretch (`dedupeKey =
@@ -229,8 +247,10 @@ Only after the flows above are boring:
    45-minute verdict is untouched, the ask rides the ordinary wake queue (budget gate included),
    and `WATCHDOG_LLM` unset = today's behaviour byte for byte — hence shipped **off**.
 2. **Thread subscription passthrough** — let a watcher subscribe to a running thread instead of
-   polling the ledger. ✅ DO side landed (#1, protocol §6.9): `subscribe_thread` → `thread_events`
-   with `sh_timeline.id` as the resume cursor, plus `thread_state` on change. The workspace page
-   still refetches on `workspace_changed`; adopting the frames there is a separate UI step.
+   polling the ledger. ✅ Both halves landed: the DO side (#1, protocol §6.9) with `subscribe_thread`
+   → `thread_events` using `sh_timeline.id` as the resume cursor plus `thread_state` on change, and
+   the workspace page (#4) which now subscribes to the open thread, merges pushed rows into the
+   snapshot timeline instead of re-rendering it, and only defers `workspace_changed` refetches by
+   500 ms (coalesced) instead of dropping them.
 3. **Async start/stop with speculative execution** — start the next turn before the previous one
    is fully settled. (#2, `ready-for-human`: needs the turn-lifecycle ADR first.)
