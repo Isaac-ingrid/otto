@@ -40,7 +40,7 @@ Non-goals (MVP): parallel splitting and comparison-based collaboration; monitori
                                 │ stdin/stdout JSONL
                           pi --mode rpc (one process per worker)
                                 │ loads
-                          sig extension (report tool + forced re-report)
+                          otto extension (report tool + forced re-report)
 ```
 
 Division of responsibilities:
@@ -93,8 +93,8 @@ interface AgentAdapter {
 ```
 pi --mode rpc
    --session-id <workerId>
-   --extension <~/.sig/ext/sig-pi-<version>.ts>
-   --append-system-prompt <~/.sig/prompts/worker-<version>.md>
+   --extension <~/.otto/ext/otto-pi-<version>.ts>
+   --append-system-prompt <~/.otto/prompts/worker-<version>.md>
    --no-approve                      # only repos the user has approved use --approve
    [--tools read,grep,find,ls,report]  # read-only tasks
    [--model <provider/id>] [--thinking <level>]
@@ -103,14 +103,14 @@ cwd = worktree path (write tasks) or repository path (read-only tasks)
 
 - `workerId`: `w` plus a lowercase ULID, satisfying `--session-id`'s character restrictions (letters, digits, `.`, `_`, `-`, first and last character a letter or digit). The session id is the worker id, so there is no need to look up the file path afterwards. The connector still records `sessionFile` (returned by `get_state`) for validation and history reads.
 - **Sessions live in pi's default directory** (grouped by cwd), not a private one. Rationale: when the user returns to the computer, they can continue this very session with pi's own `--session`/`--resume` — the most natural path to "taking over". The cost is that external changes must be detected (§10).
-- The extension and system-prompt files are written into `~/.sig/` by the connector with each version and never reference in-repo files, so project content cannot swap them out.
-- Environment variables: inherit the user's environment; the connector's own credentials are **not** passed through — every `SIG_*` variable is stripped from the child env (issue #27), so the agent cannot find `SIG_HOME` (which points at the SQLite file holding the device token) or any other connector state in its environment.
+- The extension and system-prompt files are written into `~/.otto/` by the connector with each version and never reference in-repo files, so project content cannot swap them out.
+- Environment variables: inherit the user's environment; the connector's own credentials are **not** passed through — every `OTTO_*` variable is stripped from the child env (issue #27), so the agent cannot find `OTTO_HOME` (which points at the SQLite file holding the device token) or any other connector state in its environment.
 
 ### 4.3 The one-file-one-process invariant
 
 pi has no session-file lock (research §3). The connector guarantees:
 
-- Only one pi process per `workerId` at any moment, doubly enforced by `~/.sig/locks/<workerId>.lock` (holding pid and start time) plus in-memory state.
+- Only one pi process per `workerId` at any moment, doubly enforced by `~/.otto/locks/<workerId>.lock` (holding pid and start time) plus in-memory state.
 - Before launching, if the process named by the lock file is still alive, refuse to start and report `lock_held`; if the process no longer exists, treat the lock as stale — remove it and continue.
 
 ### 4.4 Start and stop sequences
@@ -221,7 +221,7 @@ command(commandId PK, workerId, kind, state: received|sending|sent|done|failed|a
 
 > **Implemented boundary (issue #15):** the tail check keys on the ADR-0001 `commandId` custom entry, never on text equality (repeated instructions would misadjudicate). Three outcomes, decided conservatively:
 >
-> 1. **Marker found** → `delivered`; the row settles `done` and hello's `pendingAcks` carries the recovered result to the DO. Prompt deliveries mark via the `/sig` wrapper; steer/follow-up deliveries cannot be extension commands, so they carry a `[sig:command <id>]` preamble that pi's input handler strips, appending the custom entry when pi *accepts the message into its queue* (pi persists the user message itself only when the queued turn starts — queue-acceptance is the decidability boundary for a steer).
+> 1. **Marker found** → `delivered`; the row settles `done` and hello's `pendingAcks` carries the recovered result to the DO. Prompt deliveries mark via the `/otto` wrapper; steer/follow-up deliveries cannot be extension commands, so they carry a `[otto:command <id>]` preamble that pi's input handler strips, appending the custom entry when pi *accepts the message into its queue* (pi persists the user message itself only when the queued turn starts — queue-acceptance is the decidability boundary for a steer).
 > 2. **Marker provably absent** → `failed(not_delivered)`, `retriable: true`: either the whole tail was read consistently past the write-ahead anchor entry, or the row never left `accepted` (the handler never started), or — for the write-ahead kinds `start_worker`/`send`/`resume` — the marker expectation was never armed, which by construction means *nothing was written to pi*. A torn final line, an unreadable file, or a marker-expecting delivery whose session file is unknown stays **ambiguous** — absence is evidence only when the read was complete.
 > 3. Everything else (commands with no session footprint: `interrupt`'s abort, `stop_process`, `cleanup_worktree`, `diag`, …) → honestly `ambiguous`; the DO marks the outbox row, puts a note on the Thread's timeline, and wakes the steward to `ask_user`. The connector never re-sends, and re-deliveries answer `ambiguous`/`duplicate`.
 >
@@ -234,7 +234,7 @@ command(commandId PK, workerId, kind, state: received|sending|sent|done|failed|a
 The connector ships a pi extension with each version (loaded by every process via `--extension`); it does exactly two things:
 
 1. Register the `report` tool.
-2. In `agent_before_settle`, if this run window's `outcome == "completed"`, `report` was never called, and this window has not been reminded yet, append a `custom_message` (`customType: "sig.report-reminder"`) with `continue: true`, forcing one more model request. At most one reminder per window, to prevent an infinite loop.
+2. In `agent_before_settle`, if this run window's `outcome == "completed"`, `report` was never called, and this window has not been reminded yet, append a `custom_message` (`customType: "otto.report-reminder"`) with `continue: true`, forcing one more model request. At most one reminder per window, to prevent an infinite loop.
 
 Measured: without forcing 5/6, with forcing 6/6, no duplicate calls (research #11).
 
@@ -256,7 +256,7 @@ What the model reports about itself is only "semantics". **Branch, commits, chan
 
 ### 7.3 Appended system prompt (draft)
 
-> 你是 Sig 派来的 worker，代表用户在当前目录工作。(You are a worker dispatched by Sig, working on the user's behalf in the current directory.)
+> 你是 Otto 派来的 worker，代表用户在当前目录工作。(You are a worker dispatched by Otto, working on the user's behalf in the current directory.)
 > 1. 只在当前目录内工作。(Work only inside the current directory.)
 > 2. 完成、遇到阻碍、或需要用户做决定时，调用 `report` 工具，且这应当是你的最后一个动作。需要用户回答的问题放进 `question`，状态用 `needs_decision`，不要用普通文字向用户提问。(When you finish, are blocked, or need the user to make a decision, call the `report` tool, and this should be your last action. Put questions that need a user answer into `question` with status `needs_decision`; do not ask the user in plain text.)
 > 3. 把关键决定和原因写进 `decisions`，把遗留问题写进 `leftovers`。(Write key decisions and their reasons into `decisions`, and leftover issues into `leftovers`.)
@@ -286,8 +286,8 @@ Each registered repository has a write policy with two independent settings (iss
 A Git-backed repository defaults to `worktree` + `parallel`. A plain repository defaults to `in-place` + `serial`: an in-place collision between two write tasks has no Git history to recover from, so the safer default is to queue them.
 
 When isolation is `worktree`:
-- Location: `~/.sig/worktrees/<repoName>-<pathHash>/<branchSlug>`.
-- Branch: `sig/<threadSlug>-<n>`; the starting point is `base` (on relay, the previous worker's branch), defaulting to the local HEAD of the repository's current default branch (no network access).
+- Location: `~/.otto/worktrees/<repoName>-<pathHash>/<branchSlug>`.
+- Branch: `otto/<threadSlug>-<n>`; the starting point is `base` (on relay, the previous worker's branch), defaulting to the local HEAD of the repository's current default branch (no network access).
 - **No automatic deletion.** `cleanup_worktree` runs only on an explicit command, and by default refuses worktrees with uncommitted changes or unpushed commits unless `force`.
 
 When isolation is `in-place`, the task runs directly in the repository's own directory; no worktree is created, and `concurrency` alone decides whether a second write task waits.
@@ -325,7 +325,7 @@ Measured: when the connector is killed, pi exits gracefully and cleans up its ch
 
 Approach: while running, snapshot pi's descendant processes every 5 seconds (pid plus process start time) into LocalStore. Cleanup is triggered by: pi exiting unexpectedly, connector startup, or a `stop_process` timeout. When cleaning up, each pid on the list is terminated only if it is still alive and the start time matches (to avoid killing a reused pid).
 
-This is the portable approach (macOS, Linux); the alternative is tagging pi's environment with `SIG_WORKER_ID` and scanning process environments, but reading other processes' environments behaves inconsistently across platforms, so it is not the first choice.
+This is the portable approach (macOS, Linux); the alternative is tagging pi's environment with `OTTO_WORKER_ID` and scanning process environments, but reading other processes' environments behaves inconsistently across platforms, so it is not the first choice.
 
 ### 9.4 Other failures
 
@@ -396,7 +396,7 @@ The `history` command backs "view raw history" in the web UI:
 - Each pi process is about 135–155 MB (measured). Default concurrency cap `clamp(floor(0.5 × 总内存 / 250 MB), 1, 8)` (总内存 = total memory), configurable; `start_worker` requests beyond the cap queue.
 - Idle reclamation: 10 minutes by default (§4.1).
 - The connector itself should keep a small resident memory footprint; all bulk data (sessions, events) stays on disk.
-- Logs: `~/.sig/logs/`, keeping the tail of pi's stderr per worker; logs contain no model keys or session content.
+- Logs: `~/.otto/logs/`, keeping the tail of pi's stderr per worker; logs contain no model keys or session content.
 
 ## 13. Security
 
@@ -422,6 +422,6 @@ The `history` command backs "view raw history" in the web UI:
 3. **Whether the report fields suffice for a handoff brief**: whether `decisions`, `leftovers`, and `next` are enough — revisit after the steward-side brief generation is built. *Partially resolved (issue #8): the brief assembles from decisions/leftovers/git pointers and renders them usefully; `next` is not used (the steward's task at hand supersedes it). Revisit with real relay traffic.*
 4. **External-use detection** (§10) relies on `ps` argument matching; it must be validated on both macOS and Linux. *(Partially resolved by #15: the matching itself is implemented and tested against macOS-shaped and Linux-shaped listings, but pi's own `process.title` rewrite hides a retitled pi's argv on both platforms — see the §10 implementation note. `--resume`/`--continue` sessions remain fundamentally undetectable by argv.)*
 5. **Context-usage threshold**: how high before suggesting a new session — needs real-world data. *(Issue #8 picked 80% of the reported `contextUsage` as the deterministic resume-vs-new-session threshold — `HIGH_CONTEXT_USAGE` in `handoff.ts`; revisit with data.)*
-6. *(Resolved by [ADR-0001](../adr/0001-mvp-implementation-baseline.md): `node:sqlite`; npm package `@nightboats/sig` per [ADR-0008](../adr/0008-nightboats-npm-scope.md), with launchd/systemd.)* **Local store selection and the connector's packaging/distribution** (one-command `npx` run, background service registration).
+6. *(Resolved by [ADR-0001](../adr/0001-mvp-implementation-baseline.md): `node:sqlite`; npm package `@nightboats/otto` per [ADR-0008](../adr/0008-nightboats-npm-scope.md), with launchd/systemd.)* **Local store selection and the connector's packaging/distribution** (one-command `npx` run, background service registration).
 7. **Cross-model `report` reliability**, and how models behave when they do not follow the "last action" rule.
 8. **Claude Code adaptation**: the first real test of this contract when a second agent plugs in; the focus is how gaps in `steer` and structured reporting degrade. *(Resolved by issue #17: ClaudeAdapter ships behind the same contract — headless `claude -p` with stream-json, an MCP `report` tool matched by `__report` suffix, and the §5.2 adjudication path shared with pi. The capability gaps degrade at the WorkerManager: no mid-run steer/follow-up (a send that lands mid-run is deferred to run end and delivered as the next prompt, reported as `queued`/`after_run_end`), no read-only, no images. Claude Code declares `interrupt: true` via kill + a synthetic `aborted` settle, `resume: true` via `--resume <uuid>` — the session id is derived deterministically from the workerId.)*

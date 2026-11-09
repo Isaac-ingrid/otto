@@ -22,7 +22,7 @@ Non-goals (MVP): multi-tenancy; end-to-end encryption (between connector and bro
 ```
  Feishu / web ─────────────┐
                            ▼
-Connector A ──wss──▶  Worker (entry, pre-check)──▶  Sig DO (singleton "owner")
+Connector A ──wss──▶  Worker (entry, pre-check)──▶  Otto DO (singleton "owner")
 Connector B ──wss──▶                                     ├─ connection management (tags: connector / web)
                                                          ├─ outbox: commands pending delivery
                                                          ├─ event_inbox: received events
@@ -38,7 +38,7 @@ Connector B ──wss──▶                                     ├─ connec
 ### 3.1 Connection
 
 ```
-wss://<worker-host>/agents/sig/owner?role=connector&proto=1
+wss://<worker-host>/agents/otto/owner?role=connector&proto=1
 Authorization: Bearer <device token>
 ```
 
@@ -142,7 +142,7 @@ The token is issued by the DO at pairing time, in the format:
 ```
 st1.<keyId>.<deviceId>.<epoch>.<issuedAt>.<mac>
 mac   = HMAC-SHA256(key.secret, "st1." + keyId + "." + deviceId + "." + epoch + "." + issuedAt)
-keyId = first 8 hex chars of SHA-256("sig:keyid:v1:" + key.secret)
+keyId = first 8 hex chars of SHA-256("otto:keyid:v1:" + key.secret)
 ```
 
 - Fresh deployments generate a random signing key inside the owner Durable Object; existing explicit-key deployments use the `SERVER_KEY` Worker secret and optional `SERVER_KEY_PREVIOUS` rotation window. The verifier accepts tokens signed by either configured explicit key. Tokens minted before the `keyId` segment existed (`st1.<deviceId>.<epoch>.<issuedAt>.<mac>`) are tried against every configured key.
@@ -170,7 +170,7 @@ User (Feishu/web)                                  DO                           
    │ "添加机器" ("add machine")                    │                                           │
    │──────────────────────────────────────────────▶│ create pairing{code, 10min}               │
    │◀── command hint ──────────────────────────────│                                           │
-   │  npx @alexlikevibe/sig connect <url> <code>                                                          │
+   │  npx @alexlikevibe/otto connect <url> <code>                                                          │
    │ ………… 在目标机器终端粘贴运行 ("paste & run on the target machine") ……………………………………………………………▶│
    │                                               │◀── POST /pair {code, machine}─────────────│
    │                                               │ validate code: exists, unexpired, unused  │
@@ -214,7 +214,7 @@ A connector connection sending browser-type messages, or a browser connection se
   "connector": { "version": "0.1.0", "os": "darwin", "arch": "arm64", "node": "22.13.0" },
   "machine": { "name": "mac-studio", "memTotalMB": 65536, "memFreeMB": 31000 },
   "agents": [ { "kind": "pi", "version": "1.2.0", "capabilities": { "steer": true, "followUp": true, "interrupt": true, "resume": true, "history": true, "images": true, "structuredReport": true, "readonly": true } } ],
-  "repos": [ { "repoId": "…", "name": "sig", "path": "/Users/x/code/sig", "defaultBranch": "main", "remote": "git@github.com:…", "capability": { "kind": "git", "gitRoot": "/Users/x/code/sig", "defaultBranch": "main", "remote": "git@github.com:…" } } ],
+  "repos": [ { "repoId": "…", "name": "otto", "path": "/Users/x/code/otto", "defaultBranch": "main", "remote": "git@github.com:…", "capability": { "kind": "git", "gitRoot": "/Users/x/code/otto", "defaultBranch": "main", "remote": "git@github.com:…" } } ],
   "limits": { "maxWorkers": 4, "running": 1 },
   "workers": [ { "workerId": "w…", "agent": "pi", "state": "idle", "lastSeq": 128, "sessionId": "…", "lastOutcome": "reported:done" } ],
   "pendingAcks": [ { "cmdId": "…", "state": "done" } ]
@@ -273,7 +273,7 @@ Images ride base64-encoded in `images` and must fit, together with the whole com
 { "t": "cmd_ack", "re": "<cmdId>", "status": "accepted" }
 { "t": "cmd_ack", "re": "<cmdId>", "status": "duplicate", "result": { "ok": true, "data": { } } }
 { "t": "cmd_ack", "re": "<cmdId>", "status": "rejected", "code": "not_registered_repo" }
-{ "t": "cmd_result", "re": "<cmdId>", "ok": true, "data": { "sessionId": "…", "branch": "sig/login-1", "effect": "after_current_tools" } }
+{ "t": "cmd_result", "re": "<cmdId>", "ok": true, "data": { "sessionId": "…", "branch": "otto/login-1", "effect": "after_current_tools" } }
 { "t": "cmd_result", "re": "<cmdId>", "ok": false, "error": { "code": "lock_held", "message": "…", "retriable": false } }
 ```
 
@@ -288,7 +288,7 @@ The web submits `{ id, deviceId, path }` to `POST /app/api/machines/directories`
 ```json
 { "t": "events", "id": "…", "batch": [
   { "workerId": "w…", "seq": 129, "ts": 1791965700000, "type": "progress", "phase": "tool", "tool": "edit", "target": "auth/session.ts", "turn": 3 },
-  { "workerId": "w…", "seq": 130, "ts": 1791965712000, "type": "report", "status": "done", "summary": "…", "changes": ["…"], "git": { "branch": "sig/login-1", "ahead": 2, "dirty": 0, "pushed": false } },
+  { "workerId": "w…", "seq": 130, "ts": 1791965712000, "type": "report", "status": "done", "summary": "…", "changes": ["…"], "git": { "branch": "otto/login-1", "ahead": 2, "dirty": 0, "pushed": false } },
   { "workerId": "w…", "seq": 131, "ts": 1791965712500, "type": "settled", "outcome": "reported", "usage": { "tokens": { "input": 2317, "output": 101 }, "cost": 0.004 } }
 ] }
 ```
@@ -333,7 +333,7 @@ Values for `code`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `con
 
 ### 6.8 Direct worker commands (web → DO → connector, no steward step)
 
-[ADR-0011](../adr/0011-direct-worker-chat-from-session-view.md): a browser that already has a worker session's view open can act on it directly, without routing through Sig's conversation. v1 scope is `send` and `interrupt` — the two kinds that already have a deterministic, LLM-free dispatch path (`Dispatcher.sendToWorker`/`interruptWorker`). `resume` and `stop_process` are not reachable this way yet; see ADR-0011 decision 1.
+[ADR-0011](../adr/0011-direct-worker-chat-from-session-view.md): a browser that already has a worker session's view open can act on it directly, without routing through Otto's conversation. v1 scope is `send` and `interrupt` — the two kinds that already have a deterministic, LLM-free dispatch path (`Dispatcher.sendToWorker`/`interruptWorker`). `resume` and `stop_process` are not reachable this way yet; see ADR-0011 decision 1.
 
 **`subscribe`** (web → DO): declares which worker's session view is open. Required before `worker_cmd`; tracked on the connection itself (lost on disconnect or hibernation, never inferred from any other state).
 
@@ -357,7 +357,7 @@ Values for `code`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `con
 - **Subscription-gated, not client-asserted.** The DO accepts `worker_cmd` only when the connection's own `subscribe` state names that exact `workerId`. No subscription, a mismatched one, or one since dropped (tab closed, unsubscribed, DO restarted and not yet re-subscribed): `error{code:"forbidden"}`. This is what makes "the UI already picked the target" an enforced property rather than a convention.
 - **Dispatch**: the DO calls `Dispatcher.sendToWorker`/`interruptWorker` with `provenance: "web_direct"` and `cmdId: id` — the same methods and the same `outbox` write (§4.2) a steward tool call would produce, so the resulting `cmd` the connector receives is indistinguishable from a steward-issued one.
 - **Idempotency**: `id` is the caller's `sh_web_request` (ADR-0004 decision 3), reused directly as `cmdId`; a retry under the same id is one effect, matching every other owner-web mutation. This is the one path where `cmdId` does not originate from a steward tool-call id (§7.1).
-- **Recording, not waking**: `sendToWorker`/`interruptWorker` already add a Thread timeline entry as part of normal dispatch; the `web_direct` provenance is what lets Sig tell, next time it reasons about that Thread, that this one did not come from its own tool call. Sig is not woken synchronously. Sig learns the outcome the ordinary way — the worker's resulting `progress`/`report`/`settled` events flow back through §4.3 and wake Sig under the existing rules, regardless of who issued the command.
+- **Recording, not waking**: `sendToWorker`/`interruptWorker` already add a Thread timeline entry as part of normal dispatch; the `web_direct` provenance is what lets Otto tell, next time it reasons about that Thread, that this one did not come from its own tool call. Otto is not woken synchronously. Otto learns the outcome the ordinary way — the worker's resulting `progress`/`report`/`settled` events flow back through §4.3 and wake Otto under the existing rules, regardless of who issued the command.
 - A `refused` outcome from the `Dispatcher` (unknown/broken worker, empty text) never reaches `outbox`, so the DO answers with `error` directly instead of waiting for a `cmd_ack` that will never come.
 - Otherwise, `cmd_ack`/`cmd_result` follow §6.3 exactly and are relayed verbatim to the subscribed browser connection once the connector answers — the DO does not fabricate an optimistic ack.
 

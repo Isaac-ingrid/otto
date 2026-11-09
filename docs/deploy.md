@@ -1,13 +1,13 @@
-# Deploying Sig
+# Deploying Otto
 
-A Sig deployment lives entirely in **your own Cloudflare account**: one Worker (the steward, with its Durable Object), no third-party service in the middle. Around it you connect machines, each running a small connector process. This guide walks the whole path: deploy → custom domain → model key → connector, then everything operational (costs, secret rotation, updates).
+A Otto deployment lives entirely in **your own Cloudflare account**: one Worker (the steward, with its Durable Object), no third-party service in the middle. Around it you connect machines, each running a small connector process. This guide walks the whole path: deploy → custom domain → model key → connector, then everything operational (costs, secret rotation, updates).
 
 Open the deployment URL to use the web workspace. Sign in with your deployment password or a registered passkey. Existing deployments can also use their `SERVER_KEY`-gated [owner API](usage.md#the-owner-api). [ADR-0010](adr/0010-browser-password-authentication.md) describes browser authentication and recovery.
 
 ## Two ways to deploy
 
 - **From a checkout** — deploy from your local clone straight into your own account. The hosted Deploy-to-Cloudflare button needs a public mirror of this repository; [ADR-0012](adr/0012-deploy-button-primary.md) records that channel.
-- **With your coding agent** — the guided channel ([ADR-0007](adr/0007-agent-driven-deploy.md)): end-to-end verification, custom domains where workers.dev is unreachable, and agent-operated setups. Use the [prompts in the README](../README.md#get-started): [agent-deploy.md](agent-deploy.md) deploys Sig, configures the secrets, and opens the workspace; [agent-connect.md](agent-connect.md) installs and pairs each machine separately. `npm run deploy -- --name <name>` wraps the deploy step.
+- **With your coding agent** — the guided channel ([ADR-0007](adr/0007-agent-driven-deploy.md)): end-to-end verification, custom domains where workers.dev is unreachable, and agent-operated setups. Use the [prompts in the README](../README.md#get-started): [agent-deploy.md](agent-deploy.md) deploys Otto, configures the secrets, and opens the workspace; [agent-connect.md](agent-connect.md) installs and pairs each machine separately. `npm run deploy -- --name <name>` wraps the deploy step.
 
 ## Deploy from a checkout
 
@@ -17,16 +17,16 @@ The deploy needs one secret:
 
 | Secret | What it is |
 |---|---|
-| `LOGIN_PASSWORD` | Your Sig login password. Use at least 15 characters and save it in a password manager. Common and compromised passwords are rejected. |
+| `LOGIN_PASSWORD` | Your Otto login password. Use at least 15 characters and save it in a password manager. Common and compromised passwords are rejected. |
 
 Your model provider's API key (default provider: DeepSeek — [platform.deepseek.com](https://platform.deepseek.com)) is not part of the deploy. After the build, open the Worker URL and sign in; the setup wizard, or the workspace's **Settings** page, takes the key.
 
-The secret is stored as a Cloudflare Secret. Sig checks the password when the application starts, so a completed deployment does not mean the password passed its policy. A rejected password cannot create a browser session. Follow the recovery instructions on the login page to replace it.
+The secret is stored as a Cloudflare Secret. Otto checks the password when the application starts, so a completed deployment does not mean the password passed its policy. A rejected password cannot create a browser session. Follow the recovery instructions on the login page to replace it.
 
 Run the deploy from the repository root:
 
 ```sh
-cd <your checkout of sig>
+cd <your checkout of otto>
 pnpm install
 wrangler deploy
 wrangler secret put LOGIN_PASSWORD
@@ -54,7 +54,7 @@ The Cloudflare Workers and Pages GitHub App serves both products. Reinstalling i
 
 ### Deployment succeeds but password sign-in fails
 
-If Sig reports a rejected deployment password, open your Worker in Cloudflare, then **Settings > Variables and Secrets**. Replace `LOGIN_PASSWORD` with a unique password of at least 15 characters and deploy the change. Merely entering a different password on Sig's login page does not change the configured Secret.
+If Otto reports a rejected deployment password, open your Worker in Cloudflare, then **Settings > Variables and Secrets**. Replace `LOGIN_PASSWORD` with a unique password of at least 15 characters and deploy the change. Merely entering a different password on Otto's login page does not change the configured Secret.
 
 If the login page reports that password checking is temporarily unavailable, wait a minute and retry. A checking-service outage does not mean your password failed policy. Existing passkeys remain available.
 
@@ -75,7 +75,7 @@ These links are not required for ordinary browser sign-in.
 
 ## Recover browser access
 
-If neither your password nor a passkey is available, open your Worker in the Cloudflare dashboard. In **Settings → Variables and Secrets**, replace the `LOGIN_PASSWORD` secret with a new strong password and deploy the updated Worker version. Open the Sig URL and sign in with the new password.
+If neither your password nor a passkey is available, open your Worker in the Cloudflare dashboard. In **Settings → Variables and Secrets**, replace the `LOGIN_PASSWORD` secret with a new strong password and deploy the updated Worker version. Open the Otto URL and sign in with the new password.
 
 A password reset revokes existing browser sessions and outstanding login links. Existing passkeys remain registered. Machine credentials and encrypted model settings are independent of the login password and remain usable.
 
@@ -87,8 +87,8 @@ Deploy authentication changes to the whole Worker version. Do not use gradual de
 
 Not required for function anymore (there is no chat platform that must reach you), but **mainland users should bind one**: `*.workers.dev` is blocked there outright (DNS pollution + SNI reset, live-tested in the spike), and the API, the web app, and the connector's WebSocket all need to reach the deployment. The agent runbook keeps this as an appendix attached only when workers.dev is unreachable.
 
-1. Dashboard → **Workers & Pages** → your Sig Worker → **Settings → Domains & Routes** → **Add → Custom domain**, e.g. `sig.example.com` (a zone hosted on Cloudflare DNS). Cloudflare creates the DNS record and the certificate.
-2. Use `https://sig.example.com` everywhere: API calls, `sig connect`, web links.
+1. Dashboard → **Workers & Pages** → your Otto Worker → **Settings → Domains & Routes** → **Add → Custom domain**, e.g. `otto.example.com` (a zone hosted on Cloudflare DNS). Cloudflare creates the DNS record and the certificate.
+2. Use `https://otto.example.com` everywhere: API calls, `otto connect`, web links.
 
 Passkeys are bound to the deployment hostname by WebAuthn. If you add or change the custom domain later, sign in with the password on the new hostname and register a new passkey there; recovery and rate limits remain deployment-wide.
 
@@ -104,7 +104,7 @@ The steward needs one LLM behind it. Default: `deepseek` / `deepseek-flash` (the
 
 To connect a provider at runtime, open **Settings → Model providers** and select its tile. Choose the plan and region if offered, paste the API key, and choose a model and thinking level. The dialog shows the preset endpoint and links to the provider's key page and console. **Test connection** makes a small model request using the current form values without saving them. It may use provider credits. Save the configuration when ready.
 
-The chat input shows the active model and thinking level. Its searchable model menu groups models by configured provider; the thinking menu shows only levels that the model supports. Changes are saved and applied to the conversation without a redeploy. If a model does not support the current thinking level, Sig uses its advertised default and tells you. Wait for the current reply to finish before switching.
+The chat input shows the active model and thinking level. Its searchable model menu groups models by configured provider; the thinking menu shows only levels that the model supports. Changes are saved and applied to the conversation without a redeploy. If a model does not support the current thinking level, Otto uses its advertised default and tells you. Wait for the current reply to finish before switching.
 
 A runtime selection wins over `vars.STEWARD_MODEL`. Each provider's key is sealed separately in the Durable Object (`sh_provider_key`), so switching back does not require key re-entry. `MODEL_KEY` seeds the default provider's key once. Missing credentials, rejected keys, and unavailable models produce instructions for fixing the configuration. Changing the shipped default (`deepseek` / `deepseek-flash`) requires re-running the routing eval (ADR-0001 decision 14); changing your own deployment's selection does not.
 
@@ -112,40 +112,40 @@ The daily budget soft cap (issue #28): `vars.DAILY_BUDGET_USD` (dollars per UTC 
 
 ## Connecting a machine
 
-For agent-guided setup, follow [agent-connect.md](agent-connect.md), including a source-install fallback if the npm package is unavailable. Install the CLI with `npm install --global @alexlikevibe/sig` (or that source fallback) before using the `sig` management commands below.
+For agent-guided setup, follow [agent-connect.md](agent-connect.md), including a source-install fallback if the npm package is unavailable. Install the CLI with `npm install --global @alexlikevibe/otto` (or that source fallback) before using the `otto` management commands below.
 
 Each machine you want to dispatch work to runs a small daemon that holds a WebSocket to the steward and drives the local coding agents. Open **Machines** in the workspace and generate the connection command there.
 
 Existing explicit-key deployments can also request a pairing code through the owner API:
 
 ```sh
-curl -X POST https://sig.example.com/api/pairing -H "Authorization: Bearer $SERVER_KEY"
-# → { "code": "AB12CD34", "command": "npx @alexlikevibe/sig connect https://sig.example.com AB12CD34" }
+curl -X POST https://otto.example.com/api/pairing -H "Authorization: Bearer $SERVER_KEY"
+# → { "code": "AB12CD34", "command": "npx @alexlikevibe/otto connect https://otto.example.com AB12CD34" }
 ```
 
-Run that command on the machine (macOS or Linux, Node ≥ 22.18). It pairs (redeeming the one-time code), installs a background service — launchd agent (`dev.sig.connector`) on macOS, systemd user unit on Linux — and starts it now and at login. `connect --foreground` runs attached instead (containers, dev boxes). On filtered networks append `--proxy http://127.0.0.1:7890` (issue #68): both channels, `git`, and worker children follow it, and it is stored so the service needs no inherited environment.
+Run that command on the machine (macOS or Linux, Node ≥ 22.18). It pairs (redeeming the one-time code), installs a background service — launchd agent (`dev.otto.connector`) on macOS, systemd user unit on Linux — and starts it now and at login. `connect --foreground` runs attached instead (containers, dev boxes). On filtered networks append `--proxy http://127.0.0.1:7890` (issue #68): both channels, `git`, and worker children follow it, and it is stored so the service needs no inherited environment.
 
-In the workspace's **Machines** page, choose **Add directory** on the online machine to register each existing directory. Sig detects a Git repository automatically; a plain directory registers too, with no branch, worktree isolation, or PR support. Registration updates the machine and the workspace without a restart. Project approval and write policy remain local settings managed with `sig repo-config`.
+In the workspace's **Machines** page, choose **Add directory** on the online machine to register each existing directory. Otto detects a Git repository automatically; a plain directory registers too, with no branch, worktree isolation, or PR support. Registration updates the machine and the workspace without a restart. Project approval and write policy remain local settings managed with `otto repo-config`.
 
 Day-to-day:
 
 ```sh
-sig repo-config ~/code/myproject --isolation worktree --concurrency serial   # worktree (default) | in-place isolation; parallel (default) | serial concurrency
-sig repo-config ~/code/myproject --approve            # trust the repo's local pi extensions (§13)
-sig status                       # service, pairing, workers, installed assets
-sig proxy [url]                  # show/set the stored proxy; --clear removes it (issue #68)
-sig doctor                       # pairing, service, proxy, reachability diagnosis (issue #68)
-sig logs                         # tail ~/.sig/logs/connector.log (no keys, no session content)
-sig stop | start | restart       # control the service
-sig upgrade                      # npm-install the latest package and restart the service
-sig uninstall                    # remove the service (keeps ~/.sig data)
+otto repo-config ~/code/myproject --isolation worktree --concurrency serial   # worktree (default) | in-place isolation; parallel (default) | serial concurrency
+otto repo-config ~/code/myproject --approve            # trust the repo's local pi extensions (§13)
+otto status                       # service, pairing, workers, installed assets
+otto proxy [url]                  # show/set the stored proxy; --clear removes it (issue #68)
+otto doctor                       # pairing, service, proxy, reachability diagnosis (issue #68)
+otto logs                         # tail ~/.otto/logs/connector.log (no keys, no session content)
+otto stop | start | restart       # control the service
+otto upgrade                      # npm-install the latest package and restart the service
+otto uninstall                    # remove the service (keeps ~/.otto data)
 ```
 
-State lives under `~/.sig/` (`SIG_HOME` to move it). Prerequisites: the coding agent you intend to use (pi first, Claude Code next) already installed and logged in — Sig never touches the agent's own credentials. Revoke a machine any time from the workspace (机器 → 撤销): its token dies immediately (close code 4403).
+State lives under `~/.otto/` (`OTTO_HOME` to move it). Prerequisites: the coding agent you intend to use (pi first, Claude Code next) already installed and logged in — Otto never touches the agent's own credentials. Revoke a machine any time from the workspace (机器 → 撤销): its token dies immediately (close code 4403).
 
 ## Costs
 
-Sig is designed to be **dormant — and cost nothing — most of the time** (spec §12.3). Orders of magnitude, so the bill never surprises you (check current prices on Cloudflare's pricing page; these drift):
+Otto is designed to be **dormant — and cost nothing — most of the time** (spec §12.3). Orders of magnitude, so the bill never surprises you (check current prices on Cloudflare's pricing page; these drift):
 
 - **Cloudflare**: one Worker + one Durable Object. Workers free tier includes 100k requests/day; Durable Objects billing is per-request and per-GB-duration — a personal deployment idles far below the paid tier's minimums, and the WebSocket hibernation API means connected-but-idle connectors cost ~nothing.
 - **Model**: the real cost. deepseek-flash list prices make a typical day (a handful of dispatches + bookkeeping wakes) well under the default $1/day cap; the budget counter is exact and `/花费` reads it without a model call.
@@ -173,4 +173,4 @@ Why the `wrangler deploy` in between matters: a resident Durable Object isolate 
 
 ## Updates
 
-`git pull && wrangler deploy` updates the steward. On each machine, `sig upgrade` npm-installs the latest connector package and restarts the service; the fresh daemon rewrites its versioned pi assets on boot (old versions stay on disk for sessions still referencing them).
+`git pull && wrangler deploy` updates the steward. On each machine, `otto upgrade` npm-installs the latest connector package and restarts the service; the fresh daemon rewrites its versioned pi assets on boot (old versions stay on disk for sessions still referencing them).

@@ -39,7 +39,7 @@ at bundle time. No `if (isNode)` branches, no duplicated business logic.
 | `WebSocketPair`, 101 `Response` | `node-host/globals.ts`, `node-host/websocket.ts` | undici rejects `status: 101`, so `Response` is subclassed; `Symbol.hasInstance` keeps `instanceof Response` true for real responses |
 | `ctx.acceptWebSocket` / `getWebSockets(tag)` | `node-host/state.ts` | in-memory registry; also installs `serializeAttachment`/`deserializeAttachment` on the global `WebSocket` prototype |
 | DO namespace binding (`env.Steward`) | `node-host/namespace.ts` | one live instance behind a `Proxy`, so `getAgentByName()` and `stub.pair(...)` RPC both work |
-| `env.ASSETS` | `node-host/env.ts` | serves `apps/steward/ui` from disk |
+| `env.ASSETS` | `node-host/env.ts` | serves `apps/steward/ui` from disk: a deployment copies it next to the bundle as `dist/ui`, or `/workspace` and `/brand/*` return 404 |
 | `LOGIN_RATE_LIMITER` | same file | 10 requests / 60 s per key, in memory |
 | `CF-Connecting-IP` | `node-host/client-ip.ts` | workerd fills it in, nginx sets only `X-Forwarded-For`; without it every client shared one `unknown` throttle bucket (see `docs/plan/self-hosted.md` Finding 4) |
 
@@ -73,10 +73,10 @@ Environment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SIG_DB_PATH` | `apps/steward/data/steward.sqlite` | SQLite file (WAL mode) |
+| `OTTO_DB_PATH` | `apps/steward/data/steward.sqlite` | SQLite file (WAL mode) |
 | `PORT` | `8787` | listen port |
 | `HOST` | `0.0.0.0` | bind address |
-| `SIG_CONFIG_DIR` | repo root | where `.dev.vars` is read from |
+| `OTTO_CONFIG_DIR` | repo root | where `.dev.vars` is read from |
 
 `.dev.vars` supplies the same values `wrangler dev` would: `LOGIN_PASSWORD`, `SERVER_KEY`,
 `STEWARD_MODEL` (JSON), `DAILY_BUDGET_USD`, `MODEL_KEY`. As in production, the model API key
@@ -158,12 +158,12 @@ differs. 666 of 667 tests pass.
 1. **Host.** 2 vCPU / 2 GB, Ubuntu 24.04, Node ≥ 22.18 (the repo's `engines` floor).
 2. **TLS.** Caddy in front of `127.0.0.1:8787` (the app binds loopback in that case:
    `HOST=127.0.0.1`). Do not expose the port directly.
-3. **Process.** systemd, `Restart=always`, `EnvironmentFile=/etc/sig/env`:
+3. **Process.** systemd, `Restart=always`, `EnvironmentFile=/etc/otto/env`:
 
    ```ini
    [Service]
-   WorkingDirectory=/opt/sig/apps/steward
-   EnvironmentFile=/etc/sig/env
+   WorkingDirectory=/opt/otto/apps/steward
+   EnvironmentFile=/etc/otto/env
    ExecStart=/usr/bin/node dist/node/steward-node.mjs
    Restart=always
    RestartSec=2
@@ -172,7 +172,7 @@ differs. 666 of 667 tests pass.
 4. **Backups.** WAL mode tolerates being copied with `sqlite3 ... ".backup"` while running:
 
    ```bash
-   sqlite3 "$SIG_DB_PATH" ".backup '/var/backups/sig-$(date +%F).sqlite'"
+   sqlite3 "$OTTO_DB_PATH" ".backup '/var/backups/otto-$(date +%F).sqlite'"
    ```
 
    Keep seven days, ship them off the box (rclone to object storage). This file *is* the

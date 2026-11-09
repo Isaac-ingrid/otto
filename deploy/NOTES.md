@@ -1,22 +1,41 @@
-# Sig on 115.29.164.8 (Aliyun ECS, Hangzhou)
+# Otto on 115.29.164.8 (Aliyun ECS, Hangzhou)
 
 Fresh notes for this box. Secrets live only in `deploy/aliyun.env` (untracked) and, on the
-server, `/etc/sig/.dev.vars` (root:sig, 0640). Nothing here is a credential.
+server, `/etc/otto/.dev.vars` (root:otto, 0640). Nothing here is a credential.
+
+## Renamed from Sig (2026-11, [ADR-0014](../docs/adr/0014-rename-to-otto.md))
+
+The box was rebuilt at the new paths rather than edited: the derivation strings changed, so the
+old database could not be carried over anyway. What was done, in order: `systemctl disable --now
+sig`; create the `otto` user and `/var/lib/otto`, `/etc/otto`, `/opt/otto`; install
+`deploy/otto.service` (now the source of truth for the unit, it used to live only on the box);
+copy the bundle and `apps/steward/ui`; `deploy/apply-env.sh` to write `/etc/otto/.dev.vars`;
+then `deploy/harden.sh` again for the limits, journal cap and backup timer under their new names.
+The connector was re-paired (`dev_c482db6a4879`) and `tstock` re-registered.
+
+The old layout is still on disk untouched — `/opt/sig`, `/etc/sig`, `/var/lib/sig`, the `sig`
+user, and the `sig`-era code in the bundle — costing about 11 MB plus the database. Delete it
+once a week of the new instance has passed:
+
+```bash
+./deploy/remote.sh 'rm -rf /opt/sig /etc/sig /var/lib/sig && userdel sig'
+```
+
 
 ## What is installed
 
 | Path | What |
 | --- | --- |
 | `/opt/node` | Node v24.22.2 tarball from `mirrors.aliyun.com/nodejs-release`, symlinked into `/usr/local/bin/{node,npm,npx}` |
-| `/opt/sig/dist/node/steward-node.mjs` | the esbuild bundle, built on the Mac and shipped (the box has 1.7 GB RAM — do not build here) |
-| `/opt/sig/dist/ui` | copy of `apps/steward/ui`; `createAssets` resolves `dist/ui` from the bundle's own directory |
-| `/opt/sig/node_modules/ws` | the bundle's only runtime dependency (`ws` is external by design) |
-| `/etc/sig/.dev.vars` | `SERVER_KEY`, `LOGIN_PASSWORD`, `MODEL_KEY`, `STEWARD_MODEL`, `DAILY_BUDGET_USD` |
-| `/var/lib/sig/steward.sqlite` | the database (WAL) |
-| `/etc/systemd/system/sig.service` | `User=sig`, `Restart=always`, binds `127.0.0.1:8787` |
+| `/opt/otto/dist/node/steward-node.mjs` | the esbuild bundle, built on the Mac and shipped (the box has 1.7 GB RAM — do not build here) |
+| `/opt/otto/dist/ui` | copy of `apps/steward/ui`; `createAssets` resolves `dist/ui` from the bundle's own directory |
+| `/opt/otto/node_modules/ws` | the bundle's only runtime dependency (`ws` is external by design) |
+| `/etc/otto/.dev.vars` | `SERVER_KEY`, `LOGIN_PASSWORD`, `MODEL_KEY`, `STEWARD_MODEL`, `DAILY_BUDGET_USD` |
+| `/var/lib/otto/steward.sqlite` | the database (WAL) |
+| `/etc/systemd/system/otto.service` | `User=otto`, `Restart=always`, binds `127.0.0.1:8787` |
 
-`SIG_CONFIG_DIR=/etc/sig` is not optional: the default is derived from the bundle location and
-would look for `.dev.vars` above `/opt/sig`.
+`OTTO_CONFIG_DIR=/etc/otto` is not optional: the default is derived from the bundle location and
+would look for `.dev.vars` above `/opt/otto`.
 
 ## Model
 
@@ -38,7 +57,7 @@ lets a sealed row with a `modelId` beat `STEWARD_MODEL` — so editing `.dev.var
 switch changes nothing until that row is cleared:
 
 ```bash
-./deploy/remote.sh 'systemctl stop sig && sqlite3 /var/lib/sig/steward.sqlite "DELETE FROM sh_model" && systemctl start sig'
+./deploy/remote.sh 'systemctl stop otto && sqlite3 /var/lib/otto/steward.sqlite "DELETE FROM sh_model" && systemctl start otto'
 ```
 
 Verified here: the composer switched this deployment from `high` to `low` (the switch keeps the
@@ -49,11 +68,11 @@ message answered normally, and the level went back to `high`.
 
 ```bash
 pnpm build:node                                   # on the Mac
-./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/sig/dist/node
-./deploy/remote.sh 'systemctl restart sig && sleep 3 && systemctl is-active sig'
+./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node
+./deploy/remote.sh 'systemctl restart otto && sleep 3 && systemctl is-active otto'
 ```
 
-The UI is shipped separately (`--copy apps/steward/ui /opt/sig/dist/ui`) and needs no restart.
+The UI is shipped separately (`--copy apps/steward/ui /opt/otto/dist/ui`) and needs no restart.
 
 ## Access today
 
@@ -64,18 +83,18 @@ ssh -N -L 8787:127.0.0.1:8787 root@115.29.164.8   # then http://127.0.0.1:8787
 ```
 
 `GET /` renders the sign-in page; `POST /api/pairing` with `authorization: Bearer $SERVER_KEY`
-returns the `npx @alexlikevibe/sig connect …` line.
+returns the `npx @alexlikevibe/otto connect …` line.
 
 ## Going public: `deploy/enable-tls.sh`
 
-The vhost lives in git as `deploy/nginx-sig.conf`, rendered by `deploy/enable-tls.sh`. It is not
+The vhost lives in git as `deploy/nginx-otto.conf`, rendered by `deploy/enable-tls.sh`. It is not
 Caddy: nginx already owns 80 here (it serves `/root/tstock/dist`), and Caddy would want 80 for
 ACME. nginx also ships without a `$connection_upgrade` map, which the script adds as
 `/etc/nginx/conf.d/websocket-upgrade.conf`.
 
 ```bash
 # 1. ICP 备案 must be done first — a Hangzhou ECS cannot serve 80/443 to a domain without it.
-# 2. DNS A record -> 115.29.164.8, and set SIG_DOMAIN (+ optionally SIG_EMAIL) in aliyun.env.
+# 2. DNS A record -> 115.29.164.8, and set OTTO_DOMAIN (+ optionally OTTO_EMAIL) in aliyun.env.
 ./deploy/enable-tls.sh --stage   # vhost on :80, no cert: enough to check proxying
 ./deploy/enable-tls.sh --live    # certbot --nginx: 443 + http->https redirect
 ```
@@ -88,12 +107,12 @@ Rehearsed on 2026-11 against a throwaway `server_name`: `nginx -t` clean, the `d
 Two headers are load-bearing, not decoration: `node-host/server.ts` builds the request origin
 from `Host` + `X-Forwarded-Proto`, and the app stores it in `sh_deploy.origin` to mint absolute
 login links. Verified: a pairing call through the vhost returned
-`npx … connect http://sig.test.invalid CODE`, i.e. the forwarded host, not `127.0.0.1:8787`.
+`npx … connect http://otto.test.invalid CODE`, i.e. the forwarded host, not `127.0.0.1:8787`.
 The service itself stays on loopback; only nginx is exposed.
 
 ## Ops hardening: `deploy/harden.sh`
 
-One idempotent script, run once on the box (it restarts `sig` and journald):
+One idempotent script, run once on the box (it restarts `otto` and journald):
 
 ```bash
 ./deploy/remote.sh --copy deploy/harden.sh /tmp/
@@ -102,11 +121,11 @@ One idempotent script, run once on the box (it restarts `sig` and journald):
 
 | Piece | Value | Why |
 | --- | --- | --- |
-| `sig.service.d/limits.conf` | `StartLimitBurst=10`, `StartLimitIntervalSec=300`, `RestartSec=3` | systemd's defaults (5 starts / 10 s) turn one transient failure into a service that stays down |
+| `otto.service.d/limits.conf` | `StartLimitBurst=10`, `StartLimitIntervalSec=300`, `RestartSec=3` | systemd's defaults (5 starts / 10 s) turn one transient failure into a service that stays down |
 | same | `MemoryHigh=800M`, `MemoryMax=1200M` | box has 1.7 GB; a Node heap blow kills the steward only, never nginx/sshd, and `Restart=always` brings it back — workers live on the laptop, so a restart is survivable (verified) |
-| `journald.conf.d/sig.conf` | `SystemMaxUse=200M`, `RuntimeMaxUse=64M` | the steward is chatty during runs; journal was 16 MB and unbounded |
-| `sig-backup.timer` | daily 03:20 UTC (±5 min), `Persistent=true` | `sqlite3 .backup` is an online copy: consistent with a live WAL writer, no long lock |
-| `sig-backup.service` | `/var/lib/sig/backups/steward-<utc>.sqlite`, keep 14 | bad upgrade / accidental delete recovery |
+| `journald.conf.d/otto.conf` | `SystemMaxUse=200M`, `RuntimeMaxUse=64M` | the steward is chatty during runs; journal was 16 MB and unbounded |
+| `otto-backup.timer` | daily 03:20 UTC (±5 min), `Persistent=true` | `sqlite3 .backup` is an online copy: consistent with a live WAL writer, no long lock |
+| `otto-backup.service` | `/var/lib/otto/backups/steward-<utc>.sqlite`, keep 14 | bad upgrade / accidental delete recovery |
 
 Verified after the first run: service `active`, limits in `systemctl show`, a real backup
 written and `PRAGMA integrity_check` = `ok` (3 threads, 14 outbound rows inside). Off-box copy
@@ -124,7 +143,7 @@ written somewhere it should not have been, rotate it *and* reset the database, s
 is sealed under it:
 
 ```bash
-./deploy/remote.sh 'systemctl stop sig && rm -f /var/lib/sig/steward.sqlite*'
+./deploy/remote.sh 'systemctl stop otto && rm -f /var/lib/otto/steward.sqlite*'
 ./deploy/apply-env.sh     # pushes the new key from aliyun.env and restarts
 ```
 

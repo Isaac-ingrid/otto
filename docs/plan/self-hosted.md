@@ -7,15 +7,21 @@ a public entry point. Machine layout and ops commands live in [`deploy/NOTES.md`
 Ordering principle: everything up to and including "P2" is testable through an SSH tunnel and
 needs no domain, no certificate and no 备案. Only "P3" does.
 
+The product was renamed from Sig to Otto in 2026-11 ([ADR-0014](../adr/0014-rename-to-otto.md)):
+identifiers, cookie, derivation strings and paths all changed in one break, so the deployment was
+rebuilt at `/opt/otto` with a fresh database, and the connector re-paired. Pairing, password
+login, worker dispatch and the workspace page were re-checked on the rebuilt box; the rest of the
+P1 rows were verified before it, and the two test suites cover the renamed identifiers.
+
 ## P1 · Flows to exercise on the VPS
 
 | Flow | How to test today | Pass condition |
 | --- | --- | --- |
-| Connector pairing | tunnel to `127.0.0.1:8787`, `sig connect http://127.0.0.1:8787 <code>` | `sig status` shows paired; machine appears in **机器** |
+| Connector pairing | tunnel to `127.0.0.1:8787`, `otto connect http://127.0.0.1:8787 <code>` | `otto status` shows paired; machine appears in **机器** |
 | Worker dispatch | from the workspace, ask for a trivial repo task | run settles `done`, files land in the local repo, output returns to the chat |
 | Workspace stream | open `/app` → workspace tab through the tunnel | live frames arrive and the socket survives idle ✅ |
 | Budget guard | set `DAILY_BUDGET_USD` low, send messages until it trips | the cap gates *wakes*, not messages; ledger records the spend ✅ |
-| Restart durability | `systemctl restart sig` mid-run | pending run resumes or is reported failed; no lost conversation ✅ |
+| Restart durability | `systemctl restart otto` mid-run | pending run resumes or is reported failed; no lost conversation ✅ |
 | Model switching | switch model/thinking level in the composer | `model_changed` frame, next turn uses the new selection ✅ |
 | Login | password login + `/api/login-link` link | session cookie issued; link works once, then expires ✅ |
 
@@ -73,14 +79,14 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 ## Log
 
 - **2026-11-09** — **Login flows verified** and one real bug fixed. Wrong password → `401
-  invalid_password`, right password → `200` with `sig_session` (HttpOnly, SameSite=Lax, 7 days),
+  invalid_password`, right password → `200` with `otto_session` (HttpOnly, SameSite=Lax, 7 days),
   `/app` with that cookie → `200`, a login link works once (`303`) and then answers `410`.
   Also learned: `/auth/*` requires `Origin` to equal the serving origin (`403` otherwise) and
   sits behind two throttle layers — a per-scope edge limiter in `src/index.ts` and a per-purpose
   bucket table in the DO (`password`: 5/IP and 20 global per minute). The second layer was the
   only one doing anything on this box: see Finding 4.
 - **2026-11-09** — **Workspace live stream verified** (the frame protocol, not SSE: the owner
-  socket carries `stream` frames). A browser-equivalent client (`ws` + the `sig_session` cookie,
+  socket carries `stream` frames). A browser-equivalent client (`ws` + the `otto_session` cookie,
   `?role=web&view=workspace`) saw `workspace_changed` 5.2 s after an owner message, three
   incremental `stream` frames of the reply being typed, the closing empty frame, then another
   `workspace_changed`. `threadId` is `null` when the turn routed to no thread, which is correct
@@ -98,7 +104,7 @@ Real behaviour observed on the VPS that is not what a reader would assume:
   real message (`sh_run` settled `done`, `sh_outbound` sent).
 - **2026-11-09** — Connector pairing verified through the SSH tunnel: `dev_fbe47c5f3cac`
   (`isaac-mac`) reached the steward, `sh_machine.online = 1`, `maxWorkers = 8`, connector log
-  shows `welcomed`. Run with `SIG_HOME=/tmp/sig-conn-test` so nothing touched `~/.sig`.
+  shows `welcomed`. Run with `OTTO_HOME=/tmp/otto-conn-test` so nothing touched `~/.otto`.
 - **2026-11-09** — First real dispatch through the VPS: `tstock` registered from the workspace,
   `POST /api/messages` → steward opened Thread「摸清 tstock 目录结构与入口文件」 → `start_worker`
   to `isaac-mac` → pi ran read-only in `/Users/isaac/agent/tstock` → 5 outbound messages, every
@@ -106,7 +112,7 @@ Real behaviour observed on the VPS that is not what a reader would assume:
   Observed, by design but worth knowing: the worker's first report hit the length limit, so the
   steward re-ran the *same* worker with "re-send it smaller" — one extra worker run per long
   report. Login-link minting also exercised: valid token → 303, unknown token → 410.
-- **2026-11-09** — **Restart durability passes**: a `systemctl restart sig` at 00:18:21 landed
+- **2026-11-09** — **Restart durability passes**: a `systemctl restart otto` at 00:18:21 landed
   while worker `w_01M6XZ7BDC5Y5J9KFJ9PXKAZ4Y` was mid-run. The connector saw `connection_closed
   1006`, reconnected (`welcomed`) 1 s later, the worker kept emitting progress (it lives on the
   Mac, not the VPS), and its report was accepted after the restart — Thread went `waiting_you`
@@ -121,18 +127,18 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 Done by `deploy/harden.sh` (idempotent, re-runnable; details in NOTES.md):
 
-- **Backup** ✅ `sqlite3 .backup` runs daily on a systemd timer into `/var/lib/sig/backups/`,
+- **Backup** ✅ `sqlite3 .backup` runs daily on a systemd timer into `/var/lib/otto/backups/`,
   keeping 14. Verified: file written, `PRAGMA integrity_check` = `ok`, live rows inside.
   Off-box copy is *not* done — needs `RCLONE_REMOTE`; until then this recovers from mistakes,
   not from losing the disk.
-- **Logs** ✅ journald capped at 200 MB (+64 MB runtime) via a `sig` drop-in.
+- **Logs** ✅ journald capped at 200 MB (+64 MB runtime) via a `otto` drop-in.
 - **Restart safety** ✅ `RestartSec=3`, `StartLimitBurst=10` over 300 s, and a memory ceiling
   (`MemoryHigh=800M`/`MemoryMax=1200M`) so a Node heap blow takes only the steward.
 - **Unattended upgrades** ✅ already installed and enabled (security pockets only, distro
   default); the script reports it rather than changing it.
 - **Disk watch** — open: the alarm has to be created in the Aliyun console (80 % threshold).
   Nothing on the box can raise it. 32 GB free, DB 1.1 MB after several conversations.
-- **Kernel reboot** ✅ rebooted the box: back in 53 s, `sig`/`nginx`/`ssh`/backup timer all
+- **Kernel reboot** ✅ rebooted the box: back in 53 s, `otto`/`nginx`/`ssh`/backup timer all
   `active`, `http 200`, DB intact (3 threads), and an owner message after boot answered from
   the gateway — so `SERVER_KEY` unsealing still works on a cold start. Note the SSH tunnel dies
   with the box; `ssh -f -N -L 18787:127.0.0.1:8787 …` has to be re-run after any reboot.
@@ -146,8 +152,8 @@ Done by `deploy/harden.sh` (idempotent, re-runnable; details in NOTES.md):
 Deliberately deferred: a Hangzhou ECS cannot serve 80/443 to a domain without ICP 备案, so the
 steward stays on loopback and testing uses a tunnel. Everything else is already prepared:
 
-- `deploy/nginx-sig.conf` + `deploy/enable-tls.sh` (`--stage` then `--live`), rehearsed on the box.
-- `deploy/aliyun.env` has empty `SIG_DOMAIN` / `SIG_EMAIL` fields waiting for a name.
+- `deploy/nginx-otto.conf` + `deploy/enable-tls.sh` (`--stage` then `--live`), rehearsed on the box.
+- `deploy/aliyun.env` has empty `OTTO_DOMAIN` / `OTTO_EMAIL` fields waiting for a name.
 
 When 备案 clears: DNS A record → `./deploy/enable-tls.sh --stage` → `--live`, then re-pair any
 machine that was paired against the tunnel URL (the URL is part of the pairing).

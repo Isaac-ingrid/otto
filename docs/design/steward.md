@@ -25,7 +25,7 @@ This document designs the half that lives inside the Durable Object: **the memor
  Feishu / web / connectors              (remaining layers: see the protocol and connector designs)
         │
  ┌──────▼───────────────────────────────────────────────────────────────────────────────┐
- │ Sig DO (singleton "owner", an Agents SDK Agent)                                        │
+ │ Otto DO (singleton "owner", an Agents SDK Agent)                                        │
  │                                                                                        │
  │  Channel adapters        Protocol gateway             Web read model                   │
  │  (dedup in, send out)    (connector/browser, outbox)  (timeline, memory page)          │
@@ -42,7 +42,7 @@ This document designs the half that lives inside the Durable Object: **the memor
  │  │   Notes                              │       └────────────────────────────────────┘ │
  │  │   retrieval / forgetting / summaries │                                              │
  │  └──────────────────────────────────────┘                                              │
- │          one shared SQLite (Sig's tables + pi-durable's own tables)                    │
+ │          one shared SQLite (Otto's tables + pi-durable's own tables)                    │
  └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -296,7 +296,7 @@ Re-run this evaluation set whenever the model, prompts, or candidate-assembly ru
 ### 4.1 Form
 
 - The **root session** of a `PiHarness`; it never ends, and pi-durable compacts the context automatically.
-- A pi-durable extension (`sig-steward`) supplies the system-prompt sections, tools, and hooks.
+- A pi-durable extension (`otto-steward`) supplies the system-prompt sections, tools, and hooks.
 - What each turn sees:
 
 | Content | Where | Why |
@@ -309,7 +309,7 @@ Re-run this evaluation set whenever the model, prompts, or candidate-assembly ru
 
 The `beforeRequest` hook can replace a single request's message list (pi-durable README, Generation hooks); whether it satisfies "append just one brief block, persist nothing" needs prototype validation. Fallback: put the situation brief into an input-text prefix.
 
-> **Verified (issue #6, 2026-10-16).** The `beforeRequest` hook of pi-durable 1.3.0 replaces only the outgoing request's messages: pi commits the transcript *view*, not the hook's copy, so the injected `sig-situation` section never lands in any stored entry. Verified by test (`llm-reply.test.ts`, "the situation brief"): the outgoing request carries the fresh brief every turn, no stored `pi.system`/`pi.user` entry contains the section or its body, and two turns see different briefs after a state change. The input-prefix fallback stays unused. One implementation note: the hook rewrites the **leading system message's `sections` record** (adding `sig-situation` by name) rather than appending a mid-conversation system message — deepseek-flash's catalog entry does not declare `supportsMidConvoSystemMessages`, so the leading message is the safe place.
+> **Verified (issue #6, 2026-10-16).** The `beforeRequest` hook of pi-durable 1.3.0 replaces only the outgoing request's messages: pi commits the transcript *view*, not the hook's copy, so the injected `otto-situation` section never lands in any stored entry. Verified by test (`llm-reply.test.ts`, "the situation brief"): the outgoing request carries the fresh brief every turn, no stored `pi.system`/`pi.user` entry contains the section or its body, and two turns see different briefs after a state change. The input-prefix fallback stays unused. One implementation note: the hook rewrites the **leading system message's `sections` record** (adding `otto-situation` by name) rather than appending a mid-conversation system message — deepseek-flash's catalog entry does not declare `supportsMidConvoSystemMessages`, so the leading message is the safe place.
 
 ### 4.2 The two input sources
 
@@ -371,7 +371,7 @@ For `unsafe` tools the command ID is taken from the tool task ID: `cmdId = "tool
 
 (The actual text is written at implementation time; these are the rules it must contain.)
 
-1. You are Sig's steward: you never write code yourself; you only dispatch and remember.
+1. You are Otto's steward: you never write code yourself; you only dispatch and remember.
 2. Input starting with `⟦` is not something the user said — it is a system event. In event-triggered runs, **do not emit user-facing text**: call `notify_user` when the user must be notified, `no_action` when there is nothing to do.
 3. Read the situation brief before every action; when routing is uncertain you must `ask_user` — never guess.
 4. Reports have exactly three parts, in a fixed format, kept short.
@@ -481,14 +481,14 @@ Multiple events within 3 seconds merge into a single wake-up. The text looks lik
 ```
 ⟦event⟧ thread=t_8f2 「登录 bug」
 - worker w_a1 (pi@mac-studio, 写任务) 报告 done：修复 token 过期后未刷新的问题
-  改动：auth/session.ts 等 2 个文件；测试已通过；分支 sig/login-1，未推送
+  改动：auth/session.ts 等 2 个文件；测试已通过；分支 otto/login-1，未推送
   决定：沿用 session 方案，因为……
   遗留：无
 已发送给用户的通知：是（done 汇报，模板）
 请做记账：更新摘要；如有值得记住的约定，走 notes_propose。无需再通知用户，除非有新的信息要补充。
 ```
 
-This text is generated by the core, not by the LLM; its content comes from `sh_report` and git facts. (Gloss of the example: on thread t_8f2 「登录 bug」 ("login bug"), worker w_a1 (pi@mac-studio, write task) reports done — fixed the token-expiry-without-refresh issue; changes: 2 files including auth/session.ts, tests pass, branch sig/login-1, not pushed; decision: keep the session approach because…; leftovers: none. The user was already notified via the done-report template; the steward is asked to update the summary and to propose notes for any convention worth keeping, and not to notify the user again unless there is new information.)
+This text is generated by the core, not by the LLM; its content comes from `sh_report` and git facts. (Gloss of the example: on thread t_8f2 「登录 bug」 ("login bug"), worker w_a1 (pi@mac-studio, write task) reports done — fixed the token-expiry-without-refresh issue; changes: 2 files including auth/session.ts, tests pass, branch otto/login-1, not pushed; decision: keep the session approach because…; leftovers: none. The user was already notified via the done-report template; the steward is asked to update the summary and to propose notes for any convention worth keeping, and not to notify the user again unless there is new information.)
 
 ## 6. Notification and outbound
 
@@ -702,7 +702,7 @@ Legend: ✓ verified in the protocol spike; ◦ seen only in docs or type declar
 | Event-triggered `submit` resumes via alarm after the DO is reset | ✓ |
 | `PiHarness.pending()`, `messages()` | ✓ |
 | `PiHarness.wait(operationId)` returns the final text | ✓ (issue #6: pending/wait/not_found all exercised by tests) |
-| `defineTool`, `section`, `hook(ToolTask, beforeTool)` in extensions | ✓ (issue #6: the sig-steward extension is built on them) |
+| `defineTool`, `section`, `hook(ToolTask, beforeTool)` in extensions | ✓ (issue #6: the otto-steward extension is built on them) |
 | `api.taskId` inside tools is stable across replays and usable as an idempotency key | ✓ (issue #6: `cmdId = "tool:" + api.taskId`; replays converge on the existing outbox row) |
 | The `beforeRequest` hook replaces only the single request and persists nothing | ✓ (issue #6: verified by test — see §4.1) |
 | A tool result's `control.terminate` ends the turn | ✓ (issue #6: ask_user / no_action terminate) |
