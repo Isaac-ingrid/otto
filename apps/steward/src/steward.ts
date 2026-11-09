@@ -3124,8 +3124,20 @@ export class Steward extends Agent<Env> {
   private async sealedKeyFor(provider: string): Promise<string | null> {
     const row = this.sql<{ apiKeyEnc: string }>`SELECT apiKeyEnc FROM sh_provider_key WHERE provider = ${provider}`[0];
     if (!row) return null;
-    const opened = await openSecret(await this.serverKeys(), row.apiKeyEnc);
-    return opened?.text ?? null;
+    const keys = await this.serverKeys();
+    const opened = await openSecret(keys, row.apiKeyEnc);
+    if (!opened) return null;
+    // Rotation convergence (issue #27): a value that only opened because SERVER_KEY_PREVIOUS is
+    // still configured is re-sealed onto the primary here, on read. Without this the window could
+    // never be closed without re-entering the key: the only other seal caller is setModelConfig,
+    // which runs on an owner-side save, not on a rotation. The legacy sh_model mirror is written
+    // by setModelConfig too, so refresh it in the same breath or it stays sealed under the dead key.
+    const primary = keys[0];
+    if (primary && opened.keyId !== primary.id) {
+      this.sql`UPDATE sh_provider_key SET apiKeyEnc = ${await sealSecret(primary, opened.text)}, updatedAt = ${Date.now()} WHERE provider = ${provider}`;
+      this.sql`UPDATE sh_model SET apiKeyEnc = ${await sealSecret(primary, opened.text)} WHERE id = 0 AND provider = ${provider} AND apiKeyEnc <> ''`;
+    }
+    return opened.text;
   }
 
   async modelConfig(): Promise<{ provider: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: ModelThinkingLevel } | null> {

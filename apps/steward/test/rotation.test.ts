@@ -151,13 +151,38 @@ describe("SERVER_KEY rotation: sealed secrets (issue #27)", () => {
     const oldPrimary = await serverKey(PRIMARY_SECRET);
     await overrideKeys([freshPrimary, oldPrimary]);
     expect(await ownerStub().modelConfig()).toEqual({ provider: "deepseek", modelId: null, baseUrl: null, apiKey: "sk-model-secret-123" });
-    // Window closed (key dropped entirely): the key is unreadable, but the selection itself
-    // is plain columns — it survives as a keyless row the Settings page can re-key, instead
-    // of masquerading as "no selection" (issue #74 split the two storages).
+    // Window closed (key dropped entirely) after that read: the ciphertext was re-sealed onto the
+    // fresh primary on read (sealedKeyFor), so the model keeps working without an owner re-save.
     await overrideKeys([freshPrimary]);
+    expect(await ownerStub().modelConfig()).toEqual({ provider: "deepseek", modelId: null, baseUrl: null, apiKey: "sk-model-secret-123" });
+  });
+
+  it("a read during the window rewrites both sealed rows onto the primary key", async () => {
+    await ownerStub().setModelConfig("deepseek", "sk-model-secret-123");
+    const freshPrimary = await serverKey("rotated-fresh-server-key-2");
+    await overrideKeys([freshPrimary, await serverKey(PRIMARY_SECRET)]);
+
+    await ownerStub().modelConfig();
+
+    expect((await readProviderKeyRow("deepseek")).apiKeyEnc).toMatch(new RegExp(`^v2\\.${freshPrimary.id}\\.`));
+    expect((await readModelRow()).apiKeyEnc).toMatch(new RegExp(`^v2\\.${freshPrimary.id}\\.`));
+  });
+
+  it("without that read the sealed key stays on the dropped key and reads back empty", async () => {
+    await ownerStub().setModelConfig("deepseek", "sk-model-secret-123");
+    // Close the window without a single read: nothing re-sealed, so the ciphertext is orphaned.
+    await overrideKeys([await serverKey("rotated-fresh-server-key-2")]);
     expect(await ownerStub().modelConfig()).toEqual({ provider: "deepseek", modelId: null, baseUrl: null, apiKey: "" });
   });
 });
+
+
+async function readProviderKeyRow(provider: string): Promise<{ provider: string; apiKeyEnc: string }> {
+  return runInDurableObject(ownerStub(), (instance: Steward) => {
+    const sql = (instance as unknown as { sql: Sql }).sql.bind(instance);
+    return (sql`SELECT provider, apiKeyEnc FROM sh_provider_key WHERE provider = ${provider}` as { provider: string; apiKeyEnc: string }[])[0]!;
+  });
+}
 
 
 async function readModelRow(): Promise<{ provider: string; apiKeyEnc: string }> {
