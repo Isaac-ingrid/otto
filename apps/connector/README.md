@@ -156,6 +156,27 @@ otto uninstall              # 移除服务，保留本地状态
 
 状态保存在 `~/.otto/`。你可以随时在 Otto 工作台撤销一台电脑。
 
+## 发布（维护者）
+
+```sh
+cd apps/connector
+npm login          # 账号：alexlikevibe
+npm publish        # publishConfig.registry 固定为 registry.npmjs.org
+```
+
+`publishConfig.registry` 是必要的：本机 `~/.npmrc` 指向 `registry.npmmirror.com`，那是只读镜像，
+写入会失败，而报错看起来像网络问题。发布前记得先改 `package.json` 的 `version`（改名后的第一个版本
+是 0.2.0）。
+
+旧包 `@alexlikevibe/sig` 已在 npm 上（0.1.3），不要 unpublish——会打断已安装的机器，改用：
+
+```sh
+npm deprecate @alexlikevibe/sig "Renamed to @alexlikevibe/otto"
+```
+
+发布不属于自动化流程：本仓库没有 git remote，`.github/workflows/release.yml` 的 tag 触发路径
+只对带 `NPM_TOKEN` 的克隆有效。
+
 ## 许可证
 
 采用 [MIT License](LICENSE)。
