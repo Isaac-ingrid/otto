@@ -141,9 +141,10 @@ One idempotent script, run once on the box (it restarts `otto` and journald):
 | `otto-backup.service` | `/var/lib/otto/backups/steward-<utc>.sqlite`, keep 14 | bad upgrade / accidental delete recovery |
 
 Verified after the first run: service `active`, limits in `systemctl show`, a real backup
-written and `PRAGMA integrity_check` = `ok` (3 threads, 14 outbound rows inside). Off-box copy
-still needs an rclone remote: set `RCLONE_REMOTE` and append a `rclone copy` step to the unit —
-until then the backup protects against mistakes, not against losing the disk.
+written and `PRAGMA integrity_check` = `ok` (3 threads, 14 outbound rows inside). Off-box copy is
+deferred on purpose (2026-11-09): the backup protects against mistakes, not against losing the
+disk, and a restore without `/etc/otto/.dev.vars` re-pairs every machine anyway. `RCLONE_REMOTE`
+plus a `rclone copy` step in the unit is the path if that trade ever changes.
 
 `unattended-upgrades` was already installed and enabled (security pockets only, the distro
 default), so the script only reports its state. A disk-usage alarm has to be created in the

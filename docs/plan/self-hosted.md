@@ -163,8 +163,14 @@ Done by `deploy/harden.sh` (idempotent, re-runnable; details in NOTES.md):
 
 - **Backup** ✅ `sqlite3 .backup` runs daily on a systemd timer into `/var/lib/otto/backups/`,
   keeping 14. Verified: file written, `PRAGMA integrity_check` = `ok`, live rows inside.
-  Off-box copy is *not* done — needs `RCLONE_REMOTE`; until then this recovers from mistakes,
-  not from losing the disk.
+  Off-box copy is **deliberately deferred** (decided 2026-11-09): not worth an rclone remote for a
+  one-machine personal deployment. What that costs, so nobody discovers it during an incident: the
+  backups sit on the same disk as the database, so this recovers from bad upgrades, accidental
+  deletes and a corrupted file — not from losing the disk or the instance. In that case the
+  recovery is a fresh box plus re-pairing every machine, because `SERVER_KEY` (`/etc/otto/.dev.vars`)
+  is not in the database either, so a restored DB alone opens no sealed key and honours no device
+  token. An ECS snapshot is the cheap substitute if the risk ever starts to feel real; it guards the
+  disk, not a mistaken `rm`.
 - **Logs** ✅ journald capped at 200 MB (+64 MB runtime) via a `otto` drop-in.
 - **Restart safety** ✅ `RestartSec=3`, `StartLimitBurst=10` over 300 s, and a memory ceiling
   (`MemoryHigh=800M`/`MemoryMax=1200M`) so a Node heap blow takes only the steward.
