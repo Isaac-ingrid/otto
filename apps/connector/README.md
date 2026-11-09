@@ -158,48 +158,37 @@ otto uninstall              # 移除服务，保留本地状态
 
 ## 发布（维护者）
 
-发布的是 `@isaac2ingrid/otto`，scope 就是 npm 账号名本身，所以账号必须先存在。
+发布的是 `@isaac2ingrid/otto`，scope 就是 npm 账号名本身。
+
+**npm 已经停止新增 TOTP 2FA**（`npm profile enable-2fa` 现在直接报
+`Adding a new TOTP 2FA is no longer supported`），所以没有"6 位验证码"可输。发布靠**安全密钥 +
+浏览器按键**：先 `npm stage publish` 上传，再 `npm stage approve` 当场按指纹。
+
+一次性准备：用 **Safari** 打开
+<https://www.npmjs.com/settings/isaac2ingrid/tfa> 添加安全密钥（Touch ID 即可）。
+注册必须走 Safari —— Chrome 会默认选"手机或平板电脑作为安全密钥"，等不到响应就报
+`Device registration failed`；注册好之后用 Chrome 认证是没问题的。
 
 ```sh
-# 先在 npmjs.com 注册 isaac2ingrid（scope 等于账号名），再登录
-# 本机 npm 默认指向 npmmirror 镜像，登录必须显式改回官网
-npm login --registry=https://registry.npmjs.org
-npm whoami --registry=https://registry.npmjs.org   # 应打印 isaac2ingrid
 cd apps/connector
-npm publish        # publishConfig.registry 已固定为 registry.npmjs.org
+pnpm build
+npm stage publish --registry=https://registry.npmjs.org   # 输出 stage id
 ```
 
-发布前账号必须先启用 2FA —— npm 现在对所有发包强制要求 2FA（或一个开了 bypass 2FA 的
-granular access token），账号上是 `disabled` 就直接 403，跟权限无关。先查、再开：
+然后批准（会打开浏览器，按 Touch ID，命令自己继续）：
 
 ```sh
-npm profile get --registry=https://registry.npmjs.org   # 看 two-factor auth 一行
-npm profile enable-2fa auth-and-writes --registry=https://registry.npmjs.org
+npm stage approve <stage-id> --registry=https://registry.npmjs.org
 ```
 
-`enable-2fa` 会在终端打印密钥/二维码，用验证器 App（macOS「密码」App、1Password、
-Google Authenticator 都行）扫进去，再把 App 上的 6 位贴回终端，最后它会打印一组 recovery
-codes——存进密码管理器，丢了要走 72 小时安全冻结的找回流程。之后每次发包补一个当场的码：
-
-```sh
-npm publish --otp=123456
-```
-
-改过 2FA 设置之后本机的旧 token 会立即失效（`npm profile get` 开始回 403），重新登录一次：
-
-```sh
-npm login --registry=https://registry.npmjs.org
-```
-
-不想每次翻验证器，就在 npmjs.com 上新建 granular access token：read and write、包范围只勾
-`@isaac2ingrid/otto`、勾 *bypass 2FA*（最长 90 天），写进 `~/.npmrc`：
-
-```
-//registry.npmjs.org/:_authToken=npm_xxx
-```
-
-注意创建这种 token 本身也要过一次交互式 2FA，所以省不掉开启 2FA 这一步；它绕过 2FA，等同账号
-写权限，别外传。CI 也可以改用 npm 的 trusted publishing（无需 token）。
+- `--registry` 在 `approve` 上不能省：`publishConfig.registry` 只对 publish 生效，不传就会打到本机
+  npmrc 里的镜像，回 `404 /-/stage/***/approve not found`。
+- `npm stage list` 看未批准的暂存件，`view <id>` 看详情，`reject <id>` 丢弃。暂存件会过期，过期就重新
+  `stage publish`。
+- 上传这一步用的是 `~/.npmrc` 里那把 `bypass 2FA` 的 granular token（它就是勾了 *Bypass two-factor
+  authentication* 建出来的那种）；npm 正在逐步限制它，届时改用 `npm login --auth-type=web` 拿会话 token。
+- 发布完确认：`npm view @isaac2ingrid/otto version`，再在干净目录跑
+  `npx -y @isaac2ingrid/otto@0.2.0 help`。
 
 ## 许可证
 
