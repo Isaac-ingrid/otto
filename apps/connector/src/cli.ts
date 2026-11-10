@@ -20,14 +20,17 @@
 //                          per-repo local settings (§8.2/§13): how write tasks get a
 //                          directory, and whether pi runs with --approve there. Never
 //                          settable by a remote command — only here, on the machine
-//   daemon                 internal: the background service's entry point; refuses to start
+//   daemon [--supervise]   internal: the background service's entry point; refuses to start
 //                          when another daemon already holds this state directory (ADR-0018
-//                          decision 10), as does `connect --foreground`
-import { existsSync, readdirSync } from "node:fs";
+//                          decision 10), as does `connect --foreground`. With --supervise the
+//                          lock is held by this process and the daemon runs as its child, so a
+//                          crash is restarted with backoff (decision 12) — what the Windows
+//                          logon launcher starts, since a Run value cannot restart anything.
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, writeSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { runDaemon } from "./daemon.ts";
@@ -38,8 +41,18 @@ import {
   releaseDaemonLock,
 } from "./daemon-lock.ts";
 import { installAssets } from "./install.ts";
+import { terminateProcess } from "./kill.ts";
 import { tailFile } from "./logger.ts";
 import { connect } from "./pairing.ts";
+import {
+  authorizeSupervisedChild,
+  clearSupervisorState,
+  readSupervisorState,
+  supervise,
+  SUPERVISOR_ENV,
+  writeSupervisorState,
+  type SupervisedChild,
+} from "./supervisor.ts";
 import {
   applyProxy,
   effectiveNoProxy,
@@ -94,7 +107,9 @@ usage:
   otto repo-config <path> [options]           per-repo local settings (write isolation,
                                                   concurrency, project trust); never settable
                                                   remotely
-  otto daemon                                 internal: run the connector daemon
+  otto daemon [--supervise]                   internal: run the connector daemon; --supervise
+                                                  keeps a crashed daemon coming back (backoff,
+                                                  output appended to logs/supervisor.log)
 
 Register repositories in the web workspace under Machines > Add directory.
 
@@ -194,7 +209,7 @@ async function main(argv: string[]): Promise<void> {
     case "repo-config":
       return repoConfig(rest);
     case "daemon":
-      return daemonCommand();
+      return daemonCommand(rest);
     default:
       usage();
   }
@@ -489,7 +504,7 @@ async function statusCommand(): Promise<void> {
   } else if (lock.held) {
     const since = lock.startedAt ? ` since ${new Date(lock.startedAt).toLocaleString()}` : "";
     const version = lock.version ? ` (v${lock.version})` : "";
-    console.log(`daemon:   running pid ${lock.pid ?? "?"}${since}${version}`);
+    console.log(`daemon:   running pid ${lock.pid ?? "?"}${since}${version}${supervisionNote(dir, lock.pid)}`);
   } else {
     console.log(`daemon:   stale lock on pid ${lock.pid ?? "?"} — the next start replaces it`);
   }
@@ -643,16 +658,51 @@ function refuseIfDaemonRunning(dir: string): void {
   fail(daemonRunningMessage(status));
 }
 
+/** `[supervised: child pid 4711, 2 restarts]` for the daemon line, when the lock's holder is a
+ *  supervisor (ADR-0018 decision 12). Nothing when the lock is held by a plain daemon, or by a
+ *  supervisor's leftovers that are no longer the holder: a state file is a nicety, the lock
+ *  decides. */
+function supervisionNote(dir: string, lockPid: number | null): string {
+  const supervised = readSupervisorState(dir);
+  if (!supervised || lockPid === null || supervised.supervisorPid !== lockPid) return "";
+  const parts = [supervised.childPid ? `child pid ${supervised.childPid}` : "child restarting"];
+  if (supervised.restarts) parts.push(`${supervised.restarts} restart${supervised.restarts === 1 ? "" : "s"}`);
+  return ` [supervised: ${parts.join(", ")}]`;
+}
+
 /** Runs the daemon in this process while holding the single-instance lock (ADR-0018 phase 2):
  *  two daemons would share ~/.otto and the steward would not catch them, because a duplicate
  *  `hello` is settled by connEpoch — so they would take turns superseding each other while both
  *  ran reconcile and the watchdog over the same pi processes. Both entry points go through here:
  *  `otto daemon` (what a service manager or the Windows logon launcher starts) and
  *  `otto connect --foreground` (the escape hatch everywhere, and the only shape that shows
- *  the daemon's own output in the terminal). */
-async function runDaemonAttached(dir: string, machineName: string): Promise<void> {
+ *  the daemon's own output in the terminal).
+ *
+ *  `--supervise` adds a second mode: the lock is still taken here, but the daemon runs as a child
+ *  (runSupervisor) so it can be restarted. The child is this same command with the supervisor's pid
+ *  in its environment, and it must not take the lock — it proves it is that supervisor's child
+ *  instead of trusting the variable (supervisor.ts). */
+async function runDaemonAttached(
+  dir: string,
+  machineName: string,
+  options: { supervise?: boolean } = {},
+): Promise<void> {
+  if (process.env[SUPERVISOR_ENV] !== undefined) {
+    const authorised = authorizeSupervisedChild(dir);
+    if (!authorised.ok) fail(authorised.reason!);
+    return runSupervisedChild(dir, machineName);
+  }
   const lock = acquireDaemonLock(dir, VERSION);
   if (!lock.ok) fail(daemonRunningMessage(lock));
+  if (options.supervise) {
+    try {
+      await runSupervisor(dir);
+    } catch (err) {
+      releaseDaemonLock(dir);
+      fail(err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
   let handle;
   try {
     handle = await runDaemon({ stateDir: dir, machineName });
@@ -678,8 +728,97 @@ async function runDaemonAttached(dir: string, machineName: string): Promise<void
   await new Promise<void>(() => {});
 }
 
-async function daemonCommand(): Promise<void> {
-  return runDaemonAttached(stateDir(), process.env.OTTO_MACHINE_NAME ?? hostname());
+/** The supervised daemon itself: the same loop as the attached daemon, minus the lock (the
+ *  supervisor holds it) and minus any signal-time release of it — a child that deleted the
+ *  supervisor's lock on its way out would leave a live supervisor unclaimed. */
+async function runSupervisedChild(dir: string, machineName: string): Promise<void> {
+  let handle;
+  try {
+    handle = await runDaemon({ stateDir: dir, machineName });
+  } catch (err) {
+    // The supervisor decides what to do about it (backoff, then restart); nothing here is claimed.
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const shutdown = () => {
+    handle!
+      .stop()
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  await new Promise<void>(() => {});
+}
+
+/** Supervises the daemon (ADR-0018 decision 12): the lock is already held by this process, and the
+ *  daemon runs as a child that is restarted with backoff whenever it exits. The child's stdout and
+ *  stderr are appended to logs/supervisor.log, because a hidden logon autostart has no console —
+ *  whatever the daemon prints before its own logger exists would otherwise be thrown away. */
+async function runSupervisor(dir: string): Promise<void> {
+  const logDir = join(dir, "logs");
+  mkdirSync(logDir, { recursive: true });
+  const logPath = join(logDir, "supervisor.log");
+  const fd = openSync(logPath, "a");
+  const write = (line: string) => writeSync(fd, `[${new Date().toISOString()}] supervisor: ${line}
+`);
+  const startedAt = Date.now();
+  let stopping = false;
+  let requestStop: (signal: string) => void = () => undefined;
+  const stopped = new Promise<void>((resolve) => {
+    requestStop = (signal) => {
+      if (stopping) return;
+      stopping = true;
+      write(`stop requested (${signal})`);
+      resolve();
+    };
+  });
+  process.on("SIGINT", () => requestStop("SIGINT"));
+  process.on("SIGTERM", () => requestStop("SIGTERM"));
+
+  write(`supervising ${dir} as pid ${process.pid}`);
+  const outcome = await supervise({
+    spawnChild: () => spawnDaemonChild(dir, fd),
+    stopped,
+    isStopping: () => stopping,
+    log: write,
+    onChild: (childPid, restarts) =>
+      writeSupervisorState(dir, { supervisorPid: process.pid, childPid, restarts, startedAt }),
+  });
+  write(`supervisor exiting (${outcome.reason}, ${outcome.restarts} restart(s))`);
+  try {
+    closeSync(fd);
+  } catch {
+    // Already closed: nothing to do.
+  }
+  clearSupervisorState(dir);
+  releaseDaemonLock(dir);
+}
+
+/** One daemon child: the same executable and entry point as this process, with the supervisor's pid
+ *  in its environment (`OTTO_SUPERVISED_BY`) so it runs without taking the lock. */
+function spawnDaemonChild(dir: string, fd: number): SupervisedChild {
+  const child = spawn(process.execPath, [binEntryPath(), "daemon"], {
+    env: { ...process.env, [SUPERVISOR_ENV]: String(process.pid) },
+    stdio: ["ignore", fd, fd],
+    windowsHide: true,
+  });
+  return {
+    pid: child.pid,
+    exited: new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal }))),
+    // The child is a tree (its pi workers), and on Windows only taskkill walks it; the supervisor
+    // stops politely first and leaves the force-kill to `otto stop`.
+    kill: (signal) => terminateProcess(child.pid ?? 0, signal),
+  };
+}
+
+async function daemonCommand(rest: string[] = []): Promise<void> {
+  let superviseFlag = false;
+  for (const arg of rest) {
+    if (arg === "--supervise") superviseFlag = true;
+    else fail(`unknown option for \`otto daemon\`: ${arg} (only --supervise is accepted)`);
+  }
+  return runDaemonAttached(stateDir(), process.env.OTTO_MACHINE_NAME ?? hostname(), { supervise: superviseFlag });
 }
 
 // --- repo-config -----------------------------------------------------------------------------

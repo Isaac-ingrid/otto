@@ -466,7 +466,7 @@ describe("WindowsService", () => {
     // Each argv part goes through Chr(34): on a real machine node.exe and the entry are absolute
     // paths with spaces, and an unquoted spaced path is how `spawn C:\Program` ENOENT happens.
     expect(content).toContain(
-      `cmd = Chr(34) & "/usr/local/bin/node" & Chr(34) & " " & Chr(34) & "/opt/pkg/bin/otto.js" & Chr(34) & " " & Chr(34) & "daemon" & Chr(34)`,
+      `cmd = Chr(34) & "/usr/local/bin/node" & Chr(34) & " " & Chr(34) & "/opt/pkg/bin/otto.js" & Chr(34) & " " & Chr(34) & "daemon" & Chr(34) & " " & Chr(34) & "--supervise" & Chr(34)`,
     );
     expect(content).toContain(`sh.CurrentDirectory = "${dir()}"`);
     // 0 is the hidden window; a Run value pointing straight at node.exe would open a console.
@@ -492,8 +492,9 @@ describe("WindowsService", () => {
       args: ["add", WINDOWS_RUN_KEY, "/v", OTTO_LABEL, "/t", "REG_SZ", "/d", runValue(), "/f"],
     });
     expect(launches).toEqual([{ file: wscript, args: [launcherPath()] }]);
-    // Honest about what Windows cannot do (no KeepAlive/Restart= counterpart).
-    expect(installer.notes.join(" ")).toMatch(/no restart-on-failure/);
+    // Honest about what Windows cannot do itself (no KeepAlive/Restart= counterpart): the
+    // launcher starts the supervisor, which is what actually restarts a crashed daemon.
+    expect(installer.notes.join(" ")).toMatch(/--supervise[\s\S]*logs\/supervisor\.log/);
   });
 
   it("start refuses a machine that never paired instead of leaving a dead Run value", async () => {
