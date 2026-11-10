@@ -62,7 +62,7 @@ ${BRAND_LOCKUP}
 <button id="passkey-signin" type="button" hidden data-copy="passkeySignIn">Sign in with a passkey</button>
 <p id="passkey-status" class="status" role="status" aria-live="polite" hidden></p>
 <details class="recovery"><summary data-copy="recoveryTitle">Forgot your password?</summary>
-<p data-copy="recovery">In the Cloudflare dashboard, open your Worker, then Settings &gt; Variables and Secrets. Set LOGIN_PASSWORD to a new, unique password of at least 15 characters and deploy the change. This signs out all browsers without deleting your data or disconnecting your machines.</p></details>
+<p data-copy="recovery">Self-hosted: set LOGIN_PASSWORD in /etc/otto/.dev.vars and restart the service. On Cloudflare: open the Worker, then Settings &gt; Variables and Secrets, and deploy. Either way use a new, unique password of at least 15 characters, and every browser is signed out while your data and connected machines are untouched.</p></details>
 <noscript><p class="status">Enable JavaScript to sign in.</p></noscript>
 </section>
 <p class="footer" data-copy="footer">Your own agent. Your own workspace.</p>

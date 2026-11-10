@@ -10,16 +10,17 @@ const STRINGS = {
   cancelled: ['Passkey sign-in was cancelled. Try again, or use your password.', '已取消通行密钥登录，可以重试或使用密码。'],
   unsupported: ['Passkeys aren’t available in this browser. You can sign in with your password.', '当前浏览器无法使用通行密钥，你可以使用密码登录。'],
   invalid: ['Incorrect password. Try again.', '密码错误，请重试。'],
-  unavailable: ['Password sign-in is unavailable. The configured password may have been rejected by the policy; open "Forgot your password?" below for the dashboard fix. Temporary outages clear on retry.', '密码登录暂不可用。配置的密码可能未通过规则检查，请按下方「忘记密码？」的步骤在 Cloudflare 控制台修复。临时故障稍后重试即可。'],
-  rejected: ['The deployment password does not meet the password requirements. Set LOGIN_PASSWORD to a new, unique password of at least 15 characters in Cloudflare, then deploy the change. Follow the steps below.', '部署密码未通过 Otto 的规则检查。请在 Cloudflare 中将 LOGIN_PASSWORD 改为新的独立密码（至少 15 个字符），然后部署更新。操作步骤已在下方展开。'],
-  notConfigured: ['No deployment password is configured. Set LOGIN_PASSWORD in Cloudflare to a new, unique password of at least 15 characters, then deploy the change. Follow the steps below.', '尚未配置部署密码。请在 Cloudflare 中设置 LOGIN_PASSWORD，使用新的独立密码（至少 15 个字符），然后部署更新。操作步骤已在下方展开。'],
+  unavailable: ['Password sign-in is unavailable. Set a new LOGIN_PASSWORD for this deployment (steps below); temporary outages clear on retry.', '密码登录暂不可用。请按下方步骤为本次部署重新设置 LOGIN_PASSWORD；临时故障稍后重试即可。'],
+  rejected: ['The deployment password does not meet the password requirements. Set LOGIN_PASSWORD to a new, unique password of at least 15 characters and restart or redeploy Otto. Follow the steps below.', '部署密码未通过 Otto 的规则检查。请把 LOGIN_PASSWORD 改为新的独立密码（至少 15 个字符），然后重启或重新部署 Otto，步骤见下方。'],
+  notConfigured: ['No deployment password is configured. Set LOGIN_PASSWORD to a new, unique password of at least 15 characters and restart or redeploy Otto. Follow the steps below.', '尚未配置部署密码。请设置 LOGIN_PASSWORD（至少 15 个字符的独立密码），然后重启或重新部署 Otto，步骤见下方。'],
   screeningUnavailable: ['Password safety checks are temporarily unavailable. Try again in a minute, or use a passkey. You do not need to change your password for this error.', '密码安全检查服务暂时不可用。请一分钟后重试，或使用通行密钥。此错误不需要修改密码。'],
   network: ['Couldn’t reach Otto. Check your connection and try again.', '无法连接 Otto，请检查网络后重试。'],
+  refused: ['The server refused that sign-in (HTTP {status}). The address you opened usually does not match the one Otto sees — check the URL, and that the reverse proxy forwards the Host header with its port.', '登录被服务器拒绝（HTTP {status}）。通常是你打开的地址和 Otto 看到的地址不一致 —— 检查网址，以及反向代理是否把 Host（含端口）原样传了下去。'],
   retry: ['Too many attempts. Try again in {seconds}s, or use a passkey.', '尝试次数过多，请在 {seconds} 秒后重试，或使用通行密钥。'],
   retryPasskey: ['Too many passkey attempts. Try again in {seconds}s, or use your password.', '通行密钥尝试次数过多，请在 {seconds} 秒后重试，或使用密码。'],
   retryReady: ['You can try again now.', '现在可以重新尝试。'],
   recoveryTitle: ['Forgot your password?', '忘记密码？'],
-  recovery: ['In the Cloudflare dashboard, open your Worker, then Settings > Variables and Secrets. Set LOGIN_PASSWORD to a new, unique password of at least 15 characters and deploy the change. This signs out all browsers without deleting your data or disconnecting your machines.', '在 Cloudflare 控制台打开你的 Worker，进入 Settings > Variables and Secrets，将 LOGIN_PASSWORD 修改为新的独立密码（至少 15 个字符），然后部署更新。所有浏览器会退出登录，但数据和已连接的机器不会受到影响。'],
+  recovery: ['Self-hosted: set LOGIN_PASSWORD in /etc/otto/.dev.vars and restart the service. On Cloudflare: open the Worker, then Settings > Variables and Secrets, and deploy. Either way use a new, unique password of at least 15 characters, and every browser is signed out while your data and connected machines are untouched.', '自托管：在 /etc/otto/.dev.vars 里改 LOGIN_PASSWORD 后重启服务。用 Cloudflare：打开 Worker，进 Settings > Variables and Secrets 修改并重新部署。两种方式都用新的独立密码（至少 15 个字符）；所有浏览器会退出登录，数据和已连接的机器不受影响。'],
   reauth: ['Sign in again to change your security settings.', '请重新登录以修改安全设置。'],
   footer: ['Your own agent. Your own workspace.', '你的智能体，你的工作台。'],
 };
@@ -117,8 +118,13 @@ passwordForm.addEventListener('submit', async (event) => {
       if (error === 'password_rejected' || error === 'password_not_configured') {
         document.querySelector('details.recovery').open = true;
       }
+    } else if (response.status === 401) {
+      showStatus(passwordStatus, t('invalid'));
     } else {
-      showStatus(passwordStatus, t(response.status === 401 ? 'invalid' : 'network'));
+      // Any other status means the request arrived and was answered — saying "couldn't reach
+      // Otto" here sent one owner hunting for a network fault that was a 403 from sameOrigin()
+      // (nginx forwarding a Host without its port). Report what actually came back.
+      showStatus(passwordStatus, t('refused').replace('{status}', String(response.status)));
     }
   } catch {
     showStatus(passwordStatus, t('network'));

@@ -284,7 +284,7 @@ export const STRINGS = {
   modelKeyKeep: ['Key saved — leave empty to keep it', '已保存密钥，留空则保持不变'],
   modelKeyMissing: ['Paste an API key for this provider first.', '请先粘贴该服务商的 API 密钥。'],
   modelSave: ['Save & use', '保存并使用'],
-  modelHelp: ['Keys are encrypted in your Cloudflare account and never displayed again. Leave empty to keep a saved key.', '密钥加密保存在你的 Cloudflare 账号，不会回显。留空可保留已保存的密钥。'],
+  modelHelp: ['Keys are encrypted in this deployment and never displayed again. Leave empty to keep a saved key.', '密钥在本次部署中加密保存，不会回显。留空可保留已保存的密钥。'],
   modelSaved: ['Model settings saved.', '模型设置已保存。'],
   modelSaveFailed: ['Couldn’t save the model settings. Try again.', '模型设置没有保存成功，请重试。'],
   providersMore: ['More providers ({count})', '更多服务商（{count}）'],
