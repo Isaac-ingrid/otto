@@ -5,7 +5,7 @@ You are a coding agent running on a computer the owner wants to connect to an ex
 ## 0 · Check the machine and destination
 
 - Confirm this is the machine that will run coding agents. Ask for the existing Otto HTTPS URL and the local repository paths the owner wants to connect.
-- Check macOS or Linux, Node ≥ 22.18 (`node -v`), npm, and git. Background mode uses launchd on macOS and a systemd user service on Linux. For a container or a machine without a supported service manager, use foreground mode and explain that its terminal must stay open.
+- Check macOS, Linux or Windows, Node ≥ 22.18 (`node -v`), npm, and git. Background mode uses launchd on macOS and a systemd user service on Linux; on Windows there is no background service yet, so use foreground mode and explain that its terminal must stay open. For a container or a machine without a supported service manager, the same applies.
 - Check the intended local coding agent: pi (`pi --version`) is the default; installed Claude Code (`claude --version`) is also supported. These CLIs are separate from the connector. If missing, install the owner's chosen agent using its official instructions. Have the owner complete its login or provider setup directly, keeping credentials out of chat and logs. The cloud model key does not configure the local coding agent.
 - If `otto` is already installed, run `otto status` first. Preserve a correct pairing. If it points to a different deployment, confirm the intended replacement before pairing again.
 - Check for `OTTO_HOME` overrides without dumping the environment. A custom state directory cannot install the shared background service; resolve the intended setup or use `--foreground`.
@@ -58,7 +58,7 @@ otto connect https://otto.example.com <pairing-code>
 
 The owner can run it directly in their terminal, keeping the pairing code out of the agent transcript. With an authorized browser session, an agent may carry out pairing without repeating the code in its report. Use the final reachable deployment URL and do not reuse a code from an example.
 
-`connect` saves the device credentials, installs the background service, and starts it. On a machine without launchd/systemd user services, use `otto connect <url> <code> --foreground` in a persistent terminal instead. If the code expires or has already been used, generate a fresh one in the workspace. If the owner cannot sign in, follow [browser access recovery](deploy.md#recover-browser-access). Never ask for a password or SERVER_KEY in chat.
+`connect` saves the device credentials, installs the background service, and starts it. On a machine without launchd/systemd user services — Windows today, or a container whose service manager is absent — use `otto connect <url> <code> --foreground` in a persistent terminal instead. On Windows the command says plainly that no background service exists there; on a service manager that fails to install, the error tells you to pair again with `--foreground`. If the code expires or has already been used, generate a fresh one in the workspace. If the owner cannot sign in, follow [browser access recovery](deploy.md#recover-browser-access). Never ask for a password or SERVER_KEY in chat.
 
 ## 3 · Register the selected repositories
 
@@ -70,7 +70,7 @@ Keep the default `worktree` isolation unless the owner wants a different write p
 
 ## 4 · Verify the full connection
 
-1. Run `otto status`. Confirm the intended deployment, installed/running service (or the live foreground process), and registered repositories. A saved pairing alone does not prove the WebSocket is connected.
+1. Run `otto status`. Confirm the intended deployment, installed/running service (or the live foreground process), the agent command Otto will actually launch, and registered repositories. A saved pairing alone does not prove the WebSocket is connected. On Windows the agent line matters: npm-installed agents are `.cmd` shims, and an unresolvable one is what makes a machine look paired but unable to start work.
 2. Check recent `otto logs -n 50` for a `welcomed` event and confirm the machine is **online** in the workspace's Machines page, with the expected repositories and agents. Fix repeated connection failures before continuing.
 3. Ask Otto in the workspace to run a small read-only task using **pi**, for example: “On this machine, use pi to summarize the README in this repository. Do not modify files.” Verify that the task returns a result and its session record opens. Claude Code's adapter does not support Otto's read-only mode; if only Claude Code is configured, report that the read-only check is pending rather than claiming it passed or silently dispatching a write-capable task.
 
