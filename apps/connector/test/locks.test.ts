@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { acquireLock, isLockHeld, lockPath, releaseLock } from "../src/locks.ts";
+import { acquireLock, isLockHeld, lockPath, lockVerdict, releaseLock } from "../src/locks.ts";
 import { tmpDir } from "./helpers.ts";
 
 let dir: string;
@@ -58,5 +58,28 @@ describe("worker locks (connector-pi.md §4.3)", () => {
 
   it("releasing a nonexistent lock is a no-op", () => {
     expect(releaseLock(dir, "w_never")).toBe(false);
+  });
+
+  // The identity check has three answers, and the third one used to be the dangerous one
+  // (§4.3): an unreadable start time means "cannot prove the pid changed", not "free".
+  describe("pid + start-time identity", () => {
+    const never = () => {
+      throw new Error("start time must not be read");
+    };
+
+    it("holds for a live pid with a matching start time, frees a dead pid", () => {
+      expect(lockVerdict("t1", true, () => "t1")).toBe(true);
+      expect(lockVerdict("t1", false, never)).toBe(false);
+      // No recorded time: the pid is the only identity there is.
+      expect(lockVerdict(undefined, true, never)).toBe(true);
+    });
+
+    it("frees the lock when the pid was reused by a different process", () => {
+      expect(lockVerdict("t1", true, () => "t2")).toBe(false);
+    });
+
+    it("keeps the lock when the start time cannot be read — unknown fails closed", () => {
+      expect(lockVerdict("t1", true, () => undefined)).toBe(true);
+    });
   });
 });

@@ -104,13 +104,30 @@ export function isLockHeld(stateDir: string, workerId: string): boolean {
   return pidAlive(existing.pid);
 }
 
-/** The same pid + start-time identity check acquireLock uses, over an arbitrary lock. */
+/** The same pid + start-time identity check acquireLock uses, over an arbitrary lock.
+ *
+ *  Three verdicts, not two. A dead pid is no lock. A live pid whose start time *differs* is a
+ *  reused pid — no lock. A live pid whose start time cannot be read is **unknown**, and unknown
+ *  fails closed: `ps` and the Win32_Process query both run as subprocesses and both can fail
+ *  transiently (on Windows that is a PowerShell process per call), and the old code read that
+ *  failure as "not held" — so a single flaky query deleted a live lock and let a second pi
+ *  process onto the same session file, which is the one thing this module exists to prevent.
+ *  Failing the other way costs a refused acquire the caller retries, or one stale lock left to
+ *  the next startup sweep. */
+export function lockVerdict(
+  recorded: string | undefined,
+  alive: boolean,
+  readStartTime: () => string | undefined,
+): boolean {
+  if (!alive) return false;
+  // No recorded start time (it was unreadable when the lock was written): the pid is all we have.
+  if (recorded === undefined) return true;
+  const current = readStartTime();
+  return current === undefined ? true : current === recorded;
+}
+
 function lockIsHeld(existing: LockFileContent): boolean {
-  let alive = pidAlive(existing.pid);
-  if (alive && existing.startTime !== undefined) {
-    alive = processStartTime(existing.pid) === existing.startTime;
-  }
-  return alive;
+  return lockVerdict(existing.startTime, pidAlive(existing.pid), () => processStartTime(existing.pid));
 }
 
 /** Startup stale-lock sweep (connector-pi.md §9.1): after a crash every lock names a dead

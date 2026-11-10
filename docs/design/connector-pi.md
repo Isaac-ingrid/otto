@@ -112,6 +112,7 @@ pi has no session-file lock (research §3). The connector guarantees:
 
 - Only one pi process per `workerId` at any moment, doubly enforced by `~/.otto/locks/<workerId>.lock` (holding pid and start time) plus in-memory state.
 - Before launching, if the process named by the lock file is still alive, refuse to start and report `lock_held`; if the process no longer exists, treat the lock as stale — remove it and continue.
+- The live-ness test has three answers, and the third one keeps the lock: the pid is dead (stale), the pid is alive but its start time differs (a reused pid, so stale), or the pid is alive and its start time could not be read — that is *unknown*, and unknown fails closed. Both probes (`ps`, `Win32_Process`) run as subprocesses and can fail transiently; reading a failed probe as "stale" would delete a live lock and put two pi processes on one session file.
 
 ### 4.4 Start and stop sequences
 
