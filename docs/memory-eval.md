@@ -1,4 +1,4 @@
-# The memory eval (steward.md §2.3–§2.5, §10.3; the memory-trust review)
+# The memory eval (steward.md §2.3–§2.5, §2.7, §10.3; the memory-trust review)
 
 Memory is the one place where a wrong answer gets *reused*: a stale fact quoted as evidence at a
 worker, an unconfirmed report promoted to the resident layer, a confirmation inherited by a
@@ -28,7 +28,7 @@ regression it catches. The families:
 | Family | The claim | Cases |
 |---|---|---|
 | confirmation | A confirmation is bound to the exact claim it was given for; `user_said` additionally needs a verbatim excerpt of the owner message, not merely a valid message id. The identical claim still promotes. | `confirmation-not-transferable-negation`, `confirmation-promotes-the-identical-claim`, `user-said-must-be-a-quote`, `user-said-negation-is-not-an-excerpt` |
-| evidence | Memory used as a reason at a worker must be current, confirmed, and placed for **that worker's own repo**; a worker with no repo cannot use a project note. | `evidence-gate-three-shapes`, `repo-unknown-rejects-project-evidence` |
+| evidence | Memory used as a reason at a worker must be current, confirmed, placed for **that worker's own repo**, and not overturned by a later run; a worker with no repo cannot use a project note. | `evidence-gate-three-shapes`, `repo-unknown-rejects-project-evidence`, `environment-conclusion-stale-after-a-later-success` |
 | history | A superseded version stays searchable (traceability) but is never current: it cannot be confirmed, and it cannot be revived by a later confirmation. | `history-cannot-be-confirmed` |
 | retrieval | The current version leads its own history in `search`; a budget-limited `context()` reports what it left out instead of silently truncating. | `search-current-version-first`, `context-budget-reports-omitted` |
 
@@ -54,3 +54,9 @@ Add it to `MEMORY_CASES`. Prefer a *pair*: the boundary (refused) and its legal 
 declared in `seed`; a fixture may cite an earlier one via `supersedes`, which is also how
 "current vs history" is set up. Keep the expectations in terms of the ledger's *state*, not the
 model's prose.
+
+A case may also seed **run history** (`runs`: repo + `lastOutcome` + a time offset, written into
+`sh_worker`), which is what the staleness read (§2.7) consults — the `environment-conclusion-stale-after-a-later-success`
+case is the pattern: a confirmed environment note whose failure was later followed by a clean run on
+the same machine. That case is mutation-tested: disabling the `answer_worker` staleness gate makes
+it fail (the dead conclusion reaches the worker), so it measures the gate rather than the wording.

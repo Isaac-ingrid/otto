@@ -246,6 +246,41 @@ Briefs carry **pointers, not content** (connector-pi.md §5.3 / spec §5.3).
 > thread's latest worker branch with the brief prefixed and `parentWorker` recorded. The 80%
 > threshold stands in until real-world data exists (connector-pi.md §15.5).
 
+### 2.7 Staleness: a note's basis can be overturned by a later run
+
+The memory-trust review closed every *write*-time hole and left one hole in **time**. A note that
+was true when it was written — 「这台机器上 pi 起不来」, recorded from a worker's failed run — stays
+`project`/`active` forever, because nothing in the module ever looks at the run history again. In
+the 2026-11 Windows incident the wrong note (「…属偶发」) sat in `project`/`active` until a *user
+message* forced the model to re-evaluate; with no user message, a stale environment conclusion
+survives every read. Waiting for a re-write is not a fix (the common case is a note written while
+it was true and never touched again), so the signal is computed **at read time** from `sh_worker`:
+
+- **Scope**: only low-trust, `kind = environment` claims with a repo (`worker_reported` /
+  `inferred`). The owner's own words are not second-guessed by a run outcome; a preference or a
+  convention is not a claim about how a place behaves.
+- **Signal**: the note's basis is a *failure*, and that repo — when the note's evidence names a
+  worker, that worker's machine — has a **later successful run** than the failure it rests on
+  (`lastOutcome = 'reported:done'` on the same `repoId` + `deviceId`). A note with no resolvable
+  evidence falls back to the repo's *current* state: some machine with a failure on record whose
+  latest run was a success. That second shape is what catches a note written **after** the success
+  to explain away old failures (the incident's 「属偶发」), which a timestamp comparison could not.
+  A repo whose runs have only ever succeeded marks nothing (there is no failure to overturn).
+- **Effect — annotate, never hide**: the mark rides the rendered note on every read path
+  (`get`/`list`/`search`/`context`/`forRepos`, the resident section, `get_thread`'s
+  `projectNotes`), as `（可能已过时：<machine> 上该仓库最近一次运行是成功的（<t>），这条结论建立在更早的
+  失败之上）`. The row keeps its `status`, stays searchable, and stays in the archive chain.
+- **Effect — the gate, not the delivery**: `answer_worker` refuses a marked note as evidence
+  (§7.2), because "what a worker is told about its own machine" is the security-shaped use. The
+  owner's **pin** overrides the refusal (an explicit keep), and the recovery path is a fresh
+  claim (`supersedes`), not a re-quote of the dead one. The mark is recomputed on every read, so a
+  later failure takes it away by itself; nothing has to be un-done.
+- **Honest limits**: the signal is coarse (a benign environment fact on a repo with an old failure
+  and a later success is marked too — hence the pin escape and the narrow source/kind scope), and
+  it reads the machine a note names only when the note's evidence actually names one. Structured
+  `machine`/`repo` fields on the draft (a migration) would make the signal exact; until then the
+  repo-level fallback is the one that fires on legacy rows, whose `evidence` is `NULL`.
+
 ## 3. Routing
 
 Goal (spec §0 and principles): better to ask one extra time than to route wrong.
@@ -374,7 +409,7 @@ For `unsafe` tools the command ID is taken from the tool task ID: `cmdId = "tool
 
 | Tool | Purpose |
 |---|---|
-| `answer_worker(workerId, text, evidence)` | The steward answers a worker's factual question itself. `evidence` must be a note ID (`note:<id>` — current, confirmed, and in the asking worker's repo) or user message ID (`user:<msgId>`); without one the hook rejects it and only `ask_user` remains |
+| `answer_worker(workerId, text, evidence)` | The steward answers a worker's factual question itself. `evidence` must be a note ID (`note:<id>` — current, confirmed, in the asking worker's repo, and not stale-by-a-later-success per §2.7) or user message ID (`user:<msgId>`); without one the hook rejects it and only `ask_user` remains |
 
 ### 4.4 System prompt essentials
 
@@ -475,7 +510,8 @@ Workers in the `lost` / `broken` states do not count as running; `broken` produc
 > never a relay into a broken worker or an overflowing session. `answer_worker`'s evidence
 > gate lives in the `beforeTool` hook (§7.2): `note:<id>` must exist in the ledger and be
 > **current, confirmed, and placed for the asking worker** — a `superseded` note (no longer
-> the truth), an unconfirmed low-trust report/inference (nobody vouched for it), and another
+> the truth), an unconfirmed low-trust report/inference (nobody vouched for it), a note whose
+> basis a later run overturned (§2.7's `可能已过时` mark), and another
 > repo's project note all block; `user:<msgId>` must be a message the bound owner actually
 > sent (card clicks count as owner actions); without evidence only `ask_user` remains.
 > Failure-class questions (error/unreported/broken) are refused to `answer_worker` — they are the user's, not the
