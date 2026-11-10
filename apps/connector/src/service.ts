@@ -1,15 +1,18 @@
 // Background service management (issue #26, ADR-0001 decision 10): `connect` installs the
-// connector as a launchd agent on macOS or a systemd user unit on Linux so it keeps running
-// and starts at login. Windows is out of scope (ADR-0001); getServiceInstaller returns null
-// there and the CLI falls back to `--foreground`.
+// connector as a launchd agent on macOS, a systemd user unit on Linux, or — since ADR-0018
+// decision 11 — a per-user Run-key launcher on Windows, so it keeps running and starts at login.
 //
-// The unit runs `<node> <bin>/otto.js daemon`; credentials stay in the LocalStore
-// (never in the unit file), and the log directory is under the state dir.
-import { execFile } from "node:child_process";
+// All three run `<node> <bin>/otto.js daemon`; credentials stay in the LocalStore (never in the
+// unit file), and the log directory is under the state dir. What macOS and Linux get from their
+// service manager and Windows does not: restart-on-failure (launchd `KeepAlive`, systemd
+// `Restart=on-failure`) — see the Windows section at the end of this file.
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { promisify } from "node:util";
+import { clearStaleDaemonLock, daemonLockStatus, type DaemonLockDeps } from "./daemon-lock.ts";
+import { terminateProcess, type KillDeps } from "./kill.ts";
 
 const realExecFile = promisify(execFile);
 
@@ -50,7 +53,7 @@ export interface ServiceSpec {
 }
 
 export interface ServiceStatus {
-  manager: "launchd" | "systemd";
+  manager: "launchd" | "systemd" | "windows";
   /** Unit/plist file present on disk. */
   installed: boolean;
   /** The service manager reports the service as running right now. */
@@ -61,7 +64,7 @@ export interface ServiceStatus {
 }
 
 export interface ServiceInstaller {
-  readonly kind: "launchd" | "systemd";
+  readonly kind: "launchd" | "systemd" | "windows";
   /** Human-readable install notes (e.g. the lingering hint on systemd); filled by install(). */
   readonly notes: string[];
   /** Writes the unit, loads and enables it (starts now, and at login). Idempotent. */
@@ -92,17 +95,31 @@ export interface ServiceDeps {
   platform?: NodeJS.Platform;
   /** Budget for launchd bootstrap retries (tests shorten it). Default 5s. */
   bootstrapRetryMs?: number;
+  /** Windows: %SystemRoot%, where wscript.exe lives. Defaults to the environment. */
+  systemRoot?: string;
+  /** Windows: how `start`/`install` launches the generated launcher, and how long it waits for
+   *  the daemon lock to appear. Injectable so the Windows branch is testable off-Windows. */
+  spawnDetached?: (file: string, args: string[]) => Promise<void>;
+  startTimeoutMs?: number;
+  /** Windows: how the running daemon gets ended (kill.ts's taskkill). */
+  taskkill?: KillDeps["taskkill"];
+  /** Windows: identity probes for the daemon lock (`status`, `start`, `stop` read it instead of
+   *  asking the service manager, which does not know about `otto daemon`). */
+  lockDeps?: DaemonLockDeps;
 }
 
 function currentUid(): number {
   return typeof process.getuid === "function" ? process.getuid() : 0;
 }
 
-/** Picks the platform installer; null where background services are unsupported (win32). */
+/** Picks the platform installer. Never null on a platform this package installs on; the null
+ *  return remains for a platform with no service manager at all (a test double, or a future
+ *  port that has not landed yet). */
 export function getServiceInstaller(spec: ServiceSpec, deps: ServiceDeps = {}): ServiceInstaller | null {
   const plat = deps.platform ?? platform();
   if (plat === "darwin") return new LaunchdService(spec, deps);
   if (plat === "linux") return new SystemdService(spec, deps);
+  if (plat === "win32") return new WindowsService(spec, deps);
   return null;
 }
 
@@ -424,6 +441,270 @@ WantedBy=default.target
       running,
       pid,
       detail: active.stdout.trim() || "unknown",
+    };
+  }
+}
+
+
+// --- Windows (per-user Run key + a generated launcher) ---------------------------------------
+//
+// ADR-0018 decision 11. There is no launchd/systemd equivalent that can host an interactive
+// agent: a Windows *Service* runs in session 0, without the user's profile, desktop or PATH, and
+// the agent it spawns is a user-profile program. What is left is the per-user autostart:
+//
+//   HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+//     dev.otto.connector = C:\Windows\System32\wscript.exe "…\.otto\otto-daemon.vbs"
+//
+// A Task Scheduler logon trigger would be the structural analogue (a unit on disk, hidden,
+// restart-on-failure) but creating one is refused from an unelevated shell — measured on Windows
+// 11 26100 with `schtasks /Create /SC ONLOGON` — so it cannot be what `otto connect` does. The
+// Run key needs no elevation, is visible to the user in Task Manager's startup tab, and removal
+// is one value.
+//
+// The indirection through wscript is not optional: `node.exe` is a console program, so a Run
+// value pointing at it opens a console window that the user can close. The launcher sets the
+// daemon's environment (the logon environment knows nothing of PATH additions or OTTO_HOME) and
+// starts it with window style 0. It is the Windows analogue of the plist/unit file: generated on
+// install, listed by `otto status`, removed by `otto uninstall`.
+//
+// Not covered here: restart-on-failure. launchd `KeepAlive` and systemd `Restart=on-failure` have
+// no Run-key counterpart, so a crashed daemon stays down until the next logon (phase 2 step 3 is
+// `otto daemon --supervise`, a platform-independent parent that restarts it).
+
+export const WINDOWS_RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+/** Explorer's per-user policy that hides the Run key entirely. */
+const WINDOWS_POLICY_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
+/** Windows Script Host can be turned off per user or per machine; either disables the launcher. */
+const WSH_SETTINGS_KEYS = [
+  "HKCU\\Software\\Microsoft\\Windows Script Host\\Settings",
+  "HKLM\\SOFTWARE\\Microsoft\\Windows Script Host\\Settings",
+];
+export const WINDOWS_LAUNCHER_FILE = "otto-daemon.vbs";
+
+function vbsEscape(text: string): string {
+  return text.replace(/"/g, '""').replace(/\r?\n/g, " ");
+}
+
+async function spawnDetached(file: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(file, args, { detached: true, stdio: "ignore", windowsHide: true });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
+class WindowsService implements ServiceInstaller {
+  readonly kind = "windows" as const;
+  readonly notes: string[] = [];
+  private readonly launcherPath: string;
+  private readonly exec: Exec;
+  private readonly spawnDetached: (file: string, args: string[]) => Promise<void>;
+  private readonly startTimeoutMs: number;
+  private readonly taskkill: KillDeps["taskkill"];
+  private readonly lockDeps: DaemonLockDeps;
+  private readonly systemRoot: string;
+
+  constructor(
+    private readonly spec: ServiceSpec,
+    deps: ServiceDeps = {},
+  ) {
+    this.exec = deps.exec ?? defaultExec;
+    this.spawnDetached = deps.spawnDetached ?? spawnDetached;
+    this.startTimeoutMs = deps.startTimeoutMs ?? 10_000;
+    this.taskkill = deps.taskkill;
+    this.lockDeps = deps.lockDeps ?? {};
+    this.systemRoot = deps.systemRoot ?? process.env.SystemRoot ?? "C:\\Windows";
+    this.launcherPath = join(spec.stateDir, WINDOWS_LAUNCHER_FILE);
+  }
+
+  get unitPath(): string {
+    return this.launcherPath;
+  }
+
+  private get wscriptPath(): string {
+    return join(this.systemRoot, "System32", "wscript.exe");
+  }
+
+  /** The Run value: an absolute wscript (a bare name would let the current directory's own
+   *  `wscript.exe` win CreateProcess's search order) plus the launcher path. */
+  private runValueData(): string {
+    return `${this.wscriptPath} "${this.launcherPath}"`;
+  }
+
+  launcherContent(): string {
+    const env = Object.entries(this.spec.env)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `env("${vbsEscape(key)}") = "${vbsEscape(value)}"`)
+      .join("\n");
+    const argv = [this.spec.nodePath, this.spec.entryPath, ...(this.spec.args ?? ["daemon"])];
+    const cmd = argv.map((part) => `Chr(34) & "${vbsEscape(part)}" & Chr(34)`).join(' & " " & ');
+    return `' Generated by otto for this machine's logon autostart (ADR-0018 decision 11).
+' Rewritten by \`otto connect\`, removed by \`otto uninstall\` — do not edit, and never put a
+' credential in here: the daemon reads its own from the state directory.
+Option Explicit
+Dim sh, env, cmd
+Set sh = CreateObject("WScript.Shell")
+' The logon environment has no OTTO_HOME and may not have the node/git directory on PATH.
+Set env = sh.Environment("PROCESS")
+${env}
+cmd = ${cmd}
+sh.CurrentDirectory = "${vbsEscape(this.spec.stateDir)}"
+' 0 = hidden window: a console program would otherwise open one the user can close.
+sh.Run cmd, 0, False
+`;
+  }
+
+  private async reg(args: string[]): Promise<ExecResult> {
+    return this.exec("reg.exe", args);
+  }
+
+  /** The Run value's data, or null when the value is not there. */
+  private async runValue(): Promise<string | null> {
+    const res = await this.reg(["query", WINDOWS_RUN_KEY, "/v", this.spec.label]);
+    if (res.code !== 0) return null;
+    const escaped = this.spec.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = new RegExp(`^\\s+${escaped}\\s+REG_\\w+\\s+(.*)$`, "m").exec(res.stdout);
+    return match ? match[1]!.trim() : "";
+  }
+
+  private async writeRunValue(): Promise<void> {
+    const res = await this.reg([
+      "add",
+      WINDOWS_RUN_KEY,
+      "/v",
+      this.spec.label,
+      "/t",
+      "REG_SZ",
+      "/d",
+      this.runValueData(),
+      "/f",
+    ]);
+    if (res.code !== 0) throw new Error(`reg add ${WINDOWS_RUN_KEY} failed (${res.code}): ${res.stderr.trim()}`);
+  }
+
+  /** Removes the Run value; false when there was nothing to remove (a repeated `stop`). */
+  private async deleteRunValue(): Promise<boolean> {
+    if ((await this.runValue()) === null) return false;
+    const res = await this.reg(["delete", WINDOWS_RUN_KEY, "/v", this.spec.label, "/f"]);
+    if (res.code !== 0) throw new Error(`reg delete ${WINDOWS_RUN_KEY} failed (${res.code}): ${res.stderr.trim()}`);
+    return true;
+  }
+
+  async preflight(): Promise<void> {
+    // Read-only facts that would make the install pointless, and so belong before the one-time
+    // pairing code is spent (decision 9). Not checked: whether the registry write itself will
+    // succeed — that cannot be known without writing, and HKCU is the user's own hive.
+    if (!existsSync(this.wscriptPath)) {
+      throw new Error(
+        `${this.wscriptPath} is missing — the logon launcher needs Windows Script Host; ` +
+          `run \`otto connect … --foreground\` instead`,
+      );
+    }
+    const noRun = await this.reg(["query", WINDOWS_POLICY_KEY, "/v", "NoRun"]);
+    if (noRun.code === 0 && /REG_DWORD\s+0x1\b/i.test(noRun.stdout)) {
+      throw new Error(
+        `the Run key is disabled by policy (${WINDOWS_POLICY_KEY}\\NoRun=1), so an autostart ` +
+          `entry would never run; run \`otto connect … --foreground\` instead`,
+      );
+    }
+    for (const key of WSH_SETTINGS_KEYS) {
+      const res = await this.reg(["query", key, "/v", "Enabled"]);
+      if (res.code === 0 && /REG_DWORD\s+0x0\b/i.test(res.stdout)) {
+        throw new Error(
+          `Windows Script Host is disabled by policy (${key}\\Enabled=0), so the launcher ` +
+            `would never run; run \`otto connect … --foreground\` instead`,
+        );
+      }
+    }
+  }
+
+  async install(): Promise<void> {
+    mkdirSync(this.spec.logDir, { recursive: true });
+    writeFileSync(this.launcherPath, this.launcherContent(), { mode: 0o600 });
+    await this.start();
+    this.notes.push(
+      "Windows has no restart-on-failure: if the daemon dies it stays down until the next logon " +
+        "(run `otto start` to bring it back now).",
+    );
+  }
+
+  async start(): Promise<void> {
+    // The launcher is the unit file here, and unlike launchd/systemd we could regenerate it — but
+    // `otto start` on a machine that never paired would then leave a Run value pointing at a
+    // daemon with no credentials. Refuse like the service managers do ("unit not found").
+    if (!existsSync(this.launcherPath)) {
+      throw new Error(`the connector's launcher is not installed (${this.launcherPath}) — run \`otto connect <url> <code>\` first`);
+    }
+    await this.writeRunValue();
+    // Another daemon already owns this state directory: that is the desired end state, and
+    // launching a second one would only log a refusal.
+    if (this.lock().held) return;
+    await this.spawnDetached(this.wscriptPath, [this.launcherPath]);
+    const deadline = Date.now() + this.startTimeoutMs;
+    while (Date.now() < deadline) {
+      if (this.lock().held) return;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(
+      `the connector did not come up within ${Math.round(this.startTimeoutMs / 1000)}s — ` +
+        `check ${join(this.spec.logDir, "connector.log")}, and \`otto daemon\` in this terminal to see why`,
+    );
+  }
+
+  async stop(): Promise<void> {
+    // Disable the autostart first, like launchd's `disable` before `bootout`: a stopped connector
+    // must stay stopped across the next logon until `otto start`.
+    await this.deleteRunValue();
+    const lock = this.lock();
+    if (lock.held && lock.pid) {
+      terminateProcess(lock.pid, "SIGKILL", { taskkill: this.taskkill });
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && this.lock().held) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    // A forced kill never reaches the daemon's signal handler, so its lock file outlives it.
+    clearStaleDaemonLock(this.spec.stateDir, this.lockDeps);
+  }
+
+  /** The daemon lock, i.e. "is a connector actually running" — the Run key only says it *would*
+   *  be started at the next logon, and no Windows facility reports the daemon otherwise. */
+  private lock() {
+    return daemonLockStatus(this.spec.stateDir, this.lockDeps);
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
+  }
+
+  async uninstall(): Promise<void> {
+    await this.stop();
+    rmSync(this.launcherPath, { force: true });
+  }
+
+  async status(): Promise<ServiceStatus> {
+    const value = await this.runValue();
+    const launcher = existsSync(this.launcherPath);
+    const installed = value !== null && launcher;
+    const lock = this.lock();
+    const running = lock.held;
+    return {
+      manager: "windows",
+      installed,
+      running,
+      pid: running && lock.pid ? lock.pid : undefined,
+      detail:
+        value === null
+          ? "not in the Run key"
+          : !launcher
+            ? `Run key present but ${this.launcherPath} is missing`
+            : running
+              ? `Run key + ${WINDOWS_LAUNCHER_FILE}`
+              : "starts at the next logon",
     };
   }
 }

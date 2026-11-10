@@ -1,11 +1,18 @@
 // Service installers (issue #26): launchd agent on macOS, systemd user unit on Linux.
 // All manager commands go through an injected exec, so these tests assert the unit files'
 // content and the exact launchctl/systemctl invocations without touching the real system.
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getServiceInstaller, OTTO_LABEL, type Exec, type ExecResult, type ServiceSpec } from "../src/service.ts";
+import {
+  getServiceInstaller,
+  OTTO_LABEL,
+  WINDOWS_RUN_KEY,
+  type Exec,
+  type ExecResult,
+  type ServiceSpec,
+} from "../src/service.ts";
 
 let home: string;
 
@@ -49,10 +56,10 @@ function spec(overrides: Partial<ServiceSpec> = {}): ServiceSpec {
 }
 
 describe("getServiceInstaller", () => {
-  it("maps platforms to installers, null where unsupported", () => {
+  it("maps platforms to installers", () => {
     expect(getServiceInstaller(spec(), { platform: "darwin", exec: recordingExec().exec })?.kind).toBe("launchd");
     expect(getServiceInstaller(spec(), { platform: "linux", exec: recordingExec().exec })?.kind).toBe("systemd");
-    expect(getServiceInstaller(spec(), { platform: "win32", exec: recordingExec().exec })).toBeNull();
+    expect(getServiceInstaller(spec(), { platform: "win32", exec: recordingExec().exec })?.kind).toBe("windows");
   });
 });
 
@@ -346,5 +353,245 @@ describe("SystemdService", () => {
     const { exec } = recordingExec(() => ({ code: 127, stdout: "", stderr: "spawn systemctl ENOENT" }));
     const installer = getServiceInstaller(spec(), deps(exec))!;
     await expect(installer.preflight?.()).rejects.toThrow(/needs a systemd user session/);
+  });
+});
+
+// --- Windows (ADR-0018 decision 11) ----------------------------------------------------------
+//
+// The installer is Windows-only in production but injected in tests: `reg.exe`, the detached
+// launch, taskkill and the daemon-lock probes all go through deps, so the launcher's content and
+// the exact registry calls are assertable on Linux CI. The daemon lock stands in for "is a
+// connector running" — the Run key only says it *would* be started at the next logon.
+describe("WindowsService", () => {
+  const systemRoot = "C:\\Windows";
+  const wscript = join(systemRoot, "System32", "wscript.exe");
+  const dir = () => join(home, ".otto");
+  const launcherPath = () => join(dir(), "otto-daemon.vbs");
+  const runValue = () => `${wscript} "${launcherPath()}"`;
+
+  /** A reg.exe that keeps the one Run value in memory, so query/add/delete agree with each
+   *  other; every other key (the policies the preflight reads) is absent. */
+  function fakeReg(seed?: string): { calls: Call[]; exec: Exec; value: () => string | null } {
+    const calls: Call[] = [];
+    let value: string | null = seed ?? null;
+    const absent = { code: 1, stdout: "", stderr: "ERROR: The system was unable to find the specified registry key or value." };
+    const exec: Exec = async (file, args) => {
+      calls.push({ file, args });
+      if (file !== "reg.exe") return { code: 0, stdout: "", stderr: "" };
+      const [verb, key, ...rest] = args;
+      if (key === WINDOWS_RUN_KEY && rest[rest.indexOf("/v") + 1] === OTTO_LABEL) {
+        if (verb === "query") {
+          return value === null
+            ? absent
+            : { code: 0, stdout: `\r\n${WINDOWS_RUN_KEY}\r\n    ${OTTO_LABEL}    REG_SZ    ${value}\r\n\r\n`, stderr: "" };
+        }
+        if (verb === "add") {
+          value = args[args.indexOf("/d") + 1]!;
+          return { code: 0, stdout: "The operation completed successfully.\r\n", stderr: "" };
+        }
+        if (verb === "delete") {
+          value = null;
+          return { code: 0, stdout: "The operation completed successfully.\r\n", stderr: "" };
+        }
+      }
+      return absent;
+    };
+    return { calls, exec, value: () => value };
+  }
+
+  /** A lock naming this (live) test process and no start time: held without a ps/Win32 probe
+   *  having to agree on a format — the same fail-closed reading connect's lock check uses. */
+  function writeLock(pid = 4242): string {
+    const path = join(dir(), "daemon.lock");
+    writeFileSync(path, JSON.stringify({ pid, startedAt: 1_700_000_000_000, version: "0.2.0" }));
+    return path;
+  }
+
+  /** An installer with everything external injected. `installed` means "the launcher and the Run
+   *  value are already there"; `launchWritesLock` mimics the daemon claiming the state directory
+   *  as it starts, and `alive` is what the injected taskkill turns off. */
+  function harness(
+    opts: {
+      spec?: Partial<ServiceSpec>;
+      installed?: boolean;
+      launchWritesLock?: boolean;
+      startTimeoutMs?: number;
+      alive?: boolean;
+    } = {},
+  ) {
+    const reg = fakeReg(opts.installed ? runValue() : undefined);
+    const launches: { file: string; args: string[] }[] = [];
+    const kills: number[] = [];
+    const alive = { now: opts.alive ?? true };
+    if (opts.installed) {
+      mkdirSync(dir(), { recursive: true });
+      writeFileSync(launcherPath(), "' launcher\n");
+    }
+    const installer = getServiceInstaller(spec({ stateDir: dir(), logDir: join(dir(), "logs"), ...opts.spec }), {
+      platform: "win32",
+      homeDir: home,
+      systemRoot,
+      startTimeoutMs: opts.startTimeoutMs ?? 500,
+      exec: reg.exec,
+      spawnDetached: async (file, args) => {
+        launches.push({ file, args });
+        if (opts.launchWritesLock !== false) writeLock();
+      },
+      taskkill: (pid) => {
+        kills.push(pid);
+        alive.now = false;
+        return 0;
+      },
+      lockDeps: { alive: () => alive.now },
+    })!;
+    return { installer, reg, launches, kills, alive };
+  }
+
+  function launcherContent(overrides: Partial<ServiceSpec> = {}): string {
+    const { installer } = harness({ spec: overrides });
+    return (installer as unknown as { launcherContent(): string }).launcherContent();
+  }
+
+  it("is the installer for win32, and null for a platform with no service manager", () => {
+    expect(getServiceInstaller(spec(), { platform: "win32", exec: fakeReg().exec })?.kind).toBe("windows");
+    expect(getServiceInstaller(spec(), { platform: "freebsd" as NodeJS.Platform })).toBeNull();
+  });
+
+  it("writes a launcher that sets the daemon's environment and hides the window", () => {
+    const content = launcherContent();
+
+    expect(content).toContain('Set env = sh.Environment("PROCESS")');
+    expect(launcherContent({ env: { ...spec().env, OTTO_HOME: dir() } })).toContain(`env("OTTO_HOME") = "${dir()}"`);
+    expect(content).toContain(`env("PATH") = "/usr/local/bin:/usr/bin:/bin"`);
+    // Each argv part goes through Chr(34): on a real machine node.exe and the entry are absolute
+    // paths with spaces, and an unquoted spaced path is how `spawn C:\Program` ENOENT happens.
+    expect(content).toContain(
+      `cmd = Chr(34) & "/usr/local/bin/node" & Chr(34) & " " & Chr(34) & "/opt/pkg/bin/otto.js" & Chr(34) & " " & Chr(34) & "daemon" & Chr(34)`,
+    );
+    expect(content).toContain(`sh.CurrentDirectory = "${dir()}"`);
+    // 0 is the hidden window; a Run value pointing straight at node.exe would open a console.
+    expect(content).toContain("sh.Run cmd, 0, False");
+    expect(content).not.toMatch(/token|secret|passw/i);
+  });
+
+  it("quotes a spaced node and entry path in the launcher (the acceptance failure mode)", () => {
+    const content = launcherContent({ nodePath: "C:\\Program Files\\nodejs\\node.exe", entryPath: "C:\\otto bin\\otto.js" });
+    expect(content).toContain(`Chr(34) & "C:\\Program Files\\nodejs\\node.exe" & Chr(34)`);
+    expect(content).toContain(`Chr(34) & "C:\\otto bin\\otto.js" & Chr(34)`);
+  });
+
+  it("install writes the launcher, adds the Run value, then starts the daemon detached", async () => {
+    const { installer, reg, launches } = harness();
+
+    await installer.install();
+
+    expect(existsSync(launcherPath())).toBe(true);
+    expect(reg.value()).toBe(runValue());
+    expect(reg.calls).toContainEqual({
+      file: "reg.exe",
+      args: ["add", WINDOWS_RUN_KEY, "/v", OTTO_LABEL, "/t", "REG_SZ", "/d", runValue(), "/f"],
+    });
+    expect(launches).toEqual([{ file: wscript, args: [launcherPath()] }]);
+    // Honest about what Windows cannot do (no KeepAlive/Restart= counterpart).
+    expect(installer.notes.join(" ")).toMatch(/no restart-on-failure/);
+  });
+
+  it("start refuses a machine that never paired instead of leaving a dead Run value", async () => {
+    const { installer, reg, launches } = harness();
+    await expect(installer.start()).rejects.toThrow(/launcher is not installed[\s\S]*otto connect/);
+    expect(reg.value()).toBeNull();
+    expect(launches).toEqual([]);
+  });
+
+  it("start only re-enables autostart when a daemon already holds the state directory", async () => {
+    const { installer, reg, launches } = harness({ installed: true });
+    writeLock();
+
+    await installer.start();
+
+    expect(reg.value()).toBe(runValue());
+    expect(launches).toEqual([]);
+  });
+
+  it("start fails with a pointer to the log when nothing comes up", async () => {
+    const { installer } = harness({ installed: true, launchWritesLock: false, startTimeoutMs: 0 });
+    await expect(installer.start()).rejects.toThrow(/did not come up within 0s.*connector\.log/);
+  });
+
+  it("stop removes the Run value, kills the daemon named by the lock, and clears the lock", async () => {
+    const { installer, reg, kills } = harness({ installed: true });
+    const path = writeLock();
+
+    await installer.stop();
+
+    expect(reg.value()).toBeNull();
+    expect(kills).toEqual([4242]);
+    // A forced kill cannot run the daemon's SIGTERM handler, so its lock file outlives it —
+    // left alone it would make `otto status` claim a connector that is not there.
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("stop on a machine with nothing installed is not an error", async () => {
+    const { installer, reg, kills } = harness();
+
+    await installer.stop();
+
+    expect(kills).toEqual([]);
+    expect(reg.calls.filter((call) => call.args[0] === "delete")).toEqual([]);
+  });
+
+  it("uninstall stops, removes the launcher and keeps the state data", async () => {
+    const { installer, reg } = harness();
+    await installer.install();
+    writeFileSync(join(dir(), "connector.sqlite"), "credentials");
+    expect(existsSync(launcherPath())).toBe(true);
+
+    await installer.uninstall();
+
+    expect(existsSync(launcherPath())).toBe(false);
+    expect(reg.value()).toBeNull();
+    expect(readFileSync(join(dir(), "connector.sqlite"), "utf8")).toBe("credentials");
+  });
+
+  it("status tells the Run key, the lock and the pid apart", async () => {
+    const { installer } = harness();
+    expect(await installer.status()).toMatchObject({ manager: "windows", installed: false, running: false, detail: "not in the Run key" });
+
+    // Autostart installed but nothing running: the honest reading is "starts at the next logon".
+    const installed = harness({ installed: true }).installer;
+    expect(await installed.status()).toMatchObject({ installed: true, running: false, pid: undefined, detail: "starts at the next logon" });
+
+    writeLock();
+    expect(await installed.status()).toMatchObject({ installed: true, running: true, pid: 4242, detail: "Run key + otto-daemon.vbs" });
+
+    // A Run value whose launcher is gone is not an install: the value would fail silently at logon.
+    rmSync(launcherPath());
+    expect(await installed.status()).toMatchObject({ installed: false, detail: /Run key present but .* is missing/ });
+  });
+
+  it("preflight refuses a policy-disabled Run key or a disabled script host", async () => {
+    const wscriptDir = join(home, "System32");
+    mkdirSync(wscriptDir, { recursive: true });
+    writeFileSync(join(wscriptDir, "wscript.exe"), "");
+    const { exec } = fakeReg();
+    const withSystemRoot = (root: string, execImpl: Exec) =>
+      getServiceInstaller(spec(), { platform: "win32", homeDir: home, systemRoot: root, exec: execImpl })!;
+    const policy = (key: string, data: string): Exec => async (file, args) => {
+      if (file === "reg.exe" && args[1] === key) return { code: 0, stdout: `    ${args[3]}    REG_DWORD    ${data}\r\n`, stderr: "" };
+      return exec(file, args);
+    };
+
+    // Clean machine: nothing to refuse, and nothing is written either (read-only checks).
+    await expect(withSystemRoot(home, exec).preflight?.()).resolves.toBeUndefined();
+    expect(existsSync(launcherPath())).toBe(false);
+
+    const noRun = withSystemRoot(home, policy("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", "0x1"));
+    await expect(noRun.preflight?.()).rejects.toThrow(/Run key is disabled by policy[\s\S]*--foreground/);
+
+    const wshOff = withSystemRoot(home, policy("HKLM\\SOFTWARE\\Microsoft\\Windows Script Host\\Settings", "0x0"));
+    await expect(wshOff.preflight?.()).rejects.toThrow(/Windows Script Host is disabled by policy[\s\S]*--foreground/);
+
+    const noWscript = withSystemRoot(join(home, "nope"), exec);
+    await expect(noWscript.preflight?.()).rejects.toThrow(/needs Windows Script Host[\s\S]*--foreground/);
   });
 });

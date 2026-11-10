@@ -161,6 +161,17 @@ export function releaseDaemonLock(stateDir: string, deps: DaemonLockDeps = {}): 
   return true;
 }
 
+/** Removes the lock **only** while it is not held (a dead or reused pid). This is what a
+ *  `taskkill /F` leaves behind — Windows has no SIGTERM, so a stopped daemon never gets to
+ *  release its own lock — and what `otto stop` cleans up after it has ended the process. A lock
+ *  that is still held is left alone: that is a running daemon, and only it may release it. */
+export function clearStaleDaemonLock(stateDir: string, deps: DaemonLockDeps = {}): boolean {
+  const existing = readDaemonLock(stateDir);
+  if (existing.state !== "held" || daemonLockHeld(existing.content, deps)) return false;
+  rmSync(daemonLockPath(stateDir), { force: true });
+  return true;
+}
+
 export interface DaemonLockStatus {
   present: boolean;
   /** Someone holds it right now (pid alive and start time matches, or unreadable). */

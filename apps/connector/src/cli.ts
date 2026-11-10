@@ -2,8 +2,9 @@
 // `npx @isaac2ingrid/otto <command>` (ADR-0014; npm scope: ADR-0013).
 //
 //   connect <url> <code>   redeem a pairing code, then install + start the background
-//                          service (launchd agent on macOS, systemd --user unit on Linux);
-//                          --foreground runs the daemon in this terminal instead;
+//                          service (launchd agent on macOS, systemd --user unit on Linux,
+//                          a per-user Run key on Windows); --foreground runs the daemon
+//                          in this terminal instead;
 //                          --proxy <url> routes fetch/ws/git/workers through an HTTP
 //                          proxy (issue #68) and stores it for the service
 //   status                 service state, pairing, workers, installed assets
@@ -126,8 +127,9 @@ function takeFlag(argv: string[], flag: string): { present: boolean; value?: str
 /** Fails when this machine cannot run the background service at all, or cannot reach the
  *  service manager that would run it. Called from `connect` *before* pairing, because the
  *  pairing code is single-use: `otto connect` used to redeem the code and only then discover
- *  that install() could not work here (Windows has no installer; a headless Linux session has
- *  no user bus), so each retry needed a freshly generated code. */
+ *  that install() could not work here (a platform with no autostart, a headless Linux session
+ *  with no user bus, a Windows box with the Run key disabled by policy), so each retry needed a
+ *  freshly generated code. */
 async function preflightService(): Promise<void> {
   const installer = requireInstaller();
   await installer.preflight?.();
@@ -137,11 +139,10 @@ function requireInstaller(): ServiceInstaller {
   const spec = serviceSpec(binEntryPath());
   const installer = getServiceInstaller(spec);
   if (!installer) {
-    // Windows has no service installer yet (ADR-0001 decision 10); a foreground run is the
-    // supported shape there, so say so instead of only naming the platforms that do have one.
-    const hint = process.platform === "win32" ? " — run `otto connect <url> <code> --foreground`" : "";
     fail(
-      `background services are not supported on ${process.platform} (ADR-0001: macOS launchd / Linux systemd only)${hint}`,
+      `background services are not supported on ${process.platform} ` +
+        `(launchd on macOS / systemd on Linux / the Run key on Windows) — ` +
+        `run \`otto connect <url> <code> --foreground\``,
     );
   }
   return installer;
@@ -208,9 +209,9 @@ async function connectCommand(argv: string[]): Promise<void> {
   if (!url || !code) usage();
   if (proxyPresent && !proxyFlag) fail("--proxy needs a value, e.g. --proxy http://127.0.0.1:7890");
   const dir = stateDir();
-  // A non-default state directory must stop before anything else: the launchd/systemd unit
-  // is shared machine state (fixed label), so installing from a private state directory
-  // would silently repoint the machine's own connector at it.
+  // A non-default state directory must stop before anything else: the launchd/systemd unit or
+  // the Run key is shared machine state (fixed label), so installing from a private state
+  // directory would silently repoint the machine's own connector at it.
   if (process.env.OTTO_HOME && !foreground) {
     fail(
       "OTTO_HOME is set to a private state directory; installing the shared background service would repoint this machine's connector. Use --foreground, or unset it.",
@@ -220,10 +221,11 @@ async function connectCommand(argv: string[]): Promise<void> {
 
   // 1. Refuse before spending the code. Pairing is single-use (protocol §5.2: the first
   //    successful /pair redeems it), and both shapes below are facts about this machine, not
-  //    preferences — no service manager on this platform (Windows), or one this session
-  //    cannot reach (systemd bus, launchd gui domain), or another daemon already holding this
-  //    state directory (`--foreground`). Discovering either *after* pairing costs the owner a
-  //    fresh code for every retry. `--foreground` is the escape hatch for the first two.
+  //    preferences — no autostart on this platform, a service manager this session cannot
+  //    reach (systemd bus, launchd gui domain, a Run key disabled by policy), or another daemon
+  //    already holding this state directory (`--foreground`). Discovering any of them *after*
+  //    pairing costs the owner a fresh code for every retry. `--foreground` is the escape hatch
+  //    for the first two.
   //
   //    The daemon-lock check is only for `--foreground`: on the service path the installer
   //    restarts the machine's one daemon (which releases the lock on SIGTERM), so refusing
@@ -475,11 +477,12 @@ async function statusCommand(): Promise<void> {
       `service:  ${installer.kind} ${OTTO_LABEL} — ${status.installed ? (status.running ? `running${pid} (${status.detail})` : `not running (${status.detail})`) : "not installed"}`,
     );
   } else {
-    console.log(`service:  not supported on ${process.platform}${process.platform === "win32" ? " — run `otto connect --foreground`" : ""}`);
+    console.log(`service:  not supported on ${process.platform} — run \`otto connect --foreground\``);
   }
 
-  // The daemon's own lock, not the service manager's view: on Windows the service line above is
-  // always "not supported", so this is the only answer to "is a connector actually running".
+  // The daemon's own lock, not the service manager's view: the two answer different questions
+  // (the lock also covers `otto daemon` and `connect --foreground`, which install nothing), and
+  // it is the only way to tell a running connector from a stale lock file.
   const lock = daemonLockStatus(dir);
   if (!lock.present) {
     console.log(`daemon:   not running (no ${DAEMON_LOCK_FILE})`);
@@ -644,8 +647,9 @@ function refuseIfDaemonRunning(dir: string): void {
  *  two daemons would share ~/.otto and the steward would not catch them, because a duplicate
  *  `hello` is settled by connEpoch — so they would take turns superseding each other while both
  *  ran reconcile and the watchdog over the same pi processes. Both entry points go through here:
- *  `otto daemon` (what a service manager starts) and `otto connect --foreground` (the supported
- *  shape on Windows, and the escape hatch everywhere else). */
+ *  `otto daemon` (what a service manager or the Windows logon launcher starts) and
+ *  `otto connect --foreground` (the escape hatch everywhere, and the only shape that shows
+ *  the daemon's own output in the terminal). */
 async function runDaemonAttached(dir: string, machineName: string): Promise<void> {
   const lock = acquireDaemonLock(dir, VERSION);
   if (!lock.ok) fail(daemonRunningMessage(lock));
