@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { promisify } from "node:util";
 import { clearStaleDaemonLock, daemonLockStatus, type DaemonLockDeps } from "./daemon-lock.ts";
+import { installAssets } from "./install.ts";
 import { terminateProcess, type KillDeps } from "./kill.ts";
 
 const realExecFile = promisify(execFile);
@@ -126,6 +127,28 @@ export function getServiceInstaller(spec: ServiceSpec, deps: ServiceDeps = {}): 
 
 function xmlEscape(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// --- installing a service for a machine that is already paired --------------------------------
+
+/** The one order that matters when a service goes in: the installer's install-blocking preflight
+ *  first (it may hold only facts that would fail `install()` outright, and nothing may be written
+ *  before it passes — ADR-0018 decision 9), then the pi assets *this* version's daemon needs (a
+ *  service without them comes up and fails every worker), then the unit/launcher, then a fresh
+ *  status to report. `otto install` is the only caller: `otto connect` writes the assets before it
+ *  knows whether it will install anything at all (`--foreground` does not).
+ *
+ *  `writeAssets` is injectable so the sequence can be asserted without writing into `ext/`. */
+export async function installService(
+  installer: ServiceInstaller,
+  dir: string,
+  writeAssets: (dir: string) => void = installAssets,
+): Promise<{ before: ServiceStatus; after: ServiceStatus }> {
+  await installer.preflight?.();
+  const before = await installer.status();
+  writeAssets(dir);
+  await installer.install();
+  return { before, after: await installer.status() };
 }
 
 // --- launchd (macOS user agent) -------------------------------------------------------------
@@ -646,9 +669,12 @@ sh.Run cmd, 0, False
   async start(): Promise<void> {
     // The launcher is the unit file here, and unlike launchd/systemd we could regenerate it — but
     // `otto start` on a machine that never paired would then leave a Run value pointing at a
-    // daemon with no credentials. Refuse like the service managers do ("unit not found").
+    // daemon with no credentials. Refuse like the service managers do ("unit not found"), and
+    // name the command that writes it for a machine that *is* paired.
     if (!existsSync(this.launcherPath)) {
-      throw new Error(`the connector's launcher is not installed (${this.launcherPath}) — run \`otto connect <url> <code>\` first`);
+      throw new Error(
+        `the connector's launcher is not installed (${this.launcherPath}) — run \`otto install\` on this machine, or \`otto connect <url> <code>\` first`,
+      );
     }
     await this.writeRunValue();
     // Another daemon already owns this state directory: that is the desired end state, and

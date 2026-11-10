@@ -499,7 +499,7 @@ describe("WindowsService", () => {
 
   it("start refuses a machine that never paired instead of leaving a dead Run value", async () => {
     const { installer, reg, launches } = harness();
-    await expect(installer.start()).rejects.toThrow(/launcher is not installed[\s\S]*otto connect/);
+    await expect(installer.start()).rejects.toThrow(/launcher is not installed[\s\S]*`otto install`[\s\S]*otto connect/);
     expect(reg.value()).toBeNull();
     expect(launches).toEqual([]);
   });

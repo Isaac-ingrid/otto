@@ -10,10 +10,12 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { getServiceInstaller, OTTO_LABEL, WINDOWS_RUN_KEY, type ServiceSpec } from "../src/service.ts";
+import { LocalStore } from "../src/store.ts";
 
 const run = promisify(execFile);
 const live = process.platform === "win32" && process.env.OTTO_WIN_LIVE_INSTALL === "1";
@@ -134,5 +136,115 @@ describe.runIf(live)("the Windows installer on the real machine", () => {
     expect(await runValueFromRegistry()).toBeNull();
     expect(readFileSync(join(stateDir, "connector.sqlite"), "utf8")).toBe("credentials");
     expect(await waitForGone(childPid)).toBe(true);
+  }, 120_000);
+});
+
+// `otto install` is the second way to get a service and the only one that needs no pairing code:
+// it writes the unit for the credential that is already in the state directory. This runs the real
+// CLI against a throwaway HOME, so <home>/.otto is the state directory and the machine's own
+// ~/.otto stays out of it — only the Run value is shared machine state, which is why this block
+// refuses to run while one is already set (an install run by hand is not a test fixture).
+describe.runIf(live)("`otto install` on the real machine", () => {
+  let home = "";
+  let supervisorPid: number | undefined;
+  let childPid: number | undefined;
+
+  const cliEnv = (): NodeJS.ProcessEnv => ({ ...process.env, OTTO_HOME: undefined, USERPROFILE: home, HOME: home });
+
+  async function cli(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+    const dist = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli.js");
+    try {
+      const { stdout, stderr } = await run(process.execPath, [dist, ...args], { env: cliEnv() });
+      return { stdout, stderr, code: 0 };
+    } catch (err) {
+      const failure = err as { code?: number; stdout?: string; stderr?: string };
+      return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", code: failure.code ?? 1 };
+    }
+  }
+
+  /** Poll the real CLI until its output matches, so a slow launcher is not a failure. */
+  async function statusUntil(pattern: RegExp, timeoutMs = 30_000): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let last = "";
+    while (Date.now() < deadline) {
+      const { stdout } = await cli(["status"]);
+      last = stdout;
+      if (pattern.test(stdout)) return stdout;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    throw new Error(`status never matched ${pattern}; last output:\n${last}`);
+  }
+
+  afterEach(async () => {
+    // Never leave a Run value, a hidden supervisor tree or a temp home behind, whatever failed.
+    if (supervisorPid !== undefined) await run("taskkill.exe", ["/PID", String(supervisorPid), "/T", "/F"]).catch(() => undefined);
+    if (childPid !== undefined) await run("taskkill.exe", ["/PID", String(childPid), "/T", "/F"]).catch(() => undefined);
+    if (home) {
+      await cli(["uninstall"]).catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+      home = "";
+    }
+  });
+
+  it("installs for a paired machine without a pairing code, and is idempotent", async () => {
+    home = mkdtempSync(join(tmpdir(), "otto-live-home-"));
+    const stateDir = join(home, ".otto");
+    mkdirSync(stateDir, { recursive: true });
+    // The only thing `otto install` needs: a credential for an unreachable server (nothing here
+    // contacts it — the daemon retries in the background and the lock is what we assert on).
+    const store = new LocalStore(join(stateDir, "connector.sqlite"));
+    store.saveCredentials({ serverUrl: "http://127.0.0.1:9", deviceId: "dev_live_install", token: "live-token" });
+    store.close();
+
+    expect(await runValueFromRegistry()).toBeNull();
+
+    const installed = await cli(["install"]);
+    expect(installed.code).toBe(0);
+
+    const launcher = join(stateDir, "otto-daemon.vbs");
+    expect(installed.stdout).toMatch(/^installed windows dev\.otto\.connector \(/m);
+    expect(installed.stdout).toContain(launcher);
+    // The Run value really points at the generated launcher, and the launcher really ran.
+    expect(existsSync(launcher)).toBe(true);
+    // The service runs *this* package: installing it also wrote the versioned pi assets, or the
+    // daemon would come up and fail every worker.
+    expect(existsSync(join(stateDir, "ext", "otto-pi-0.2.0.ts"))).toBe(true);
+    expect(await runValueFromRegistry()).toBe(`${process.env.SystemRoot}\\System32\\wscript.exe "${launcher}"`);
+    // The hint a hidden autostart owes its owner (ADR-0018 decision 12) and where the credential
+    // came from, so the command is honest about what it just did.
+    expect(installed.stdout).toMatch(/note: .*--supervise[\s\S]*logs\/supervisor\.log/);
+    expect(installed.stdout).toMatch(/paired:   dev_live_install → http:\/\/127\.0\.0\.1:9/);
+    expect(installed.stdout).toMatch(/logs: {5}/);
+
+    // `install` starts it and waits, so the service line must already agree, and the supervisor
+    // must name its child once the first one is up.
+    const status = await statusUntil(/^service: {2}windows dev\.otto\.connector — running pid \d+/m);
+    expect(status).toMatch(/^daemon: {3}running pid \d+/m);
+    const supervised = await statusUntil(/\[supervised: child pid \d+/);
+    const lockPid = Number(/daemon: {3}running pid (\d+)/.exec(supervised)![1]);
+    supervisorPid = lockPid;
+    const state = JSON.parse(readFileSync(join(stateDir, "supervisor.json"), "utf8")) as { supervisorPid: number; childPid: number };
+    expect(state.supervisorPid).toBe(lockPid);
+    childPid = state.childPid;
+
+    // Idempotent: a second install refreshes the same service instead of starting a second daemon.
+    const again = await cli(["install"]);
+    expect(again.code).toBe(0);
+    expect(again.stdout).toMatch(/^refreshed windows dev\.otto\.connector \(/m);
+    const stillThere = await cli(["status"]);
+    expect(stillThere.stdout).toMatch(new RegExp(`daemon: {3}running pid ${lockPid}\\b`));
+
+    const removed = await cli(["uninstall"]);
+    expect(removed.code).toBe(0);
+    expect(removed.stdout).toContain("removed");
+    expect(await runValueFromRegistry()).toBeNull();
+    expect(existsSync(launcher)).toBe(false);
+    // The stop half of uninstall killed the whole tree, and the data stayed.
+    expect(await waitForGone(lockPid)).toBe(true);
+    expect(await waitForGone(state.childPid)).toBe(true);
+    const after = await cli(["status"]);
+    expect(after.stdout).toMatch(/windows dev\.otto\.connector — not installed/);
+    expect(after.stdout).toMatch(/daemon: {3}not running/);
+    expect(existsSync(join(stateDir, "connector.sqlite"))).toBe(true);
   }, 120_000);
 });

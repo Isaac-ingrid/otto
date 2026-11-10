@@ -12,6 +12,9 @@
 //   doctor                 pairing, service, proxy, and reachability diagnosis
 //   logs [-n N] [name]     tail ~/.otto/logs/<name> (default connector.log)
 //   start | stop | restart control the background service (stop also disables start-at-login)
+//   install                put the background service in place for a machine that is already
+//                          paired (replaces a --foreground pairing or a lost service; never
+//                          spends a pairing code) and start it
 //   uninstall              stop the service and remove its unit (keeps ~/.otto data)
 //   upgrade [--version V]  npm-install @isaac2ingrid/otto (default @latest) and restart the
 //                          service; the fresh daemon rewrites the versioned pi assets
@@ -61,9 +64,9 @@ import {
   resolveProxyConfig,
   type ProxyConfig,
 } from "./proxy.ts";
-import { getServiceInstaller, OTTO_LABEL, type ServiceInstaller, type ServiceSpec } from "./service.ts";
+import { getServiceInstaller, installService, OTTO_LABEL, type ServiceInstaller, type ServiceSpec } from "./service.ts";
 import { launchCheck, PI_COMMAND_ENV, piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
-import { LocalStore } from "./store.ts";
+import { LocalStore, type Credentials } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
 import { runUpgrade } from "./upgrade.ts";
 import { VERSION } from "./version.ts";
@@ -102,6 +105,9 @@ usage:
   otto doctor                                 pairing, service, proxy, and reachability check
   otto logs [-n <lines>] [name]               tail ~/.otto/logs (default connector.log)
   otto start | stop | restart                 control the background service
+  otto install                                install (or repair) the background service for a
+                                                  machine that is already paired; needs no
+                                                  pairing code and starts it
   otto uninstall                              remove the service (keeps ~/.otto data)
   otto upgrade [--version <version>]          replace the package and restart the service
   otto repo-config <path> [options]           per-repo local settings (write isolation,
@@ -202,6 +208,8 @@ async function main(argv: string[]): Promise<void> {
     case "stop":
     case "restart":
       return serviceCommand(command);
+    case "install":
+      return installCommand(rest);
     case "uninstall":
       return uninstallCommand();
     case "upgrade":
@@ -602,6 +610,64 @@ async function uninstallCommand(): Promise<void> {
   }
   console.log(`removed ${installer.unitPath}`);
   console.log(`kept ${stateDir()} (credentials, workers, logs); delete it to purge everything`);
+}
+
+/** The stored credential, or null. Both `status` and `install` ask whether this machine is paired
+ *  without wanting to create a store (LocalStore's constructor makes the file and its tables). */
+function readCredentials(dir: string): Credentials | null {
+  const dbPath = join(dir, "connector.sqlite");
+  if (!existsSync(dbPath)) return null;
+  const store = new LocalStore(dbPath);
+  try {
+    return store.getCredentials();
+  } finally {
+    store.close();
+  }
+}
+
+/** `otto install`: put the background service in place for a machine that is **already paired**.
+ *  Until now the only way to get one was `otto connect`, which needs a freshly generated,
+ *  single-use pairing code — a strange price for "the connector is paired, it just does not start
+ *  at logon" (a `--foreground` pairing, an install that failed after pairing, a service removed by
+ *  hand or lost with the launcher file). This command never pairs, never spends a code, and never
+ *  touches the credential: it writes the unit/launcher for the credential that is already there. */
+async function installCommand(argv: string[]): Promise<void> {
+  if (argv.length > 0) usage();
+  const dir = stateDir();
+  // The launchd/systemd unit and the Windows Run value are *shared* machine state under one fixed
+  // label, so installing from a private state directory would silently repoint this machine's
+  // connector at it. Same refusal as `connect`, for the same reason.
+  if (process.env.OTTO_HOME) {
+    fail(
+      "OTTO_HOME is set to a private state directory; installing the shared background service would repoint this machine's connector. Use --foreground, or unset it.",
+    );
+  }
+  // An autostart for an unpaired machine can only fail at logon: the launcher would start a daemon
+  // with no credential to authenticate with. Refuse, and say what this command does *not* do.
+  const credentials = readCredentials(dir);
+  if (!credentials) {
+    fail(
+      `this machine is not paired yet (${join(dir, "connector.sqlite")}) — run \`otto connect <url> <code>\` first. ` +
+        `\`otto install\` only installs the service for a machine that is already paired and never needs a pairing code.`,
+    );
+  }
+  const installer = requireInstaller();
+  // `installService` is where the order lives: the installer's install-blocking preflight, then
+  // this version's pi assets, then the unit (service.ts). A refusal anywhere writes nothing.
+  let installed: Awaited<ReturnType<typeof installService>>;
+  try {
+    installed = await installService(installer, dir);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const { before, after } = installed;
+  console.log(`${before.installed ? "refreshed" : "installed"} ${installer.kind} ${OTTO_LABEL} (${installer.unitPath})`);
+  console.log(
+    `${OTTO_LABEL}: ${after.running ? `running${after.pid ? ` (pid ${after.pid})` : ""}` : `not running (${after.detail})`}`,
+  );
+  for (const note of installer.notes) console.log(`note: ${note}`);
+  console.log(`paired:   ${credentials.deviceId} → ${credentials.serverUrl}`);
+  console.log(`logs:     ${join(dir, "logs", "connector.log")}`);
 }
 
 // --- upgrade ---------------------------------------------------------------------------------
