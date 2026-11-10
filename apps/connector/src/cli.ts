@@ -53,7 +53,11 @@ const exec = promisify(execFile);
 const DEFAULT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 function stateDir(): string {
-  return process.env.OTTO_HOME ?? join(homedir(), ".otto");
+  // An empty value means unset. `??` alone would hand the store a bare "connector.sqlite",
+  // i.e. create and read credentials in whatever directory the command happened to run in —
+  // the same class of surprise the OTTO_HOME guard above exists to prevent.
+  const configured = process.env.OTTO_HOME?.trim();
+  return configured ? configured : join(homedir(), ".otto");
 }
 
 /** The bin wrapper this package ships; both src/cli.ts (dev) and dist/cli.js sit one
