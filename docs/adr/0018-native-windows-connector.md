@@ -182,6 +182,48 @@ the change exists only under `~/.otto/worktrees/`) and the agent's own report (i
 checkout it wrote into). Deliberately *not* covered by this run: the commit → push → PR path, since
 the task text forbade committing (`ahead 0`, `pushed false`).
 
+## Acceptance record: the write closure, `commit → push → PR` (2026-11-10)
+
+Phase 1 verified that a write task lands in a worktree. What it never did was close the loop — the
+branch was left local, so the last leg of the product's core value had never run on this machine.
+
+Setup, all of it required before the first PR could exist:
+
+- A private lab repository (`otto-write-lab`, default branch `main`, one commit), registered on the
+  machine as `worktree`/`parallel` and pushed so `origin` exists — `pr.ts` pushes the worktree's own
+  branch and then runs `gh pr create` with the worktree as cwd, so both need a remote.
+- `gh` on the machine, authenticated with the owner's own account (2.103.3, ssh protocol).
+- **The launcher's baked `PATH` refreshed with `otto install`.** `cli.ts` captures `process.env.PATH`
+  when the service is installed, and gh's installer does not add its directory to the machine's
+  `Path` (checked: neither `HKCU\Environment` nor the machine one mentions it), so an install that
+  predates gh produces a daemon that finds no `gh` and answers every consent with `gh_missing`.
+- The running daemon restarted through the generated `otto-daemon.vbs` rather than by hand: its old
+  environment carried the pre-gh `PATH`, and launching it this way also rehearses what the Run key
+  will do at logon.
+
+Run: one write task against the lab (append a section to `README.md`), then the report's consent
+card, tapped `[同意]`. The connector's own log is the durable record:
+
+```
+command_received  cmdId=pr:w_…:12:1  kind=pr_worker
+worker_event      type=pr_created
+command_settled   cmdId=pr:w_…:12:1  kind=pr_worker  ok=true     # 9.7s end to end
+```
+
+Result: PR #1 open, base `main`, head `otto/t-01m72fjvv7gmgyt5fmhkadecsw-1`, one file, +4/-0,
+`MERGEABLE`, body built from the report. Two things worth keeping from it:
+
+- The commit was authored as `unknown <hexin@yaxon.com>`: the machine's global `user.name` is
+  unset, and the **agent** runs `git commit` inside the worktree — the connector never does. So the
+  identity is the machine's to fix (`git config --global user.name`), but a write closure that
+  produces `unknown` authors is worth warning about rather than documenting.
+- The PR title is the report's summary verbatim, which is deterministic by design (no LLM on this
+  path) and read oddly here: it still ended with "未 push" in the sentence describing the work.
+
+What this does **not** cover: the logoff/logon check below, and any failure stage other than the
+happy one — `gh_missing`/`auth`/`push`/`create` have unit coverage (`pr.test.ts`,
+`pr-consent.test.ts`, `report-template.test.ts`) and their copy is already written.
+
 ## Phase 2 (implemented): the background lifecycle
 
 Decision 6 was phase 1's shape: `getServiceInstaller` returned `null` on win32 and the supported
