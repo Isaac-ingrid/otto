@@ -82,7 +82,7 @@ interface Memory {
   notes: {
     context(scope: { repoIds: RepoId[] }): NotesContext;   // resident layer + related project layers, with a character budget
     propose(n: NoteDraft): ProposeResult;                  // returns similar/conflicting candidates; does not write directly
-    commit(n: NoteDraft, opts: { replaces?: NoteId[] }): { note: Note; changes: ChangeReport[] };
+    commit(n: NoteDraft, intent?: { supersedes?: NoteId[]; evicts?: NoteId[] }): { note: Note; changes: ChangeReport[] };
     pin(id: NoteId, pinned: boolean): void;
     remove(id: NoteId): void;
     search(q: string, opts?: { scope?: NoteScope[] }): Note[];
@@ -136,9 +136,11 @@ sh_note_log(id, ts, op, noteId, text, reason, delivery, decision, reportedAt)
                                        -- reportedAt marks "already relayed with a reply" (issue #18);
                                        -- delivery = 'reply' | 'maintenance' and decision settle the
                                        --   90-day ask cards (issue #19)
-sh_note_pressure(layer, scope_repoId, text, chars, kind, evidence)
+sh_note_pressure(layer, scopeRepoId, text, chars, kind, evidence, supersedes, evicts)
                                        -- the latest user request for room per placement that a
-                                       --   refused commit left behind (issue #19); PRIMARY KEY
+                                       --   refused commit left behind (issue #19); the two intents
+                                       --   ride along (migration 027 split them out of the single
+                                       --   pre-027 `replaces` column); PRIMARY KEY
                                        --   (layer, scope_repoId) — the daily pass resolves it
 ```
 
@@ -146,7 +148,7 @@ sh_note_pressure(layer, scope_repoId, text, chars, kind, evidence)
 |---|---|---|---|---|
 | Resident layer | `resident` | User preferences, global conventions | Hard cap of **2,400 characters** | Rendered into a system-prompt section on every conversation turn |
 | Project layer | `project` | A repo's conventions, machine-specific caveats | **1,500 characters** per repo | Injected alongside tool results whenever a Thread involving that repo is fetched |
-| Archive layer | `archive` | Demoted old entries, evicted historical versions | Unlimited, never deleted | Fetched on demand via `notes.search` only |
+| Archive layer | `archive` | Demoted old entries, evicted historical versions (`status` stays `'active'`: the content is still true) and superseded ones (`status='superseded'`: it is no longer the truth) | Unlimited, never deleted | Fetched on demand via `notes.search` only |
 
 `kind`: `preference` (a preference), `convention` (a project convention), `environment` (an environment fact), `fact` (any other fact that affects scheduling). Pure chat never becomes a note (spec §10.1).
 
@@ -161,23 +163,28 @@ sh_note_pressure(layer, scope_repoId, text, chars, kind, evidence)
 
 Low-trust entries with `confirmed=false` live only in the project layer (marked "pending confirmation") and never appear in the resident layer; only after the user says "yes" — or the steward asks for confirmation and receives an affirmative answer — is `confirmed` set to true and promotion allowed.
 
+**What counts as "confirmation"** (a memory-trust boundary, `sameClaimText` in the module): a confirmation, and a parked capacity request, may only be *spent* on the identical claim — the normalized texts must be equal. Trigram similarity is a recall ranker (`similar`), never an authorization: a negation keeps most of its characters (「用户允许自动推送」 vs 「用户不允许自动推送」 ≈ 0.64 similar), so inheriting a confirmation across a rephrase would let an opposite fact walk into the resident layer. Rewording a confirmed claim therefore needs a fresh confirmation — fail closed.
+
 ### 2.4 Noting, conflicts, and supersession: the two-phase write
 
 The module is deterministic and **semantic judgment is left to the steward**, so writes happen in two steps:
 
 1. `notes.propose(draft)`: the module normalizes and dedupes (an exact match only bumps `useCount`) and uses FTS to find the closest few existing entries, returning `ProposeResult { duplicate?: NoteId, similar: Note[], needsEviction?: Note[] }`.
-2. The steward reviews the candidates and decides on `commit(draft, { replaces })`: same-meaning entries supersede the old one (the old entry moves to the archive, preserving the historical version); different ones coexist.
+2. The steward reviews the candidates and decides on `commit(draft, { supersedes, evicts })`: the two lists are deliberately separate, because "this fact stopped being true" and "make room for this one" are different acts and only the steward can tell them apart.
+   - `supersedes` **invalidates**: same-meaning entries become historical versions (`status = 'superseded'`, `supersededBy` points at the new note), kept in the archive. Cross-layer is allowed — the promotion path supersedes a project note with its resident successor (§2.2).
+   - `evicts` **only makes room**: the entry leaves the active layer for capacity (`supersededBy` still points at the new note) but its content stays true, so `status` stays `'active'`. Same placement only (same layer, same repo): a cross-layer target is a supersession, and `commit` refuses it as an eviction.
+   - An id in both lists is read as a supersession (the stronger move). Which of the two a target becomes never depends on how much room happened to be free.
 
-Capacity handling: if a write would push the resident layer past 2,400 characters, `propose` returns `needsEviction` (sorted by the §2.5 score, lowest first, **pinned entries excluded**); the steward picks which to evict and carries them in `commit.replaces`. The module enforces the cap and rejects anything over it. **Pinned entries are never spendable as room**: a `replaces` target that is pinned is refused outright — the pin leaves only by the owner's unpin (spec §10.2's exemption covers every eviction shape, however it is dressed up).
+Capacity handling: if a write would push the resident layer past 2,400 characters, `propose` returns `needsEviction` (sorted by the §2.5 score, lowest first, **pinned entries excluded**); the steward picks which to evict and carries them in `commit.evicts`. The module enforces the cap and rejects anything over it. **Pinned entries are never spendable as room**: a target that is pinned is refused outright — as an eviction and as a supersession — and the check runs before any capacity math. The pin leaves only by the owner's unpin (spec §10.2's exemption covers every eviction shape, however it is dressed up).
 
-If the steward does not handle it (issue #19): a **user_said** refusal records the request in `sh_note_pressure` — one row per **distinct request** (latest-wins must never erase an earlier promise without a report), carrying the draft's `kind`/`evidence` and its `replaces` intent; low-trust sources are never worth the room and stay plain refusals. The refusal message says so. The next daily `maintenance` honours each parked request deterministically: supersede its named `replaces` targets first (a parked correction must not score-evict *around* its predecessor; a target pinned in the meantime is skipped — the pin wins), then evict the lowest-scored unpinned entries by the same score, then write what was asked for, reporting both halves (「为腾空间我忘了 xx；记住了 yy」) through the daily delivery. If even that cannot free enough, the request is reported as unmet (`room_refused`) instead of rotting silently. A parked row is cleared only when a same-claim write lands (an *unrelated* successful write never clears it — a write consumes room, it does not make any).
+If the steward does not handle it (issue #19): a **user_said** refusal records the request in `sh_note_pressure` — one row per **distinct request** (latest-wins must never erase an earlier promise without a report), carrying the draft's `kind`/`evidence` and both of its intents (`supersedes`/`evicts`, split out of the pre-027 `replaces` column by migration 027; a row written before that migration reads as a supersession); low-trust sources are never worth the room and stay plain refusals. The refusal message says so. The next daily `maintenance` honours each parked request deterministically: supersede its named `supersedes` targets and archive its named `evicts` targets first (a parked correction must not score-evict *around* its predecessor; a target pinned in the meantime is skipped — the pin wins), then evict the lowest-scored unpinned entries by the same score, then write what was asked for, reporting both halves (「为腾空间我忘了 xx；记住了 yy」) through the daily delivery. Declared targets are excluded from the score-ranked candidates (`review finding 4`) — their bytes are already counted once, and re-picking one would overstate the room. If even that cannot free enough, the request is reported as unmet (`room_refused`) instead of rotting silently. A parked row is cleared only when a same-claim write lands (an *unrelated* successful write never clears it — a write consumes room, it does not make any).
 
 ### 2.5 Forgetting
 
 Three triggers (spec §10.2):
 
-1. **Capacity pressure**: eviction at write time (above). Eviction = demotion to `archive`, not deletion.
-2. **Conflict supersession**: `replaces`. The old entry's `supersededBy` points to the new entry.
+1. **Capacity pressure**: eviction at write time (above). `evicts` = demotion to `archive`, content still valid — not deletion, and not a claim that the fact changed.
+2. **Conflict supersession**: `supersedes`. The old entry's `supersededBy` points to the new entry, and its `status` becomes `'superseded'` — the entry stops being actionable truth (`search` still finds it, ranked behind its successor; `answer_worker` refuses it as evidence, §7.2).
 3. **Long unused**: `maintenance` runs once a day via a 02:00 UTC cron (idempotent by expression — restarts dedup onto the same schedule row instead of postponing it), with these rules:
    - A project-layer entry whose `lastUsedAt` is over 60 days old and not pinned → demoted to the archive.
    - A resident-layer entry unused for over 90 days and not pinned → **proposed to the owner, never demoted automatically** (resident-layer entries have broad impact): the daily pass sends an archive-or-keep card (「已经 90 天没有被用过…要归档吗？」); 归档 sinks the note (still searchable), 保留 renews `lastUsedAt` — a renewal, not a pin; the pin exemption stays the owner's explicit call. An unanswered ask re-fires at most every 30 days.
@@ -336,7 +343,7 @@ Five groups. Every tool returns compact text plus a few structured fields. The "
 | `find_threads(text, hints?)` | Candidates from §3 | safe |
 | `get_thread(threadId)` | Summary, workers, open questions, project-layer notes, recent timeline | safe |
 | `update_thread(threadId, {title?, goal?, summary?})` | Updates the summary | safe (idempotent overwrite) |
-| `notes_propose(draft)` / `notes_commit(draft, replaces?, confirmEvidence?)` / `notes_confirm(id, evidenceRef)` / `notes_pin(id, pinned)` / `notes_remove(id)` / `notes_list` | Two-phase writes from §2.4; confirm/list complete the conversation surface (issue #18). Resident writes require `evidence=user:<msgId>` (auto-attached from the triggering message in user runs); low-trust promotions require a confirmed predecessor or the run's own confirmation message | propose: safe; commit: safe (an exact-text duplicate absorbs the replay) |
+| `notes_propose(draft)` / `notes_commit(draft, supersedes?, evicts?, confirmEvidence?)` / `notes_confirm(id, evidenceRef)` / `notes_pin(id, pinned)` / `notes_remove(id)` / `notes_list` | Two-phase writes from §2.4; confirm/list complete the conversation surface (issue #18). Resident writes require `evidence=user:<msgId>` (auto-attached from the triggering message in user runs); low-trust promotions require a confirmed predecessor or the run's own confirmation message | propose: safe; commit: safe (an exact-text duplicate absorbs the replay) |
 | `notes_search(q)` | Search the archive layer | safe |
 
 **Dispatch and control (via the protocol gateway)**
@@ -365,7 +372,7 @@ For `unsafe` tools the command ID is taken from the tool task ID: `cmdId = "tool
 
 | Tool | Purpose |
 |---|---|
-| `answer_worker(workerId, text, evidence)` | The steward answers a worker's factual question itself. `evidence` must be a note ID or user message ID; without one the hook rejects it and only `ask_user` remains |
+| `answer_worker(workerId, text, evidence)` | The steward answers a worker's factual question itself. `evidence` must be a note ID (`note:<id>` — current, confirmed, and in the asking worker's repo) or user message ID (`user:<msgId>`); without one the hook rejects it and only `ask_user` remains |
 
 ### 4.4 System prompt essentials
 
@@ -463,10 +470,12 @@ Workers in the `lost` / `broken` states do not count as running; `broken` produc
 > (kind `report`): a reply to a failure/unreported card — or to a card whose question is
 > already answered — is the steward's to handle (the routed-reply close still applies),
 > never a relay into a broken worker or an overflowing session. `answer_worker`'s evidence
-> gate lives in the `beforeTool` hook (§7.2): `note:<id>` must exist in the ledger,
-> `user:<msgId>` must be a message the bound owner actually sent (card clicks count as owner
-> actions); without evidence only `ask_user` remains. Failure-class questions
-> (error/unreported/broken) are refused to `answer_worker` — they are the user's, not the
+> gate lives in the `beforeTool` hook (§7.2): `note:<id>` must exist in the ledger and be
+> **current, confirmed, and placed for the asking worker** — a `superseded` note (no longer
+> the truth), an unconfirmed low-trust report/inference (nobody vouched for it), and another
+> repo's project note all block; `user:<msgId>` must be a message the bound owner actually
+> sent (card clicks count as owner actions); without evidence only `ask_user` remains.
+> Failure-class questions (error/unreported/broken) are refused to `answer_worker` — they are the user's, not the
 > worker's. One deliberate deviation from the M1 text: failure pushes and the
 > broken/start-failed paths now also open an `sh_question` (the rules table's "Create a
 > question"), so those Threads read `waiting_you`, not `idle`, and the hello/reap reconcile

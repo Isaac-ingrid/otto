@@ -18,7 +18,7 @@ import {
   type Extension,
 } from "@earendil-works/pi-durable";
 import { MAX_THREAD_SUMMARY, type Ledger, type RouteCandidate } from "../ledger.ts";
-import { LOW_TRUST_SOURCES, sameClaim, type NoteDraft, type NoteKind, type NoteSource } from "../notes.ts";
+import { LOW_TRUST_SOURCES, sameClaimText, type NoteDraft, type NoteKind, type NoteSource } from "../notes.ts";
 import {
   titleOf,
   type InterruptWorkerInput,
@@ -723,7 +723,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   const notesPropose = defineTool({
     name: "notes_propose",
     description:
-      "写入记忆的第一步（不落库）：归一化并查重。返回 duplicate（已存在，commit 只会累加使用次数）、similar（语义相近的旧条目，同义的在 commit 里用 replaces 取代）、needsEviction（写满时按保留分排序的腾挪候选，置顶豁免）。",
+      "写入记忆的第一步（不落库）：归一化并查重。返回 duplicate（已存在，commit 只会累加使用次数）、similar（字面相近的旧条目，仅作召回参考，不构成「同一件事」的判定）、needsEviction（写满时按保留分排序的腾挪候选，置顶豁免）。写了新内容要用 commit 的 supersedes 取代旧事实、evicts 腾地方。",
     parameters: noteDraftSchema,
     replay: "safe",
     execute: async (args) => {
@@ -744,14 +744,23 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   const notesCommit = defineTool({
     name: "notes_commit",
     description:
-      "写入记忆的第二步（唯一写入路径）。replaces：被取代/被腾挪的旧条目 id（旧条目进档案，可追溯）。常驻层的门是硬性的：evidence 必须指向用户真正说过的那条消息（user:<om_…>；用户消息触发的轮次里可省略，系统会用当轮消息）；worker_reported / inferred 要进常驻层必须先在项目层经 notes_confirm 确认（replaces 指向它），或当轮就是用户的确认消息（confirmEvidence=user:<om_…>）；connector 来源只能进项目层。写入会记入下一条回复的「记账」，无需在正文里复述。",
+      "写入记忆的第二步（唯一写入路径）。两个意图必须分清：supersedes＝旧条目的事实已被这条取代（旧条目转为历史版本，不再可作为依据）；evicts＝旧条目仍然成立、只是腾出空间（内容保持有效）。常驻层的门是硬性的：evidence 必须指向用户真正说过的那条消息（user:<om_…>；用户消息触发的轮次里可省略，系统会用当轮消息）；worker_reported / inferred 要进常驻层必须先在项目层经 notes_confirm 确认（supersedes 指向它，且必须内容一致），或当轮就是用户的确认消息（confirmEvidence=user:<om_…>）；connector 来源只能进项目层。写入会记入下一条回复的「记账」，无需在正文里复述。",
     // Type.Object merge, not Type.Intersect: an intersect serializes as bare `allOf` with no
     // top-level `type: "object"`, which DeepSeek's tool-schema validation rejects with 400
     // (`schema must be a JSON Schema of 'type: "object"', got 'type: null'`) — found by the
     // first real-model eval run (issue #7 baseline).
     parameters: Type.Object({
       ...noteDraftSchema.properties,
-      replaces: Type.Optional(Type.Array(Type.String(), { description: "notes_propose 给出的旧条目 id（同义取代或腾挪）" })),
+      supersedes: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "事实已被这条取代的旧条目 id（跨层合法：项目层 → 常驻层）；旧条目转为历史版本、不再作为依据",
+        }),
+      ),
+      evicts: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "仍然成立、只是腾地方的旧条目 id（必须同层同仓库；内容保持有效，仅进档案）",
+        }),
+      ),
       confirmEvidence: Type.Optional(Type.String({ description: "用户确认消息：user:<om_…>（直接提升低信任来源时必填，须是当轮用户消息）" })),
     }),
     // §4.3: commit is replay-safe — an exact-text duplicate absorbs the replay (bump only).
@@ -780,7 +789,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
         // that proof — for THE SAME CLAIM only (review R1): a confirmation must not be
         // spendable on unrelated text, and the promoted note carries the predecessor's
         // evidence so the "who confirmed this" trail survives on the row itself.
-        const basis = (args.replaces ?? [])
+        const basis = [...(args.supersedes ?? []), ...(args.evicts ?? [])]
           .map((id) => ctx.ledger.notes.get(id))
           .find(
             (n): n is NonNullable<typeof n> =>
@@ -788,7 +797,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
               n.status === "active" &&
               n.confirmed &&
               LOW_TRUST_SOURCES.includes(n.source) &&
-              sameClaim(draft.text, n.text),
+              sameClaimText(draft.text, n.text),
           );
         if (basis !== undefined) {
           // Parked → confirmed (notes_confirm bound the owner's message to it) → promoted.
@@ -797,21 +806,21 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           draft.confirmed = true;
           draft.evidence = draft.evidence ?? basis.confirmedBy ?? basis.evidence ?? undefined;
         } else if (
-          (args.replaces ?? []).some((id) => {
+          [...(args.supersedes ?? []), ...(args.evicts ?? [])].some((id) => {
             const n = ctx.ledger.notes.get(id);
             return n !== null && n.status === "active" && n.confirmed && LOW_TRUST_SOURCES.includes(n.source);
           })
         ) {
           // A confirmed low-trust note is present but matches no claim in the draft: that is
-          // the laundering shape (review R1) — fail closed; a confirmed user_said note in
-          // replaces is an ordinary supersession and does not trip this.
+          // the laundering shape (review R1) — fail closed; a confirmed user_said note among
+          // the targets is an ordinary supersession and does not trip this.
           return err(
-            "refused: replaces 里有已确认的条目，但内容和要写入的不是同一件事——确认不能挪用。先在项目层记录这条新内容，等用户确认后再提升。",
+            "refused: supersedes/evicts 里有已确认的条目，但内容和要写入的不是同一件事——确认不能挪用。先在项目层记录这条新内容，等用户确认后再提升。",
           );
         } else {
           const run = await ctx.currentRun();
           if (!args.confirmEvidence || !(await ctx.checkProvenanceRef(args.confirmEvidence))) {
-            return err("refused: 低信任来源进常驻层需要先在项目层记录并经 notes_confirm 确认（replaces 指向它），或给出 confirmEvidence=user:<消息id>。");
+            return err("refused: 低信任来源进常驻层需要先在项目层记录并经 notes_confirm 确认（supersedes 指向它、内容一致），或给出 confirmEvidence=user:<消息id>。");
           }
           if (run && run.kind !== "user") {
             return err("refused: 事件触发的轮次不能直接提升低信任记忆：先写项目层，等用户确认（notes_confirm）后再提升。");
@@ -823,7 +832,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           draft.evidence = draft.evidence ?? args.confirmEvidence;
         }
       }
-      const result = ctx.ledger.notes.commit(draft, { replaces: args.replaces });
+      const result = ctx.ledger.notes.commit(draft, { supersedes: args.supersedes, evicts: args.evicts });
       if (!result.ok) {
         return err(
           `refused: ${result.message}` +
@@ -843,7 +852,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   const notesConfirm = defineTool({
     name: "notes_confirm",
     description:
-      "用户确认了某条待确认记忆（worker 汇报/推断来源）。evidenceRef 必须是用户说确认的那条消息（user:<om_…>），且必须晚于笔记创建（「记账」先告知、用户再确认——引用更早的消息不算确认）。确认后方可提升常驻层（notes_commit + replaces）。",
+      "用户确认了某条待确认记忆（worker 汇报/推断来源）。evidenceRef 必须是用户说确认的那条消息（user:<om_…>），且必须晚于笔记创建（「记账」先告知、用户再确认——引用更早的消息不算确认）。确认后方可提升常驻层（notes_commit + supersedes，且必须是同一条内容）。",
     parameters: Type.Object({
       noteId: Type.String(),
       evidenceRef: Type.String({ description: "用户确认消息：user:<om_…>" }),
@@ -865,7 +874,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
         return err("refused: 确认消息必须晚于笔记创建（用户先看到「记账」才能确认）。");
       }
       ctx.ledger.notes.confirm(args.noteId, args.evidenceRef);
-      return ok("已确认。现在可以用 notes_commit（replaces 指向它）提升到常驻层。");
+      return ok("已确认。现在可以用 notes_commit（supersedes 指向它）提升到常驻层。");
     },
   });
 
@@ -923,12 +932,15 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   });
 
   const notesSearch = defineTool({
-    description: "按子串搜记忆（含档案层：被取代/腾挪/归档的历史版本）。",
+    description: "搜记忆（含档案层的历史版本）。当前有效的版本排在前；标（已被取代）的是历史事实，只能用于追溯，不能作为派发依据。多词用空格分隔（任一命中即可）。",
     name: "notes_search",
-    parameters: Type.Object({ q: Type.String({ description: "搜索词（≥3 字效果最好）" }) }),
+    parameters: Type.Object({
+      q: Type.String({ description: "搜索词，空格分隔多个（每个 ≥3 字会进全文索引，效果最好）" }),
+      repoId: Type.Optional(Type.String({ description: "只看某个仓库的项目层笔记（常驻层始终包含）" })),
+    }),
     replay: "safe",
     execute: async (args) => {
-      const notes = ctx.ledger.notes.search(args.q);
+      const notes = ctx.ledger.notes.search(args.q, args.repoId !== undefined ? { repoIds: [args.repoId] } : {});
       if (notes.length === 0) return ok("（无匹配）");
       return ok(
         notes
@@ -1197,6 +1209,28 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           if (!note || note.status === "removed") {
             return { block: `Autonomy rule: evidence 笔记 ${trimmed} 不存在。用 notes_search / notes_list 找到真实笔记 id，或改用 ask_user。` };
           }
+          // "Searchable" is not "actionable" (memory-trust review): a historical version
+          // (superseded) says the fact is no longer true, and an unconfirmed low-trust row is
+          // somebody's report, not an established fact. Neither may be quoted at a worker.
+          if (note.status === "superseded") {
+            return {
+              block: `Autonomy rule: evidence 笔记 ${trimmed} 已被更新的记忆取代，不再是当前事实。用 notes_search 找当前版本，或改用 ask_user（带 questionId）。`,
+            };
+          }
+          if (!note.confirmed && LOW_TRUST_SOURCES.includes(note.source)) {
+            return {
+              block: `Autonomy rule: evidence 笔记 ${trimmed} 是未确认的${note.source === "inferred" ? "推断" : "汇报"}，不能作为派发依据。先请用户在对话里确认（notes_confirm），或改用 ask_user（带 questionId）。`,
+            };
+          }
+          // A project-layer convention belongs to ITS repo: quoting another repo's rule at a
+          // worker is exactly the cross-repo misuse this gate exists for.
+          const workerRepo =
+            typeof args.workerId === "string" ? (ctx.ledger.workers.get(args.workerId)?.repoId ?? null) : null;
+          if (note.scopeRepoId !== null && workerRepo !== null && note.scopeRepoId !== workerRepo) {
+            return {
+              block: `Autonomy rule: evidence 笔记 ${trimmed} 属于仓库 ${note.scopeRepoId}，与提问 worker 的仓库 ${workerRepo} 不符，不能作为它的依据。改用 ask_user（带 questionId）。`,
+            };
+          }
         } else if (trimmed.startsWith("user:")) {
           if (!(await ctx.isOwnerMessage(trimmed.slice("user:".length)))) {
             return { block: `Autonomy rule: evidence 消息 ${trimmed} 不是本部署收到过的用户消息。改用 ask_user（带 questionId）。` };
@@ -1291,10 +1325,10 @@ const ROLE_PROMPT = `你是 Otto，用户的个人助手，负责调度用户机
 5. 给用户的回复要短：先结论，再要点，几行以内。严禁声称派发过而实际没有调用工具；只有看到 dispatched 结果才算派发过。
 6. 派发的依据（basis）：用户明说要干什么用 user_explicit；回复某条汇报用 user_reply_to；来自例行任务用 routine。凭空的推断禁止派发，改用 ask_user。
 7. 运行中的任务可以干预（workerId 从 get_thread 拿）：转向/追加用 send_to_worker —— 用户要「立刻改」用 intent=now（不打断当前工具，当前批次结束就转向，回复里说明 after_current_tools），「做完这个再顺便…」用 intent=after；停下/停止用 interrupt_worker，且仅限用户明示（basis=user_explicit 或 user_reply_to），「停，然后改用 X」把 X 放进 then。转向不是停下：想停就说停。
-7b. worker 的提问（⟦event⟧ 里 blocked/needs_decision，带 questionId=）：90 秒内由你处置——纯事实问题（目标分支、命令、约定）且证据在手（笔记或用户原话）用 answer_worker（evidence 必填，否则被拦）；需要用户拍板/授权/没有证据的用 ask_user 转问，必带 questionId，选项给「同意/按你说的办」这类可点项；unreported（没有产出汇报）按最后的原话分类：像完成就 notify_user（questionId + resolution=done）如实汇报，在提问或拿不准就 ask_user 带 questionId 转问，不要凭空当作失败。没有任何处置时核心会在 90 秒后把问题原文转给用户（兜底不丢）。notify_user 带 questionId 时同样取消兜底。
+7b. worker 的提问（⟦event⟧ 里 blocked/needs_decision，带 questionId=）：90 秒内由你处置——纯事实问题（目标分支、命令、约定）且证据在手用 answer_worker（evidence 必填，且必须是当前有效的事实：已被取代的旧笔记、未确认的汇报/推断、别的仓库的项目约定都会被拦）；需要用户拍板/授权/没有可用证据的用 ask_user 转问，必带 questionId，选项给「同意/按你说的办」这类可点项；unreported（没有产出汇报）按最后的原话分类：像完成就 notify_user（questionId + resolution=done）如实汇报，在提问或拿不准就 ask_user 带 questionId 转问，不要凭空当作失败。没有任何处置时核心会在 90 秒后把问题原文转给用户（兜底不丢）。notify_user 带 questionId 时同样取消兜底。
 7c. ⟦watchdog⟧ 输入（worker 长时间没有动静，核心给了它最后一次复审机会）：先读它给的最后进展与 Thread 摘要，判断它是「还在干、只是很久没报」还是「跑偏/卡死」。只有第二种才动手——用 start_worker 在同一 Thread 上派一份改写的任务书（带唤醒文本给出的 provenanceRef），或该由用户拿主意时用 ask_user；看不出来就 no_action。唤醒文本里写的失联期限是核心的、不是你的：回答「再等等」不能延长它，所以别把希望押在「也许快好了」，要么重规划、要么问，要么让它按规则收尾。
 8. notify_user 的三段有硬性长度限制（结论 ≤80 字；做了什么 ≤4 条、每条 ≤100 字；需要你 ≤120 字），超长会被拒绝——压缩重写，不要截断。
 9. 永远不要替用户宣布「这件事完成了」；完成与否由汇报与事实说话。
 10. 例行任务与定时回看（spec §8）：用户表达周期性需求（「每个工作日 9 点汇总昨晚进展」）时，先把触发条件和要做的事复述给他确认，确认后用 create_routine（basis=user_explicit；digest=确定性汇总，instruction=按指令执行；cron 用 UTC）。你只是「察觉到重复模式」时，用 suggest_routine 发一张带按钮的建议卡——点按钮才会创建，绝不绕过按钮。给某个 Thread 设闹钟用 set_followup；管理用 list_schedules / pause_schedule / cancel_schedule（「暂停那个每天九点的」）。
 11. ⟦routine R⟧ 输入到达时按指令执行：要派发必须带 provenanceRef=routine:R（或指令里引用的真实用户消息），无事可做用 no_action 收尾——那是默认结局，不要为了「显得有用」而制造通知。⟦followup F⟧ 到期时同理：先看那个 Thread 的现状再决定。
-12. 记忆（notes_* 工具）：值得记的是「不知道它就会派错/多问/说错」的事——用户偏好与项目约定，不是闲聊内容。写入分两步：先 notes_propose 看查重/相似/腾挪候选，再 notes_commit（replaces 带上被取代或被腾挪的旧条目 id）。信任规则是硬性的：常驻层永远要有 evidence=用户真正说过的消息 id（用户消息触发的轮次可省略，系统自动挂当轮消息；事件触发的轮次必须指明）；worker_reported / inferred 来源先写项目层（待确认），用户在对话里确认后（notes_confirm，evidenceRef=确认那条消息）才能提升常驻层；connector 来源永远只进项目层。每次写入系统会自动在下一条回复后附「记账」，正文不必复述。用户要看/置顶/删除记忆时用 notes_list / notes_pin / notes_remove。`
+12. 记忆（notes_* 工具）：值得记的是「不知道它就会派错/多问/说错」的事——用户偏好与项目约定，不是闲聊内容。写入分两步：先 notes_propose 看查重/相似/腾挪候选（similar 只是字面相近，不能据此认定「同一件事」），再 notes_commit。两个意图必须分清：supersedes 用于旧事实已被取代（旧条目转为历史版本），evicts 只用于腾地方（旧条目仍成立）；相似不等于相同，改写一条已确认的记忆需要用户重新确认。信任规则是硬性的：常驻层永远要有 evidence=用户真正说过的消息 id（用户消息触发的轮次可省略，系统自动挂当轮消息；事件触发的轮次必须指明）；worker_reported / inferred 来源先写项目层（待确认），用户在对话里确认后（notes_confirm，evidenceRef=确认那条消息）才能提升常驻层；connector 来源永远只进项目层。每次写入系统会自动在下一条回复后附「记账」，正文不必复述。用户要看/置顶/删除记忆时用 notes_list / notes_pin / notes_remove。`

@@ -247,8 +247,8 @@ Principle: **remember only what affects scheduling decisions.** Litmus test: if 
 
 Three triggers for forgetting:
 
-1. **Capacity pressure**: writing something new requires evicting something old. The steward chooses and tells the user, "to make room, I forgot xx".
-2. **Conflict override**: when new information contradicts an old entry, the new replaces the old, and the old is kept as a historical version.
+1. **Capacity pressure**: writing something new requires evicting something old. The steward chooses and tells the user, "to make room, I forgot xx". An evicted entry is still believed — it only leaves the active layer; nothing claims the fact changed.
+2. **Conflict override**: when new information contradicts an old entry, the new supersedes the old, and the old is kept as a historical version that is no longer current truth — it stays searchable, and the steward must not answer a worker from it (`answer_worker`'s evidence gate).
 3. **Unused for a long time**: demoted to the archive layer.
 
 The user can **pin** entries; pinned entries are exempt from automatic eviction.
@@ -257,7 +257,8 @@ The user can **pin** entries; pinned entries are exempt from automatic eviction.
 
 - When the steward distills a new memory, the report includes a line "remembered: xx"; the user can correct it on the spot if unsatisfied. Silent memory is unacceptable.
 - A memory page is provided: all entries listed by category, editable, deletable, pinnable.
-- Every memory carries a **source** (which conversation, who said it) and a **date**; "said by the user in person" is distinguished from "inferred from agent reports or external content" — the latter weighs less and needs user confirmation before promotion to the resident layer, to guard against memory poisoning.
+- Every memory carries a **source** (which conversation, who said it) and a **date**; "said by the user in person" is distinguished from "inferred from agent reports or external content" — the latter weighs less and needs user confirmation before promotion to the resident layer, to guard against memory poisoning. A confirmation is good for the **exact claim it was given for**: reworded text (or a negation of it) needs a fresh confirmation, because similarity is not sameness.
+- Memory used as a **reason** — answering a worker whose plan depends on the answer — must be current, confirmed, and about that worker's own repo: a superseded note, an unconfirmed report, or another repo's convention is not evidence.
 - Environment memories defer to the connector's real-time reports; when conventions or preferences conflict with current facts, facts win and the memory is updated.
 
 ### 10.4 Module Boundary (Responsibilities, Not Implementation)

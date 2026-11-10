@@ -72,14 +72,14 @@ describe("notes unit: layer caps", () => {
       const tight = n.propose({ text: `${"合".repeat(40)}xy`, kind: "preference", source: "user_said", layer: "resident" });
       expect(tight.needsEviction.length).toBeGreaterThan(0);
 
-      // Without replaces the module refuses; with the listed victim it writes.
+      // Without evicts the module refuses; with the listed victim it writes.
       const refused = n.commit({ text: `${"合".repeat(40)}xy`, kind: "preference", source: "user_said", layer: "resident" });
       expect(refused.ok).toBe(false);
       if (!refused.ok) expect(refused.code).toBe("capacity");
       const victim = tight.needsEviction[0]!;
       const done = n.commit(
         { text: `${"合".repeat(40)}xy`, kind: "preference", source: "user_said", layer: "resident" },
-        { replaces: [victim.noteId] },
+        { evicts: [victim.noteId] },
       );
       expect(done.ok).toBe(true);
       if (done.ok) {
@@ -181,14 +181,14 @@ describe("notes unit: dedup and similar candidates", () => {
 
 // ---- unit: supersession (steward.md §2.4) -----------------------------------------------------------
 
-describe("notes unit: supersession via replaces", () => {
+describe("notes unit: supersession via supersedes", () => {
   it("the old entry sinks to the archive as a historical version pointing at its successor", async () => {
     await inNotesDo((n) => {
       const old = n.commit({ text: "报告要短", kind: "preference", source: "user_said", layer: "resident" });
       if (!old.ok) throw new Error(old.message);
       const next = n.commit(
         { text: "报告要短：结论一行，要点最多四条", kind: "preference", source: "user_said", layer: "resident" },
-        { replaces: [old.note.noteId] },
+        { supersedes: [old.note.noteId] },
       );
       if (!next.ok) throw new Error(next.message);
       expect(n.get(old.note.noteId)).toMatchObject({
@@ -199,6 +199,21 @@ describe("notes unit: supersession via replaces", () => {
       // The historical version stays searchable (archive: never deleted, §2.3).
       expect(n.search("报告要短").map((f) => f.noteId)).toContain(old.note.noteId);
       expect(next.changes.map((c) => c.op)).toEqual(["noted", "superseded"]);
+    });
+  });
+
+  it("a search lists the current version ahead of the history it superseded", async () => {
+    await inNotesDo((n) => {
+      const old = n.commit({ text: "报告要短", kind: "preference", source: "user_said", layer: "resident" });
+      if (!old.ok) throw new Error(old.message);
+      const next = n.commit(
+        { text: "报告要短：结论一行，要点最多四条", kind: "preference", source: "user_said", layer: "resident" },
+        { supersedes: [old.note.noteId] },
+      );
+      if (!next.ok) throw new Error(next.message);
+      // The successor ranks first (a reader that stops at the first hit gets the true fact),
+      // but the historical version stays reachable (§2.3: archive is never deleted).
+      expect(n.search("报告要短").map((h) => h.noteId)).toEqual([next.note.noteId, old.note.noteId]);
     });
   });
 
@@ -214,7 +229,7 @@ describe("notes unit: supersession via replaces", () => {
     });
   });
 
-  it("replaces can cross layers: the confirmed promotion path project → resident", async () => {
+  it("supersedes can cross layers: the confirmed promotion path project → resident", async () => {
     await inNotesDo((n) => {
       const parked = n.commit({
         text: "这个仓库用 pnpm",
@@ -228,7 +243,7 @@ describe("notes unit: supersession via replaces", () => {
       n.confirm(parked.note.noteId);
       const promoted = n.commit(
         { text: "这个仓库用 pnpm", kind: "convention", source: "worker_reported", layer: "resident", confirmed: true },
-        { replaces: [parked.note.noteId] },
+        { supersedes: [parked.note.noteId] },
       );
       if (!promoted.ok) throw new Error(promoted.message);
       expect(promoted.note.layer).toBe("resident");
@@ -339,6 +354,26 @@ describe("notes unit: review fixes (PR #44)", () => {
     });
   });
 
+  it("context() ranks the project layer and reports what the budget left out", async () => {
+    await inNotesDo((n) => {
+      const res = n.commit({ text: "常驻偏好", kind: "preference", source: "user_said", layer: "resident" });
+      const a = n.commit({ text: "repo-a 约定甲", kind: "convention", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      const b = n.commit({ text: "repo-a 约定乙", kind: "convention", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      if (!res.ok || !a.ok || !b.ok) throw new Error("fixtures failed");
+      n.pin(b.note.noteId, true);
+      const all = n.context({ repoIds: ["repo-a"] });
+      expect(all.resident.map((x) => x.noteId)).toEqual([res.note.noteId]);
+      expect(all.project.map((x) => x.noteId)).toEqual([b.note.noteId, a.note.noteId]); // pinned first
+      expect(all.omitted).toBe(0);
+      // A budget too small for anything: the resident layer is always injected, and what did
+      // not fit is counted — never silently interleaved into the layer itself.
+      const tiny = n.context({ repoIds: ["repo-a"] }, { maxChars: 1 });
+      expect(tiny.project).toHaveLength(0);
+      expect(tiny.omitted).toBe(2);
+      expect(n.list({ layer: "project", scopeRepoId: "repo-a" })).toHaveLength(2);
+    });
+  });
+
   it("propose surfaces refusals instead of swallowing them, and never offers evictions for an over-cap single note", async () => {
     await inNotesDo((n) => {
       const trust = n.propose({ text: "用户喜欢晚上跑长任务", kind: "preference", source: "worker_reported", layer: "resident" });
@@ -370,7 +405,7 @@ describe("notes unit: review fixes (PR #44)", () => {
       if (!res.ok || !a.ok || !b.ok) throw new Error("fixtures failed");
       n.commit(
         { text: "repo-a 新约定", kind: "convention", source: "user_said", layer: "project", scopeRepoId: "repo-a" },
-        { replaces: [a.note.noteId] },
+        { supersedes: [a.note.noteId] },
       );
       // archive + scope filters to that repo's history only (finding 7)
       const archiveA = n.list({ layer: "archive", scopeRepoId: "repo-a" }).map((x) => x.noteId);
@@ -428,6 +463,46 @@ describe("notes unit: eviction ordering", () => {
       const unconfirmed = n.commit({ text: `${"未".repeat(40)}证实的汇报`, kind: "preference", source: "worker_reported", layer: "project", scopeRepoId: "r" });
       if (!unconfirmed.ok) throw new Error("fixture failed");
       expect(retentionScore(unconfirmed.note, Date.now())).toBeLessThan(retentionScore(confirmed.note, Date.now()));
+    });
+  });
+
+  it("evicts only makes room; supersedes invalidates — the two intents are not interchangeable", async () => {
+    await inNotesDo((n) => {
+      const a = n.commit({ text: "旧偏好甲", kind: "preference", source: "user_said", layer: "resident" });
+      const b = n.commit({ text: "旧偏好乙", kind: "preference", source: "user_said", layer: "resident" });
+      if (!a.ok || !b.ok) throw new Error("fixtures failed");
+      const evicted = n.commit(
+        { text: "新偏好丙", kind: "preference", source: "user_said", layer: "resident" },
+        { evicts: [a.note.noteId] },
+      );
+      const superseded = n.commit(
+        { text: "更新偏好丁", kind: "preference", source: "user_said", layer: "resident" },
+        { supersedes: [b.note.noteId] },
+      );
+      expect(evicted.ok && superseded.ok).toBe(true);
+      // Both left the active layer, but only the superseded one stopped being true.
+      expect(n.get(a.note.noteId)).toMatchObject({ layer: "archive", status: "active" });
+      expect(n.get(b.note.noteId)).toMatchObject({ layer: "archive", status: "superseded" });
+    });
+  });
+
+  it("evicts cannot cross layers: a target elsewhere must be declared as a supersession", async () => {
+    await inNotesDo((n) => {
+      const parked = n.commit({ text: "这个仓库用 pnpm", kind: "convention", source: "worker_reported", layer: "project", scopeRepoId: "repo-a" });
+      if (!parked.ok) throw new Error(parked.message);
+      n.confirm(parked.note.noteId, "user:om_ok");
+      // Promotion dressed up as room-making: the module refuses instead of archiving a
+      // project note to pay for a resident one (a supersession is the honest intent).
+      const bad = n.commit(
+        { text: "这个仓库用 pnpm", kind: "convention", source: "worker_reported", layer: "resident", confirmed: true },
+        { evicts: [parked.note.noteId] },
+      );
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) {
+        expect(bad.code).toBe("invalid");
+        expect(bad.message).toContain("不在本层");
+      }
+      expect(n.get(parked.note.noteId)).toMatchObject({ layer: "project", status: "active" });
     });
   });
 });
@@ -783,7 +858,8 @@ describe("notes in conversation (issue #18, steward.md §4.1/§4.3, spec §10.3)
     const requests = await modelRequests();
     const refusal = requests.find((r) => r.lastToolResult.includes("refused"));
     expect(refusal).toBeDefined();
-    expect(refusal!.lastToolResult).toContain("replaces");
+    expect(refusal!.lastToolResult).toContain("supersedes");
+    expect(refusal!.lastToolResult).toContain("evicts");
     expect(refusal!.lastToolResult).toContain("可腾挪候选");
     const snap = await ownerStub().debugSnapshot();
     expect(snap.notes.filter((n) => n.layer === "resident")).toHaveLength(118);
@@ -870,7 +946,7 @@ describe("notes trust gates: the evidence rules (PR #44 review finding 3)", () =
     expect((await ownerStub().debugSnapshot()).notes[0]).toMatchObject({ confirmed: false });
 
     // Next turn: the SAME later message now confirms (it postdates the note), and the
-    // promotion (parked → confirmed → replaces) needs no further evidence — it inherits
+    // promotion (parked → confirmed → supersedes) needs no further evidence — it inherits
     // the confirmation's proof.
     await scriptModel(
       fauxAssistantMessage([fauxToolCall("notes_confirm", { noteId, evidenceRef: "user:om_confirm_late" })], { stopReason: "toolUse" }),
@@ -880,7 +956,7 @@ describe("notes trust gates: the evidence rules (PR #44 review finding 3)", () =
           kind: "convention",
           source: "worker_reported",
           layer: "resident",
-          replaces: [noteId],
+          supersedes: [noteId],
         })],
         { stopReason: "toolUse" },
       ),
@@ -931,7 +1007,7 @@ describe("notes trust gates: the evidence rules (PR #44 review finding 3)", () =
           kind: "preference",
           source: "worker_reported",
           layer: "resident",
-          replaces: [noteId],
+          supersedes: [noteId],
         })],
         { stopReason: "toolUse" },
       ),
@@ -954,7 +1030,7 @@ describe("notes trust gates: the evidence rules (PR #44 review finding 3)", () =
           kind: "convention",
           source: "worker_reported",
           layer: "resident",
-          replaces: [noteId],
+          supersedes: [noteId],
         })],
         { stopReason: "toolUse" },
       ),
@@ -1021,7 +1097,7 @@ describe("notes forgetting: retention, pins, pressure (issue #19)", () => {
     });
   });
 
-  it("a pinned target is refused in replaces regardless of capacity (review finding 1)", async () => {
+  it("a pinned target is refused in supersedes/evicts regardless of capacity (review finding 1)", async () => {
     await inNotesDo((n) => {
       // Escape (a): the layer has ROOM — the old code archived the pinned target anyway.
       const lone = n.commit({ text: "唯一的旧偏好", kind: "preference", source: "user_said", layer: "resident" });
@@ -1029,7 +1105,7 @@ describe("notes forgetting: retention, pins, pressure (issue #19)", () => {
       n.pin(lone.note.noteId, true);
       const withRoom = n.commit(
         { text: "一条无关的新偏好", kind: "preference", source: "user_said", layer: "resident" },
-        { replaces: [lone.note.noteId] },
+        { supersedes: [lone.note.noteId] },
       );
       expect(withRoom.ok).toBe(false);
       if (!withRoom.ok) {
@@ -1045,7 +1121,7 @@ describe("notes forgetting: retention, pins, pressure (issue #19)", () => {
       n.pin(pinned.noteId, true);
       const mixed = n.commit(
         { text: `${"另".repeat(40)}一条新偏好`, kind: "preference", source: "user_said", layer: "resident" },
-        { replaces: [created[0]!.noteId, pinned.noteId] },
+        { evicts: [created[0]!.noteId, pinned.noteId] },
       );
       expect(mixed.ok).toBe(false);
       if (!mixed.ok) expect(mixed.code).toBe("invalid");
@@ -1072,7 +1148,7 @@ describe("notes forgetting: retention, pins, pressure (issue #19)", () => {
       const propose = n.propose({ text: "用 vitest 跑测试，报告要带截图", kind: "convention", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
       const done = n.commit(
         { text: "用 vitest 跑测试，报告要带截图", kind: "convention", source: "user_said", layer: "project", scopeRepoId: "repo-a" },
-        { replaces: [propose.needsEviction[0]!.noteId] },
+        { evicts: [propose.needsEviction[0]!.noteId] },
       );
       expect(done.ok).toBe(true);
       expect(sql`SELECT COUNT(*) AS n FROM sh_note_pressure`[0]!.n).toBe(0);
@@ -1168,7 +1244,7 @@ describe("notes forgetting: retention, pins, pressure (issue #19)", () => {
       // The correction names its predecessor but the reworded text still does not fit.
       const correction = n.commit(
         { text: `汇报一律用中文写，${"包".repeat(50)}括标题`, kind: "preference", source: "user_said", layer: "resident" },
-        { replaces: [predecessor.note.noteId] },
+        { supersedes: [predecessor.note.noteId] },
       );
       expect(correction.ok).toBe(false);
 

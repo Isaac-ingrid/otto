@@ -24,6 +24,8 @@ import {
   waitWhileOutboundPending,
 } from "./helpers.ts";
 import type { FakeConnector } from "./helpers.ts";
+import type { Steward } from "../src/steward.ts";
+import type { Ledger } from "../src/ledger.ts";
 
 beforeEach(async () => {
   await resetLedgerState();
@@ -192,6 +194,65 @@ describe("answer_worker (steward.md §4.3/§7.2, AC2)", () => {
     await ownerStub().sweepQuestionFallbackForTest();
     await waitWhileOutboundPending();
     expect((await sentCards()).filter((c) => JSON.stringify(c.payload).includes("目标分支"))).toHaveLength(0);
+    fake.close();
+  }, 45_000);
+
+  it("evidence notes must be current, confirmed, and of the worker's own repo (memory-trust boundary)", async () => {
+    const { fake, workerId } = await runningWorker("目标分支是什么");
+    // The notes live in the ledger; only the model's tool calls are scripted. Four shapes the
+    // hook must reject — a superseded version, an unconfirmed report, another repo's
+    // convention — and one it must let through.
+    const ids = await runInDurableObject(ownerStub(), (instance: Steward) => {
+      const ledger = (instance as unknown as { ledger: Ledger }).ledger;
+      const scopeRepoId = ledger.workers.get(workerId)!.repoId!;
+      const old = ledger.notes.commit({ text: "目标分支是 main", kind: "convention", source: "user_said", layer: "project", scopeRepoId });
+      if (!old.ok) throw new Error(old.message);
+      const next = ledger.notes.commit(
+        { text: "目标分支是 develop", kind: "convention", source: "user_said", layer: "project", scopeRepoId },
+        { supersedes: [old.note.noteId] },
+      );
+      const report = ledger.notes.commit({ text: "worker 说分支叫 main", kind: "fact", source: "worker_reported", layer: "project", scopeRepoId });
+      const other = ledger.notes.commit({ text: "别的仓库用 trunk", kind: "convention", source: "user_said", layer: "project", scopeRepoId: `${scopeRepoId}#other` });
+      const good = ledger.notes.commit({ text: "测试跑 pnpm test", kind: "convention", source: "user_said", layer: "project", scopeRepoId });
+      ledger.notes.drainPendingForReply();
+      if (!next.ok || !report.ok || !other.ok || !good.ok) throw new Error("note fixtures failed");
+      return { superseded: old.note.noteId, report: report.note.noteId, other: other.note.noteId, good: good.note.noteId };
+    });
+
+    await fake.emit("report", workerId, {
+      type: "report",
+      status: "needs_decision",
+      summary: "准备提交",
+      question: "目标分支是哪个？",
+    });
+    const snap = await waitFor(
+      () => ownerStub().debugSnapshot(),
+      (s) => s.questions.some((x) => x.workerId === workerId && x.status === "open"),
+      "question opened",
+    );
+    const q = snap.questions.find((x) => x.workerId === workerId)!;
+
+    const answer = (evidence: string) =>
+      fauxAssistantMessage([fauxToolCall("answer_worker", { workerId, questionId: q.qid, text: "用 develop", evidence, basis: "memory" })], { stopReason: "toolUse" });
+    await scriptModel(
+      answer(`note:${ids.superseded}`),
+      answer(`note:${ids.report}`),
+      answer(`note:${ids.other}`),
+      answer(`note:${ids.good}`),
+      fauxAssistantMessage([fauxText("已代答。")]),
+    );
+    await waitRunsSettled();
+    await waitWhileOutboundPending();
+
+    const results = await allToolResults();
+    expect(results.some((r) => r.includes("已被更新的记忆取代") && r.includes("不再是当前事实"))).toBe(true);
+    expect(results.some((r) => r.includes("是未确认的汇报"))).toBe(true);
+    expect(results.some((r) => r.includes("与提问 worker 的仓库") && r.includes("不符"))).toBe(true);
+    // Searchable history was never sent to the worker: exactly one send, the current fact.
+    const sends = fake.cmds.filter((c) => c.kind === "send");
+    expect(sends).toHaveLength(1);
+    expect(String((sends[0]!.args as Record<string, unknown>).text)).toContain("用 develop");
+    expect((await ownerStub().debugSnapshot()).questions.find((x) => x.qid === q.qid)).toMatchObject({ status: "answered" });
     fake.close();
   }, 45_000);
 

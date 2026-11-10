@@ -14,6 +14,16 @@
 // rules deterministically; the evidence that the owner really confirmed (`user:<msgId>`)
 // is verified one layer up, by the notes_commit / notes_confirm tools.
 //
+// Two review-driven boundaries live here (memory-trust review):
+// - A confirmation (and a parked request) may only be SPENT on the identical claim
+//   (`sameClaimText`). Trigram similarity is recall-only — it surfaces neighbours in `similar`
+//   but never authorizes an inheritance, because "用户允许自动推送" and "用户不允许自动推送"
+//   read as 0.64 alike.
+// - `commit`'s two intents are separate and the caller's choice decides the outcome:
+//   `supersedes` invalidates a fact (status 'superseded', a historical version), `evicts` only
+//   makes room (content stays valid, status stays 'active'). Capacity never decides which of
+//   the two a target becomes — it only decides whether the write fits at all.
+//
 // All SQL here is owned by this module (sh_note, sh_note_fts, sh_note_log); callers reach
 // notes only through the ledger's `notes` handle, like every other sh_* table.
 import { ulid } from "@isaac2ingrid/protocol";
@@ -43,6 +53,12 @@ const SIMILAR_MIN = 0.25;
 /** The relay block stays readable: at most this many clauses, then a count line. */
 const MAX_RELAY_ITEMS = 10;
 const RELAY_MAX_CHARS = 600;
+/** Retrieval bounds (memory-trust review: bounded retrieval) — one search may not flood the
+ *  context however loose its query is. */
+const SEARCH_MAX_ITEMS = 20;
+const SEARCH_MAX_CHARS = 1_200;
+/** Request-level budget for `context()`: the resident layer plus three repos' project layers. */
+const CONTEXT_MAX_CHARS = RESIDENT_CAP + 3 * PROJECT_CAP_PER_REPO;
 /** One maintenance pass delivers at most this many pending rows of its own (issue #19):
  *  one bookkeeping text plus at most this many cards — the rest stays pending for the next
  *  pass or the next reply, never dropped, never a burst (PR #53 review finding 7). */
@@ -146,7 +162,8 @@ export interface ProposeResult {
   rejected?: { code: CommitRejectionCode; message: string };
   /** Exact (normalized) match among loaded layers: commit will only bump its useCount. */
   duplicate: NoteRow | null;
-  /** Closest active entries — same-meaning ones belong in commit.replaces (§2.4). */
+  /** Closest active entries — recall only; a genuinely same-meaning one is named in
+   *  commit.supersedes (§2.4), never inherited from similarity. */
   similar: NoteRow[];
   /** Lowest-scored eviction candidates (pinned excluded), empty when the write fits. */
   needsEviction: NoteRow[];
@@ -162,10 +179,27 @@ export type CommitResult =
       needsEviction: NoteRow[];
     };
 
+/** What a write does to existing entries (steward.md §2.4). The two lists are deliberately
+ *  separate: `supersedes` invalidates a fact (the old row becomes a historical version with
+ *  `status='superseded'`), `evicts` only makes room (the old row stays valid content, archived
+ *  with `status='active'`). Which one a target becomes follows the caller's choice, never the
+ *  amount of capacity that happened to be free. */
+export interface CommitIntent {
+  /** Facts this write makes obsolete. Cross-layer allowed (the promotion path supersedes a
+   *  project note with its resident successor). */
+  supersedes?: string[];
+  /** Entries that stay true but must leave the active layer for capacity. Same placement only
+   *  (same layer, same repo) — a cross-layer target is a supersession, not an eviction. */
+  evicts?: string[];
+}
+
 /** Resident notes + the project notes of the repos in play (§2.1 notes.context). */
 export interface NotesContext {
   resident: NoteRow[];
   project: NoteRow[];
+  /** Active project entries that did not fit the request-level budget (pinned first, then by
+   *  retention score) — dropped from this assembly, never from the layer itself. */
+  omitted: number;
 }
 
 export interface NotesDeps {
@@ -222,13 +256,14 @@ export function noteSimilarity(a: string, b: string): number {
   return shared / (ta.size + tb.size - shared);
 }
 
-/** Same claim, allowing rephrasing: identical normalized text, or trigram similarity at the
- *  "similar neighbors" floor. The promotion path uses this so a confirmation can only be
- *  spent on the claim it was given for (PR #44 review R1) — unrelated text fails it. */
-export function sameClaim(a: string, b: string): boolean {
-  const na = normalizeNoteText(a);
-  const nb = normalizeNoteText(b);
-  return na === nb || noteSimilarity(na, nb) >= SIMILAR_MIN;
+/** The strict "same claim" test: the normalized texts must be identical. Every decision that
+ *  SPENDS something — a confirmation inherited by a promotion, a parked request cleared as
+ *  satisfied — rests on this and never on similarity (memory-trust review). Trigram similarity
+ *  is a recall ranker (`similarTo`) only: it must not authorize, because a negation keeps most
+ *  of its characters ("用户允许自动推送" vs "用户不允许自动推送" ≈ 0.64). Rewording a confirmed
+ *  claim therefore needs a fresh confirmation — fail closed. */
+export function sameClaimText(a: string, b: string): boolean {
+  return normalizeNoteText(a) === normalizeNoteText(b);
 }
 
 /** steward.md §2.5: recency × usage × source trust × confirmation. Lower evicted first. */
@@ -343,12 +378,22 @@ export function createNotes(deps: NotesDeps) {
       .sort((a, b) => retentionScore(a, at) - retentionScore(b, at));
 
   /** Enough lowest-scored candidates to free `needed` characters (may fall short when
-   *  everything left is pinned — commit then rejects, which is the honest answer). */
-  const evictionCandidates = (needed: number, layer: "resident" | "project", scopeRepoId: string | null, at: number): NoteRow[] => {
+   *  everything left is pinned — commit then rejects, which is the honest answer). Ids in
+   *  `exclude` are skipped: those bytes are already counted as the write's declared targets,
+   *  and counting them twice would overstate the room (review finding 4). */
+  const evictionCandidates = (
+    needed: number,
+    layer: "resident" | "project",
+    scopeRepoId: string | null,
+    at: number,
+    exclude?: ReadonlySet<string>,
+  ): NoteRow[] => {
+    if (needed <= 0) return [];
     const picked: NoteRow[] = [];
     let freed = 0;
     for (const note of evictableSorted(layer, scopeRepoId, at)) {
       if (freed >= needed) break;
+      if (exclude?.has(note.noteId) === true) continue;
       picked.push(note);
       freed += note.bytes;
     }
@@ -403,25 +448,27 @@ export function createNotes(deps: NotesDeps) {
 
   /** Remembers a user request the layer had no room for — one row per DISTINCT request
    *  (PR #53 review finding 3: latest-wins used to erase an earlier promise without a
-   *  report; coexisting requests are each resolved by the daily pass). `kind`/`evidence`/
-   *  `replaces` ride along so the deferred write keeps the draft's shape, its verified
-   *  provenance, and its supersession intent (finding 4). An identical retry is a true
+   *  report; coexisting requests are each resolved by the daily pass). `kind`/`evidence` and
+   *  both intents ride along so the deferred write keeps the draft's shape, its verified
+   *  provenance, and exactly what it meant to do (finding 4). An identical retry is a true
    *  no-op: the promise is logged only when the row is new (the log-dup minor). */
   const recordPressure = (
     draft: NoteDraft,
     text: string,
     overBy: number,
-    replaces: string[],
+    supersedes: string[],
+    evicts: string[],
   ): void => {
     const scopeKey = draft.scopeRepoId?.trim() ?? "";
     const seen = sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM sh_note_pressure WHERE layer = ${draft.layer} AND scope_repoId = ${scopeKey} AND text = ${text}
     `[0]!.n;
     sql`
-      INSERT INTO sh_note_pressure (layer, scope_repoId, text, chars, kind, evidence, replaces)
-      VALUES (${draft.layer}, ${scopeKey}, ${text}, ${text.length}, ${draft.kind}, ${draft.evidence ?? null}, ${JSON.stringify(replaces)})
+      INSERT INTO sh_note_pressure (layer, scope_repoId, text, chars, kind, evidence, supersedes, evicts)
+      VALUES (${draft.layer}, ${scopeKey}, ${text}, ${text.length}, ${draft.kind}, ${draft.evidence ?? null},
+              ${JSON.stringify(supersedes)}, ${JSON.stringify(evicts)})
       ON CONFLICT (layer, scope_repoId, text) DO UPDATE SET chars = excluded.chars, kind = excluded.kind,
-        evidence = excluded.evidence, replaces = excluded.replaces
+        evidence = excluded.evidence, supersedes = excluded.supersedes, evicts = excluded.evicts
     `;
     if (seen === 0) {
       log("room_needed", pressureShadow({ layer: draft.layer, scopeRepoId: scopeKey === "" ? null : scopeKey, text }), `over_by:${overBy}`);
@@ -438,7 +485,7 @@ export function createNotes(deps: NotesDeps) {
     for (const row of sql<{ text: string }>`
       SELECT text FROM sh_note_pressure WHERE layer = ${layer} AND scope_repoId = ${scopeKey}
     `) {
-      if (sameClaim(text, row.text)) {
+      if (sameClaimText(text, row.text)) {
         sql`DELETE FROM sh_note_pressure WHERE layer = ${layer} AND scope_repoId = ${scopeKey} AND text = ${row.text}`;
       }
     }
@@ -449,6 +496,17 @@ export function createNotes(deps: NotesDeps) {
     sql`DELETE FROM sh_note_pressure WHERE layer = ${layer} AND scope_repoId = ${scopeRepoId ?? ""} AND text = ${text}`;
   };
 
+  /** Parse a JSON id list stored in a pressure column; null/blank/invalid → []. */
+  const parseIds = (value: string | null): string[] => {
+    if (value === null || value.trim().length === 0) return [];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+
   /** The pressure rows, oldest first (rowid = insertion order). */
   const pressureRows = (): Array<{
     layer: "resident" | "project";
@@ -456,17 +514,31 @@ export function createNotes(deps: NotesDeps) {
     text: string;
     kind: string;
     evidence: string | null;
-    replaces: string[];
+    supersedes: string[];
+    evicts: string[];
   }> =>
-    sql<{ layer: string; scope_repoId: string; text: string; kind: string; evidence: string | null; replaces: string | null }>`
-      SELECT layer, scope_repoId, text, kind, evidence, replaces FROM sh_note_pressure ORDER BY rowid
+    sql<{
+      layer: string;
+      scope_repoId: string;
+      text: string;
+      kind: string;
+      evidence: string | null;
+      supersedes: string | null;
+      evicts: string | null;
+      replaces: string | null;
+    }>`
+      SELECT layer, scope_repoId, text, kind, evidence, supersedes, evicts, replaces
+      FROM sh_note_pressure ORDER BY rowid
     `.map((r) => ({
       layer: r.layer as "resident" | "project",
       scopeRepoId: r.scope_repoId,
       text: r.text,
       kind: r.kind,
       evidence: r.evidence,
-      replaces: r.replaces === null ? [] : (JSON.parse(r.replaces) as string[]),
+      // Pre-027 rows kept their single intent in `replaces`; 027 backfills it into
+      // `supersedes`, and this fallback covers a row written before that migration ran.
+      supersedes: parseIds(r.supersedes ?? r.replaces),
+      evicts: parseIds(r.evicts),
     }));
 
   /** A pressure row as a loggable stand-in (the log's text snapshot is what relays). */
@@ -489,13 +561,20 @@ export function createNotes(deps: NotesDeps) {
     supersededBy: null,
   });
 
-  /** Resolves replace targets: active notes only (archived ones are ignored — replay-safe),
-   *  duplicates dropped. Cross-layer targets are allowed: superseding a project note with a
-   *  resident one is exactly the promotion path after confirmation. */
-  const resolveTargets = (replaces: string[] | undefined): NoteRow[] =>
-    [...new Set(replaces ?? [])]
+  /** Resolves an id list to active notes: archived/removed ids are ignored (replay-safe),
+   *  duplicates dropped. Cross-layer targets are allowed for a supersession (superseding a
+   *  project note with a resident one is exactly the promotion path after confirmation). */
+  const resolveActive = (ids: string[] | undefined): NoteRow[] =>
+    [...new Set(ids ?? [])]
       .map((id) => noteById(id))
       .filter((n): n is NoteRow => n !== null && n.status === "active");
+
+  /** Same placement = the same active layer (resident, or the same repo's project layer).
+   *  Only these free capacity and only these may be evicted; a supersession may cross layers. */
+  const placementMatch =
+    (layer: "resident" | "project", scopeRepoId: string | null) =>
+    (note: NoteRow): boolean =>
+      note.layer === layer && (layer === "resident" || note.scopeRepoId === scopeRepoId);
 
   const propose = (draft: NoteDraft): ProposeResult => {
     const check = checkDraft(draft);
@@ -527,7 +606,7 @@ export function createNotes(deps: NotesDeps) {
     };
   };
 
-  const commit = (draft: NoteDraft, opts: { replaces?: string[] } = {}): CommitResult =>
+  const commit = (draft: NoteDraft, intent: CommitIntent = {}): CommitResult =>
     tx(() => {
       const check = checkDraft(draft);
       if (!check.ok) return { ok: false, code: check.code, message: check.message, needsEviction: [] };
@@ -552,11 +631,17 @@ export function createNotes(deps: NotesDeps) {
         };
       }
 
-      const targets = resolveTargets(opts.replaces);
+      // Two disjoint intents (memory-trust review): `supersedes` invalidates a fact, `evicts`
+      // only makes room. An id named in both is read as a supersession (the stronger move), and
+      // the outcome never depends on how much capacity happens to be free.
+      const supersedeTargets = resolveActive(intent.supersedes);
+      const supersedeIds = new Set(supersedeTargets.map((t) => t.noteId));
+      const evictTargets = resolveActive(intent.evicts).filter((t) => !supersedeIds.has(t.noteId));
+      const targets = [...supersedeTargets, ...evictTargets];
       // Pinned entries are never spendable as room — not as capacity, not as supersession
       // (PR #53 review finding 1: with the layer under cap, or with unpinned targets alone
       // covering the deficit, a pinned target used to sail through and get archived). The
-      // check runs BEFORE any capacity math, and the loop below never sees a pinned target.
+      // check runs BEFORE any capacity math, and the loops below never see a pinned target.
       const pinnedTarget = targets.find((t) => t.pinned);
       if (pinnedTarget !== undefined) {
         return {
@@ -566,28 +651,53 @@ export function createNotes(deps: NotesDeps) {
           needsEviction: [],
         };
       }
-      // Only same-placement targets free capacity in the target layer: a cross-layer
-      // replace (the promotion path) supersedes elsewhere and must not buy room here.
-      const samePlacement = (target: NoteRow): boolean =>
-        target.layer === draft.layer && (draft.layer === "resident" || target.scopeRepoId === check.scopeRepoId);
-      const freed = targets.filter(samePlacement).reduce((sum, n) => sum + n.bytes, 0);
+      // Eviction cannot cross placement: only the same active layer frees room here. A
+      // cross-layer need is a supersession (the promotion path), never a silent eviction.
+      const inPlace = placementMatch(draft.layer, check.scopeRepoId);
+      const strayEvict = evictTargets.find((t) => !inPlace(t));
+      if (strayEvict !== undefined) {
+        return {
+          ok: false,
+          code: "invalid",
+          message: `「${clip(strayEvict.text, 30)}」不在本层（${layerLabel(draft.layer)}），不能作为腾挪对象；要取代它请用 supersedes。`,
+          needsEviction: [],
+        };
+      }
+      const freed =
+        supersedeTargets.filter(inPlace).reduce((sum, n) => sum + n.bytes, 0) +
+        evictTargets.reduce((sum, n) => sum + n.bytes, 0);
       const overBy = usageOf(draft.layer, check.scopeRepoId) + check.text.length - freed - capFor(draft.layer);
       if (overBy > 0) {
         // The module enforces the cap (§2.4): a write that does not fit is refused until the
-        // steward carries the evictions it was told about in `replaces`.
-        const candidates = evictionCandidates(overBy, draft.layer, check.scopeRepoId, at);
+        // steward names what to supersede (supersedes) or evict (evicts).
+        // The score-ranked candidates exclude the declared targets: those bytes are already
+        // counted once as this write's own supersession/eviction, and a target picked again
+        // as a "fresh" candidate would overstate the room (review finding 4).
+        const candidates = evictionCandidates(
+          overBy,
+          draft.layer,
+          check.scopeRepoId,
+          at,
+          new Set(targets.map((t) => t.noteId)),
+        );
         const canFree = candidates.reduce((sum, n) => sum + n.bytes, 0);
         // A user's own request must not be silently dropped when the model ignores
-        // `needsEviction` (spec §10.3): remember the pressure — WITH its supersession
-        // intent, so the daily pass honours `replaces` instead of score-evicting around it
-        // (finding 4) — and reports both halves (issue #19, §2.4/§2.5). Low-trust sources
-        // are never worth that room (steward.md §2.3) and stay refused.
-        if (draft.source === "user_said" && canFree + freed >= overBy) {
-          recordPressure(draft, check.text, overBy, targets.map((t) => t.noteId));
+        // `needsEviction` (spec §10.3): remember the pressure — WITH both intents, so the
+        // daily pass honours them instead of score-evicting around them (finding 4) — and
+        // reports both halves (issue #19, §2.4/§2.5). Low-trust sources are never worth that
+        // room (steward.md §2.3) and stay refused.
+        if (draft.source === "user_said" && canFree >= overBy) {
+          recordPressure(
+            draft,
+            check.text,
+            overBy,
+            supersedeTargets.map((t) => t.noteId),
+            evictTargets.map((t) => t.noteId),
+          );
           return {
             ok: false,
             code: "capacity",
-            message: `写入会超出${layerLabel(draft.layer)}上限 ${overBy} 字（用户要求记住，已记下腾挪需求，日维护会自动腾出并告知用户）；现在想自己选，请在 replaces 里带上要腾挪/取代的旧条目。`,
+            message: `写入会超出${layerLabel(draft.layer)}上限 ${overBy} 字（用户要求记住，已记下腾挪需求，日维护会自动腾出并告知用户）；现在想自己选，请在 supersedes / evicts 里带上要取代/腾挪的旧条目。`,
             needsEviction: candidates,
           };
         }
@@ -597,7 +707,7 @@ export function createNotes(deps: NotesDeps) {
           message:
             canFree < overBy
               ? `写入会超出${layerLabel(draft.layer)}上限 ${overBy} 字，且没有足够可腾挪的条目（可能都已置顶）。`
-              : `写入会超出${layerLabel(draft.layer)}上限 ${overBy} 字：请在 replaces 里带上要腾挪/取代的旧条目。`,
+              : `写入会超出${layerLabel(draft.layer)}上限 ${overBy} 字：请在 supersedes（事实已被它取代）或 evicts（仍成立，只是腾地方）里带上旧条目 id。`,
           needsEviction: candidates,
         };
       }
@@ -615,27 +725,22 @@ export function createNotes(deps: NotesDeps) {
       const note = noteById(noteId)!;
       const changes: ChangeReport[] = [log("noted", note, draft.source)];
 
-      // Which replaced entries were capacity victims (§2.5 eviction) vs semantic
-      // supersessions: the ones the write genuinely needed to make room are 'evicted' (their
-      // content stays valid — status keeps 'active', only the layer sinks), the rest are
-      // 'superseded' (a newer note says it better — status marks the historical version).
-      let stillOver = usageOf(draft.layer, check.scopeRepoId) - capFor(draft.layer);
-      for (const target of targets) {
-        const needed = samePlacement(target) && stillOver > 0;
-        if (needed) {
-          stillOver -= target.bytes;
-          sql`
-            UPDATE sh_note SET layer = 'archive', supersededBy = ${noteId}, lastUsedAt = ${at}
-            WHERE noteId = ${target.noteId}
-          `;
-          changes.push(log("evicted", target, "capacity", { supersededBy: noteId }));
-        } else {
-          sql`
-            UPDATE sh_note SET layer = 'archive', status = 'superseded', supersededBy = ${noteId}, lastUsedAt = ${at}
-            WHERE noteId = ${target.noteId}
-          `;
-          changes.push(log("superseded", target, "supersession", { supersededBy: noteId }));
-        }
+      // The outcome follows the declared intent, not the leftover capacity (memory-trust
+      // review): `supersedes` targets become historical versions (their fact is no longer
+      // true), `evicts` targets are only archived (their content stays valid).
+      for (const target of supersedeTargets) {
+        sql`
+          UPDATE sh_note SET layer = 'archive', status = 'superseded', supersededBy = ${noteId}, lastUsedAt = ${at}
+          WHERE noteId = ${target.noteId}
+        `;
+        changes.push(log("superseded", target, "supersession", { supersededBy: noteId }));
+      }
+      for (const target of evictTargets) {
+        sql`
+          UPDATE sh_note SET layer = 'archive', supersededBy = ${noteId}, lastUsedAt = ${at}
+          WHERE noteId = ${target.noteId}
+        `;
+        changes.push(log("evicted", target, "capacity", { supersededBy: noteId }));
       }
       return { ok: true, note, changes, bumped: false };
     });
@@ -720,46 +825,87 @@ export function createNotes(deps: NotesDeps) {
     return rows.map(viewNote).filter((n) => n.status !== "removed" || filter.includeRemoved === true);
   };
 
-  const search = (q: string, opts: { layers?: NoteLayer[] } = {}): NoteRow[] => {
-    const needle = q.trim();
-    if (needle.length === 0) return [];
-    // Trigram needs ≥3 characters to match anything; shorter needles fall back to LIKE —
-    // with % _ ! escaped (ESCAPE '!') so "100%" cannot match the world (review finding 6).
-    const likeSafe = needle.replace(/[!%_]/g, (m) => `!${m}`);
+  /** Search: multi-term OR recall over the FTS index (LIKE fallback when every term is too
+   *  short to be indexed), an optional repo scope, and the CURRENT version of a fact ahead of
+   *  its own history. Historical rows (superseded / archived) stay reachable — traceability,
+   *  spec §10.2 — but a reader that wants action evidence must check `status` (the
+   *  answer_worker gate does). Bounded: at most SEARCH_MAX_ITEMS rows / ~SEARCH_MAX_CHARS
+   *  characters, so no query can flood the context (memory-trust review). */
+  const search = (q: string, opts: { layers?: NoteLayer[]; repoIds?: string[] } = {}): NoteRow[] => {
+    const terms = [...new Set(q.split(/\s+/).map((t) => t.trim()).filter((t) => t.length > 0))];
+    if (terms.length === 0) return [];
+    // Terms of <3 characters cannot be matched by the trigram tokenizer; a query made of
+    // only such terms falls back to LIKE with % _ ! escaped (ESCAPE '!') so "1%" cannot
+    // match the world (review finding 6).
+    const longTerms = terms.filter((t) => t.length >= 3);
     const rows =
-      needle.length >= 3
+      longTerms.length > 0
         ? sql<Record<string, unknown>>`
             SELECT n.* FROM sh_note_fts f JOIN sh_note n ON n.rowid = f.rowid
-            WHERE sh_note_fts MATCH ${`"${needle.replaceAll('"', '""')}"`}
+            WHERE sh_note_fts MATCH ${longTerms.map((t) => `"${t.replaceAll('"', '""')}"`).join(" OR ")}
               AND n.status != 'removed'
-            ORDER BY n.createdAt DESC, n.noteId
           `
         : sql<Record<string, unknown>>`
-            SELECT * FROM sh_note WHERE text LIKE ${`%${likeSafe}%`} ESCAPE '!' AND status != 'removed'
-            ORDER BY createdAt DESC, noteId
+            SELECT * FROM sh_note WHERE status != 'removed'
+              AND text LIKE ${`%${terms[0]!.replace(/[!%_]/g, (m) => `!${m}`)}%`} ESCAPE '!'
           `;
-    const notes = rows.map(viewNote);
-    return opts.layers && opts.layers.length > 0 ? notes.filter((n) => opts.layers!.includes(n.layer)) : notes;
+    const ranked = rows
+      .map(viewNote)
+      .filter((n) => (opts.layers && opts.layers.length > 0 ? opts.layers.includes(n.layer) : true))
+      .filter((n) =>
+        opts.repoIds && opts.repoIds.length > 0 && n.layer !== "resident" ? opts.repoIds.includes(n.scopeRepoId ?? "") : true,
+      )
+      .sort((a, b) => {
+        const live = Number(b.status === "active") - Number(a.status === "active");
+        if (live !== 0) return live;
+        const pin = Number(b.pinned) - Number(a.pinned);
+        if (pin !== 0) return pin;
+        return b.createdAt - a.createdAt || (a.noteId < b.noteId ? -1 : 1);
+      });
+    const hits: NoteRow[] = [];
+    let chars = 0;
+    for (const note of ranked) {
+      if (hits.length >= SEARCH_MAX_ITEMS || chars + note.bytes > SEARCH_MAX_CHARS) break;
+      hits.push(note);
+      chars += note.bytes;
+    }
+    return hits;
   };
 
-  /** Resident notes + the project notes of the given repos; assembly counts as use (§2.5). */
-  const context = (scope: { repoIds: string[] }): NotesContext => {
+  /** Resident notes + the project notes of the given repos; assembly counts as use (§2.5).
+   *  Request-level budget (memory-trust review): the resident layer is always injected, then
+   *  project rows pinned-first and by retention score until the budget is spent — what does
+   *  not fit is reported in `omitted`, never silently interleaved. */
+  const context = (scope: { repoIds: string[] }, opts: { maxChars?: number } = {}): NotesContext => {
     const at = now();
     const resident = sql<Record<string, unknown>>`
       SELECT * FROM sh_note WHERE layer = 'resident' AND status = 'active'
       ORDER BY pinned DESC, createdAt, noteId
     `.map(viewNote);
-    const project = [...new Set(scope.repoIds ?? [])].flatMap((repoId) =>
+    const candidates = [...new Set(scope.repoIds ?? [])].flatMap((repoId) =>
       sql<Record<string, unknown>>`
         SELECT * FROM sh_note
         WHERE layer = 'project' AND status = 'active' AND scope_repoId = ${repoId}
         ORDER BY pinned DESC, createdAt, noteId
       `.map(viewNote),
     );
+    const budget = opts.maxChars ?? CONTEXT_MAX_CHARS;
+    const ranked = [...candidates].sort((a, b) => {
+      const pin = Number(b.pinned) - Number(a.pinned);
+      if (pin !== 0) return pin;
+      return retentionScore(b, at) - retentionScore(a, at) || a.createdAt - b.createdAt;
+    });
+    const project: NoteRow[] = [];
+    let used = resident.reduce((sum, n) => sum + n.bytes, 0);
+    for (const note of ranked) {
+      if (used + note.bytes > budget) continue;
+      project.push(note);
+      used += note.bytes;
+    }
     for (const note of [...resident, ...project]) {
       sql`UPDATE sh_note SET lastUsedAt = ${at} WHERE noteId = ${note.noteId}`;
     }
-    return { resident, project };
+    return { resident, project, omitted: ranked.length - project.length };
   };
 
   /** The project notes for one fetch of the Threads that involve these repos (get_thread).
@@ -974,78 +1120,84 @@ export function createNotes(deps: NotesDeps) {
 
       // 3. Ignored capacity pressure (issue #19, §2.4): a user asked for room, the write
       //    was refused with needsEviction, and nobody came back. Honour each parked request
-      //    — its named `replaces` first (finding 4: a parked correction must supersede its
-      //    predecessor, not score-evict around it), then by score — and write what was
-      //    asked for, reporting both halves with the daily delivery (finding 5). If even
-      //    that cannot free enough, the request is honestly reported as unmet instead of
-      //    rotting in the pressure table forever.
+      //    — its named `supersedes`/`evicts` first (finding 4: a parked correction must
+      //    supersede its predecessor, not score-evict *around* it), then by score — and
+      //    write what was asked for, reporting both halves with the daily delivery
+      //    (finding 5). If even that cannot free enough, the request is honestly reported
+      //    as unmet instead of rotting in the pressure table forever.
       for (const pressure of pressureRows()) {
         const scopeRepoId = pressure.scopeRepoId === "" ? null : pressure.scopeRepoId;
-        const settledBy = (note: NoteRow): boolean =>
-          note.status === "active" && samePlacement(note) && sameClaim(pressure.text, note.text);
-        const samePlacement = (note: NoteRow): boolean =>
-          note.layer === pressure.layer && (pressure.layer === "resident" || note.scopeRepoId === scopeRepoId);
-        if (loadedNotes().some(settledBy)) {
+        const inPlace = placementMatch(pressure.layer, scopeRepoId);
+        if (
+          loadedNotes().some(
+            (note) => note.status === "active" && inPlace(note) && sameClaimText(pressure.text, note.text),
+          )
+        ) {
           // A same-claim write landed (the steward retried successfully): satisfied.
           clearPressure(pressure.layer, scopeRepoId, pressure.text);
           continue;
         }
-        // Honour the supersession intent: named targets sink as superseded versions of the
-        // new note — unless the owner pinned one in the meantime (the pin always wins).
-        let freed = 0;
-        const named: NoteRow[] = [];
-        for (const targetId of pressure.replaces) {
+        // Honour both intents the refused write declared: superseded predecessors become
+        // historical versions of the new note, evicted ones only sink. A target equal to the
+        // write itself is skipped (never shadow what we are about to write), and a target the
+        // owner pinned in the meantime is left alone (the pin always wins).
+        const namedSupersede: NoteRow[] = [];
+        const namedEvict: NoteRow[] = [];
+        for (const targetId of pressure.supersedes) {
           const target = noteById(targetId);
           if (!target || target.status !== "active" || target.pinned) continue;
-          named.push(target);
-          freed += target.bytes;
+          if (sameClaimText(target.text, pressure.text)) continue;
+          namedSupersede.push(target);
         }
+        for (const targetId of pressure.evicts) {
+          if (pressure.supersedes.includes(targetId)) continue;
+          const target = noteById(targetId);
+          if (!target || target.status !== "active" || target.pinned) continue;
+          if (sameClaimText(target.text, pressure.text)) continue;
+          namedEvict.push(target);
+        }
+        const named = [...namedSupersede, ...namedEvict];
+        // Only same-placement supersessions free room here (the promotion path supersedes
+        // elsewhere); an evicts target is same-placement by construction (commit refuses a
+        // cross-layer one).
+        const freed =
+          namedSupersede.reduce((sum, n) => sum + (inPlace(n) ? n.bytes : 0), 0) +
+          namedEvict.reduce((sum, n) => sum + n.bytes, 0);
         const overBy = usageOf(pressure.layer, scopeRepoId) + pressure.text.length - freed - capFor(pressure.layer);
-        if (overBy > 0) {
-          const victims = evictionCandidates(overBy, pressure.layer, scopeRepoId, at).filter((v) => !named.some((n) => n.noteId === v.noteId));
-          const canFree = victims.reduce((sum, n) => sum + n.bytes, 0);
-          if (canFree + freed < overBy) {
-            clearPressure(pressure.layer, scopeRepoId, pressure.text);
-            changes.push(log("room_refused", pressureShadow(pressure), "no_room", { delivery: "maintenance" }));
-            continue;
-          }
-          const noteId = `n_${ulid()}`;
+        const namedIds = new Set(named.map((n) => n.noteId));
+        const victims = overBy > 0 ? evictionCandidates(overBy, pressure.layer, scopeRepoId, at, namedIds) : [];
+        if (overBy > 0 && victims.reduce((sum, n) => sum + n.bytes, 0) < overBy) {
+          // Even the score-ranked candidates cannot free enough (all pinned, or not enough
+          // room): report the request as unmet instead of letting it rot in the table.
+          clearPressure(pressure.layer, scopeRepoId, pressure.text);
+          changes.push(log("room_refused", pressureShadow(pressure), "no_room", { delivery: "maintenance" }));
+          continue;
+        }
+        const noteId = `n_${ulid()}`;
+        sql`
+          INSERT INTO sh_note (noteId, layer, scope_repoId, kind, text, bytes, source, evidence, confirmed, pinned, createdAt, lastUsedAt, useCount, status)
+          VALUES (${noteId}, ${pressure.layer}, ${scopeRepoId}, ${pressure.kind}, ${pressure.text}, ${pressure.text.length},
+                  'user_said', ${pressure.evidence}, 1, 0, ${at}, ${at}, 0, 'active')
+        `;
+        const note = noteById(noteId)!;
+        changes.push(log("noted", note, "user_said", { delivery: "maintenance" }));
+        for (const target of namedSupersede) {
           sql`
-            INSERT INTO sh_note (noteId, layer, scope_repoId, kind, text, bytes, source, evidence, confirmed, pinned, createdAt, lastUsedAt, useCount, status)
-            VALUES (${noteId}, ${pressure.layer}, ${scopeRepoId}, ${pressure.kind}, ${pressure.text}, ${pressure.text.length},
-                    'user_said', ${pressure.evidence}, 1, 0, ${at}, ${at}, 0, 'active')
+            UPDATE sh_note SET layer = 'archive', status = 'superseded', supersededBy = ${noteId}, lastUsedAt = ${at}
+            WHERE noteId = ${target.noteId}
           `;
-          const note = noteById(noteId)!;
-          changes.push(log("noted", note, "user_said", { delivery: "maintenance" }));
-          for (const target of named) {
-            sql`
-              UPDATE sh_note SET layer = 'archive', status = 'superseded', supersededBy = ${noteId}, lastUsedAt = ${at}
-              WHERE noteId = ${target.noteId}
-            `;
-            changes.push(log("superseded", target, "parked_replaces", { supersededBy: noteId, delivery: "maintenance" }));
-          }
-          for (const victim of victims) {
-            sql`UPDATE sh_note SET layer = 'archive', supersededBy = ${noteId} WHERE noteId = ${victim.noteId}`;
-            changes.push(log("evicted", victim, "ignored_needsEviction", { supersededBy: noteId, delivery: "maintenance" }));
-          }
-        } else {
-          // Room appeared since (a supersession, a removal): write it — still superseding
-          // the named predecessors (the correction's intent does not evaporate).
-          const noteId = `n_${ulid()}`;
+          changes.push(log("superseded", target, "parked_supersedes", { supersededBy: noteId, delivery: "maintenance" }));
+        }
+        for (const target of namedEvict) {
           sql`
-            INSERT INTO sh_note (noteId, layer, scope_repoId, kind, text, bytes, source, evidence, confirmed, pinned, createdAt, lastUsedAt, useCount, status)
-            VALUES (${noteId}, ${pressure.layer}, ${scopeRepoId}, ${pressure.kind}, ${pressure.text}, ${pressure.text.length},
-                    'user_said', ${pressure.evidence}, 1, 0, ${at}, ${at}, 0, 'active')
+            UPDATE sh_note SET layer = 'archive', supersededBy = ${noteId}, lastUsedAt = ${at}
+            WHERE noteId = ${target.noteId}
           `;
-          const note = noteById(noteId)!;
-          changes.push(log("noted", note, "user_said", { delivery: "maintenance" }));
-          for (const target of named) {
-            sql`
-              UPDATE sh_note SET layer = 'archive', status = 'superseded', supersededBy = ${noteId}, lastUsedAt = ${at}
-              WHERE noteId = ${target.noteId}
-            `;
-            changes.push(log("superseded", target, "parked_replaces", { supersededBy: noteId, delivery: "maintenance" }));
-          }
+          changes.push(log("evicted", target, "parked_evicts", { supersededBy: noteId, delivery: "maintenance" }));
+        }
+        for (const victim of victims) {
+          sql`UPDATE sh_note SET layer = 'archive', supersededBy = ${noteId} WHERE noteId = ${victim.noteId}`;
+          changes.push(log("evicted", victim, "ignored_needsEviction", { supersededBy: noteId, delivery: "maintenance" }));
         }
         clearPressure(pressure.layer, scopeRepoId, pressure.text);
       }

@@ -966,4 +966,19 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX IF NOT EXISTS web_cmd_relay_conn ON web_cmd_relay (webConnId)`;
     },
   },
+  {
+    // Memory trust boundary (notes.ts): a parked ("pressure") write now carries TWO intents
+    // instead of the single overloaded `replaces` — `supersedes` (the old fact is no longer
+    // true) and `evicts` (still true, only making room). The old column's contents were the
+    // old single-intent list, so every backfilled row reads as a supersession: that was the
+    // exact meaning of `replaces` for the correction path, and the only rows that could have
+    // been pure evictions are re-resolved by the daily pass on its next run (the parked write
+    // is still written; only which logged op its predecessor gets could differ).
+    id: "027_note_intent",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => { sql`ALTER TABLE sh_note_pressure ADD COLUMN supersedes TEXT`; });
+      ignoringDuplicateColumn(() => { sql`ALTER TABLE sh_note_pressure ADD COLUMN evicts TEXT`; });
+      sql`UPDATE sh_note_pressure SET supersedes = replaces WHERE supersedes IS NULL AND replaces IS NOT NULL`;
+    },
+  },
 ];
