@@ -19,7 +19,9 @@
 //                          per-repo local settings (§8.2/§13): how write tasks get a
 //                          directory, and whether pi runs with --approve there. Never
 //                          settable by a remote command — only here, on the machine
-//   daemon                 internal: the background service's entry point
+//   daemon                 internal: the background service's entry point; refuses to start
+//                          when another daemon already holds this state directory (ADR-0018
+//                          decision 10), as does `connect --foreground`
 import { existsSync, readdirSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -28,6 +30,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { runDaemon } from "./daemon.ts";
+import {
+  acquireDaemonLock,
+  DAEMON_LOCK_FILE,
+  daemonLockStatus,
+  releaseDaemonLock,
+} from "./daemon-lock.ts";
 import { installAssets } from "./install.ts";
 import { tailFile } from "./logger.ts";
 import { connect } from "./pairing.ts";
@@ -213,9 +221,15 @@ async function connectCommand(argv: string[]): Promise<void> {
   // 1. Refuse before spending the code. Pairing is single-use (protocol §5.2: the first
   //    successful /pair redeems it), and both shapes below are facts about this machine, not
   //    preferences — no service manager on this platform (Windows), or one this session
-  //    cannot reach (systemd bus, launchd gui domain). Discovering either *after* pairing
-  //    costs the owner a fresh code for every retry. `--foreground` is the escape hatch.
-  if (!foreground) await preflightService();
+  //    cannot reach (systemd bus, launchd gui domain), or another daemon already holding this
+  //    state directory (`--foreground`). Discovering either *after* pairing costs the owner a
+  //    fresh code for every retry. `--foreground` is the escape hatch for the first two.
+  //
+  //    The daemon-lock check is only for `--foreground`: on the service path the installer
+  //    restarts the machine's one daemon (which releases the lock on SIGTERM), so refusing
+  //    there would break a legitimate re-pair.
+  if (foreground) refuseIfDaemonRunning(dir);
+  else await preflightService();
 
   // 2. Proxy (issue #68), resolved before pairing so the /pair fetch itself goes through
   //    it. An explicit --proxy wins; a stored config is kept; otherwise the shell's
@@ -254,14 +268,7 @@ async function connectCommand(argv: string[]): Promise<void> {
   if (foreground) {
     console.log(`paired as ${deviceId}; running in foreground (Ctrl-C to stop)`);
     console.log(`next: open ${new URL("/app/machines", url)} to add a Git directory`);
-    const handle = await runDaemon({ stateDir: dir, machineName });
-    const shutdown = () => {
-      void handle.stop().finally(() => process.exit(0));
-      setTimeout(() => process.exit(0), 5000).unref();
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
-    return;
+    return runDaemonAttached(dir, machineName);
   }
 
   const installer = requireInstaller();
@@ -471,6 +478,19 @@ async function statusCommand(): Promise<void> {
     console.log(`service:  not supported on ${process.platform}${process.platform === "win32" ? " — run `otto connect --foreground`" : ""}`);
   }
 
+  // The daemon's own lock, not the service manager's view: on Windows the service line above is
+  // always "not supported", so this is the only answer to "is a connector actually running".
+  const lock = daemonLockStatus(dir);
+  if (!lock.present) {
+    console.log(`daemon:   not running (no ${DAEMON_LOCK_FILE})`);
+  } else if (lock.held) {
+    const since = lock.startedAt ? ` since ${new Date(lock.startedAt).toLocaleString()}` : "";
+    const version = lock.version ? ` (v${lock.version})` : "";
+    console.log(`daemon:   running pid ${lock.pid ?? "?"}${since}${version}`);
+  } else {
+    console.log(`daemon:   stale lock on pid ${lock.pid ?? "?"} — the next start replaces it`);
+  }
+
   // What the connector will actually spawn for the agent. On Windows this is not the bare
   // `pi` name: the `pi.cmd` shim is resolved to its real JS entry (pi-launch.ts), and seeing
   // that here is how a "pi works in my shell but not from otto" report gets diagnosed.
@@ -585,12 +605,56 @@ async function upgradeCommand(argv: string[]): Promise<void> {
 
 // --- daemon ----------------------------------------------------------------------------------
 
-async function daemonCommand(): Promise<void> {
-  const dir = stateDir();
+/** What the operator needs to act on when this state directory is already owned by a daemon, or
+ *  when the lock cannot be read at all (refused the same way — see daemon-lock.ts). */
+interface DaemonBusy {
+  path: string;
+  pid: number | null;
+  startedAt: number | null;
+  version: string | null;
+  detail?: string;
+}
+
+function daemonRunningMessage(busy: DaemonBusy): string {
+  if (busy.pid === null) {
+    return (
+      `${busy.path} is present but does not name a process this run can check ` +
+      `(${busy.detail ?? "unreadable"}) — refusing to start a second connector; check for one ` +
+      `already running, and delete that file if there is none`
+    );
+  }
+  const since = busy.startedAt ? `, started ${new Date(busy.startedAt).toLocaleString()}` : "";
+  const version = busy.version ? `, v${busy.version}` : "";
+  return (
+    `another otto connector daemon is already running (pid ${busy.pid}${since}${version}) — ` +
+    `stop it with \`otto stop\` (or Ctrl-C the terminal running it), or delete ${busy.path} if it is gone`
+  );
+}
+
+/** The read-only half of the same check, for the `--foreground` pairing path: it must not spend
+ *  the one-time code only to be refused by the lock a step later. The claim itself still decides
+ *  (runDaemonAttached), so a race here costs nothing but the ordering. */
+function refuseIfDaemonRunning(dir: string): void {
+  const status = daemonLockStatus(dir);
+  if (!status.held) return;
+  fail(daemonRunningMessage(status));
+}
+
+/** Runs the daemon in this process while holding the single-instance lock (ADR-0018 phase 2):
+ *  two daemons would share ~/.otto and the steward would not catch them, because a duplicate
+ *  `hello` is settled by connEpoch — so they would take turns superseding each other while both
+ *  ran reconcile and the watchdog over the same pi processes. Both entry points go through here:
+ *  `otto daemon` (what a service manager starts) and `otto connect --foreground` (the supported
+ *  shape on Windows, and the escape hatch everywhere else). */
+async function runDaemonAttached(dir: string, machineName: string): Promise<void> {
+  const lock = acquireDaemonLock(dir, VERSION);
+  if (!lock.ok) fail(daemonRunningMessage(lock));
   let handle;
   try {
-    handle = await runDaemon({ stateDir: dir, machineName: process.env.OTTO_MACHINE_NAME ?? hostname() });
+    handle = await runDaemon({ stateDir: dir, machineName });
   } catch (err) {
+    // Nothing is running, so nothing should still be claimed.
+    releaseDaemonLock(dir);
     fail(err instanceof Error ? err.message : String(err));
   }
 
@@ -598,13 +662,20 @@ async function daemonCommand(): Promise<void> {
     handle!
       .stop()
       .catch(() => undefined)
-      .finally(() => process.exit(0));
+      .finally(() => {
+        releaseDaemonLock(dir);
+        process.exit(0);
+      });
     setTimeout(() => process.exit(0), 5000).unref();
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   // The ConnectorApp's sockets/timers hold the event loop open; nothing else to do.
   await new Promise<void>(() => {});
+}
+
+async function daemonCommand(): Promise<void> {
+  return runDaemonAttached(stateDir(), process.env.OTTO_MACHINE_NAME ?? hostname());
 }
 
 // --- repo-config -----------------------------------------------------------------------------

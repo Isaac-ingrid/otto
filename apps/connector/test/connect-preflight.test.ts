@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,61 @@ describe.runIf(process.platform === "win32")("connect preflight on a platform wi
       expect(existsSync(join(home, ".otto"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+// `otto connect --foreground` runs the daemon in this terminal, and on Windows that is the
+// supported shape — so it is also the shape where a second connector is most likely: the same
+// command run twice, or a forgotten terminal. The lock is checked before pairing for the same
+// reason the service preflight is (the code is single-use), so the refusal must land without a
+// /pair attempt. Platform-independent: it is the daemon lock, not the service manager.
+describe("connect --foreground refuses while another daemon holds the state directory", () => {
+  it("refuses a held lock before pairing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otto-lock-held-"));
+    try {
+      // A live pid with no recorded start time is "held" without needing a ps/Win32 probe to
+      // agree on the format — the same fail-closed reading the worker locks use.
+      const lockPath = join(dir, "daemon.lock");
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: 1_700_000_000_000, version: "0.2.0" }));
+      const err = await run(process.execPath, [dist, "connect", CLOSED, "DUMMY1234", "--foreground"], {
+        env: { ...process.env, OTTO_HOME: dir },
+      }).catch((e: unknown) => e as { stderr?: string; message?: string });
+      const text = `${(err as { stderr?: string }).stderr ?? ""}${(err as { message?: string }).message ?? ""}`;
+
+      expect(text).toMatch(/already running/);
+      expect(text).toContain(lockPath);
+      expect(text).not.toMatch(/ECONNREFUSED|fetch failed|pair/i);
+      // The refusal must not steal the lock from its holder.
+      expect(JSON.parse(readFileSync(lockPath, "utf8"))).toMatchObject({ pid: process.pid });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("refuses an unreadable lock file, and reaches /pair when the lock is free", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "otto-lock-junk-"));
+    try {
+      const lockPath = join(dir, "daemon.lock");
+      writeFileSync(lockPath, "{ truncated");
+      const refused = await run(process.execPath, [dist, "connect", CLOSED, "DUMMY1234", "--foreground"], {
+        env: { ...process.env, OTTO_HOME: dir },
+      }).catch((e: unknown) => e as { stderr?: string; message?: string });
+      const refusedText = `${(refused as { stderr?: string }).stderr ?? ""}${(refused as { message?: string }).message ?? ""}`;
+      expect(refusedText).toMatch(/does not name a process/);
+      expect(refusedText).not.toMatch(/ECONNREFUSED|fetch failed/);
+      expect(readFileSync(lockPath, "utf8")).toBe("{ truncated");
+
+      // Contrast case, so the assertions above are about the lock and not about a command that
+      // refuses everything: with no lock file the same command gets as far as the /pair fetch.
+      rmSync(lockPath);
+      const past = await run(process.execPath, [dist, "connect", CLOSED, "DUMMY1234", "--foreground"], {
+        env: { ...process.env, OTTO_HOME: dir },
+      }).catch((e: unknown) => e as { stderr?: string; message?: string });
+      const pastText = `${(past as { stderr?: string }).stderr ?? ""}${(past as { message?: string }).message ?? ""}`;
+      expect(pastText).toMatch(/fetch failed|ECONNREFUSED/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
 });
