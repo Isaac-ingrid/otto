@@ -336,6 +336,54 @@ gate through the real CLI with a throwaway state directory (`supervise-cli.test.
 the state-file validation, the launcher's `--supervise`, the status note's holder check, the child
 authorisation) each fail at least one test.
 
+### Decision 13 (phase 2): `otto install` — the service, without a pairing code
+
+`connect` was the only way to get a background service, and it costs a freshly generated, single-use
+pairing code. That is the wrong price for the machine that is already paired and merely has no logon
+entry: a `--foreground` pairing, an install that failed after the code was redeemed, a `Run` value
+removed by hand (or by `otto uninstall`) while the credential is still in `~/.otto/connector.sqlite`.
+
+**`otto install` writes the service for the credential that is already there** — the inverse of
+`otto uninstall` — and is flat rather than namespaced (`otto service install`) so `install`/`uninstall`
+read as one pair, like `start`/`stop`. It takes no arguments, because there is no code and no URL to
+pass, so there is nothing for it to spend.
+
+Two refusals, both before anything is written:
+
+- **unpaired** → "not paired yet (…/connector.sqlite) — run `otto connect <url> <code>` first", plus
+  what the command is *not* for ("never needs a pairing code"). An autostart for a machine with no
+  credential can only fail at logon.
+- **`OTTO_HOME` set** → the same refusal `connect` makes: the unit file and the `Run` value are shared
+  machine state under one fixed label, so installing from a private state directory would silently
+  repoint this machine's connector at it.
+
+The order is the one decision 9 and the phase-2 section already agreed on, and it now lives in one
+exported function (`installService` in `service.ts`), because `otto install` is not the only caller
+that must not get it wrong: the installer's install-blocking `preflight()` first, then this version's
+pi assets (a service installed without them comes up and fails every worker), then the unit/launcher,
+then a fresh status. `otto connect` cannot reuse it — it writes the assets before it knows whether it
+will install anything (`--foreground` does not) — so what is shared is the sequence, asserted directly
+with a double (`install-service.test.ts`) rather than through either command.
+
+Output says which of the two it was: `installed` vs `refreshed` (decided by the pre-install status),
+the service line, the installer's notes (the `--supervise` hint on Windows), the credential the
+service will use, and the log path. `WindowsService.start()`'s "launcher is not installed" refusal
+now names `otto install` first and `otto connect` second, because on a paired machine it is the
+command that fixes it.
+
+Accepted on the real machine (Windows 11, build 26100) through the real CLI with a throwaway `HOME`:
+exit 0, `installed windows dev.otto.connector (…\otto-daemon.vbs)`, the `Run` value
+`…\System32\wscript.exe "<home>\.otto\otto-daemon.vbs"`, this version's assets in `<home>/.otto/ext`,
+`otto status` reading `service: windows dev.otto.connector — running pid N` and `daemon: running pid
+N … [supervised: child pid M]` with `supervisor.json` agreeing, a second `otto install` reporting
+`refreshed` with the same supervisor pid (no second daemon), and `otto uninstall` killing the tree and
+removing the launcher while keeping `connector.sqlite`. `test/windows-live.test.ts` runs it under
+`OTTO_WIN_LIVE_INSTALL=1`; the CI-safe refusals are in `test/install-command.test.ts`, whose cases park
+a tripwire — the state directory path is a *file*, so a run that got past a removed check dies in
+`installAssets` with `ENOTDIR` — so that a mutation cannot leave a real `Run` value on the machine.
+Nine mutations (both refusals, the argv check, the usage line, the `preflight()` call, the assets,
+their order, the `otto install` hint, the before-status) each fail at least one test.
+
 ### Open (phase 2)
 
 1. **What starts the daemon at logon — decided (decision 11).** The Run key plus a generated

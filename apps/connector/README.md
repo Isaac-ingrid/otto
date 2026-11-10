@@ -67,6 +67,7 @@ otto logs -n 50             # recent connector logs
 otto stop                   # stop and disable start-at-login
 otto start                  # enable and start
 otto restart                # restart the background service
+otto install                # install (or repair) the service for a machine that is already paired
 otto upgrade                # install the latest package and restart
 otto uninstall              # remove the service, preserve local state
 otto daemon --supervise     # run the daemon in this terminal, restarting it on failure
@@ -151,6 +152,7 @@ otto logs -n 50             # 查看最近日志
 otto stop                   # 停止并取消开机自启
 otto start                  # 启用并启动
 otto restart                # 重启后台服务
+otto install                # 为已配对的机器安装（或修复）后台服务（不需要配对码）
 otto upgrade                # 安装最新包并重启
 otto uninstall              # 移除服务，保留本地状态
 otto daemon --supervise     # 在当前终端运行守护进程，崩溃后自动重启

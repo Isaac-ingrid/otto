@@ -139,6 +139,7 @@ otto proxy [url]                  # show/set the stored proxy; --clear removes i
 otto doctor                       # pairing, service, proxy, reachability diagnosis (issue #68)
 otto logs                         # tail ~/.otto/logs/connector.log (no keys, no session content)
 otto stop | start | restart       # control the service
+otto install                      # install (or repair) the service for a machine that is already paired (no pairing code)
 otto upgrade                      # npm-install the latest package and restart the service
 otto uninstall                    # remove the service (keeps ~/.otto data)
 ```
