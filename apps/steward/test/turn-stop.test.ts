@@ -30,6 +30,7 @@ async function browser() {
   const snapshot = async () =>
     (await SELF.fetch(`${BASE}/app/api/workspace`, { headers: { cookie } })).json() as Promise<{
       busy: boolean;
+      csrf: string;
       messages: Array<{ id: string; role: string; text?: string }>;
     }>;
   const { csrf } = await snapshot();
