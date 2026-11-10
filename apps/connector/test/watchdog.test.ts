@@ -6,17 +6,19 @@
 // manager tests run fake-pi processes that genuinely go silent, and one test exercises the
 // REAL sampler against a CPU-bound tool child — the shape the original %cpu-of-pi sampler
 // got wrong (PR #41 review finding 1).
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WorkerManager, type StartWorkerArgs } from "../src/worker-manager.ts";
+import { terminateProcess } from "../src/kill.ts";
 import { LocalStore } from "../src/store.ts";
 import { EventLog } from "../src/events.ts";
 import {
   StallWatchdog,
   parseCpuTimeMs,
   parseProcStatCpuMs,
+  sampleTreeCpu,
   stallContinueNote,
   type TreeCpuSample,
   type WatchdogCandidate,
@@ -140,6 +142,22 @@ describe("cputime parsing", () => {
     const stat = "1234 (a b(c)) S 1 1234 1234 0 -1 4194624 200 0 30 10 500 700 0 0 20 0 1 0";
     expect(parseProcStatCpuMs(stat, 100)).toBe(12_000); // (500+700) ticks at 100 Hz
     expect(parseProcStatCpuMs("no closing paren")).toBeUndefined();
+  });
+
+  it("sums the Windows tree from one CIM pass, and refuses a partial picture", async () => {
+    const table = [
+      { pid: 1, ppid: 0, created: "t1", cpuMs: 100 },
+      { pid: 2, ppid: 1, created: "t2", cpuMs: 50.5 },
+      { pid: 3, ppid: 2, created: "t3", cpuMs: 25 },
+      { pid: 9, ppid: 0, created: "t9", cpuMs: 999 }, // unrelated: must not be counted
+    ];
+    const sample = await sampleTreeCpu(1, { platform: "win32", win32Table: async () => table });
+    expect(sample).toEqual({ totalCpuMs: 175.5, members: ["1@t1", "2@t2", "3@t3"] });
+    // A root the table does not mention, an unreadable CPU counter, or no table at all all
+    // mean the total is not comparable → no sample (an under-count would look like a stall).
+    expect(await sampleTreeCpu(1, { platform: "win32", win32Table: async () => table.filter((row) => row.pid !== 1) })).toBeUndefined();
+    expect(await sampleTreeCpu(1, { platform: "win32", win32Table: async () => [{ pid: 1, ppid: 0, created: "t1", cpuMs: Number.NaN }] })).toBeUndefined();
+    expect(await sampleTreeCpu(1, { platform: "win32", win32Table: async () => [] })).toBeUndefined();
   });
 });
 
@@ -578,6 +596,32 @@ describe("the production sampler under a busy tool child (fake-pi, real ps)", ()
     expect(store.getWorker("w-stall-1")!.state).toBe("running");
     expect(errors).toEqual([]);
   }, 40_000);
+});
+
+// The Windows counterpart of the test above, at the sampler level: `ps`/`/proc` do not exist
+// there, so the tree CPU has to come from the Win32_Process CIM table. Skipped off Windows.
+describe.runIf(process.platform === "win32")("the Windows sampler against a real busy child", () => {
+  it("sees a descendant's CPU, and reports the same member set across samples", async () => {
+    // A parent that idles (like pi) with a CPU-bound child of its own (like a tool call).
+    const spin = "const e=Date.now()+8000;while(Date.now()<e){Math.sqrt(Math.random())}";
+    const holder = spawn(
+      process.execPath,
+      ["-e", `require("child_process").spawn(process.execPath,["-e",${JSON.stringify(spin)}],{stdio:"ignore"});setInterval(()=>{},1000)`],
+      { stdio: "ignore" },
+    );
+    try {
+      const deps = { win32Deps: { cacheMs: 0 } };
+      const first = await sampleTreeCpu(holder.pid!, deps);
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const second = await sampleTreeCpu(holder.pid!, deps);
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
+      expect(second!.members).toEqual(first!.members); // a stable tree, so the delta means something
+      expect(second!.totalCpuMs).toBeGreaterThan(first!.totalCpuMs + 200);
+    } finally {
+      terminateProcess(holder.pid!, "SIGKILL");
+    }
+  }, 30_000);
 });
 
 describe("stallContinueNote", () => {

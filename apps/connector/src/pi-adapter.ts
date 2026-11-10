@@ -21,6 +21,7 @@ import { installAssets, type InstalledAssets } from "./install.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PiProcess } from "./pi-process.ts";
+import { piCommandFromEnv, resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
 import type { HistoryPage } from "@isaac2ingrid/protocol";
 
 /** Must match COMMAND_NAME in ./ext/otto-pi.ts (locked together by a test). */
@@ -98,10 +99,19 @@ export class PiAdapter implements AgentAdapter {
   private readonly runtimes = new Map<string, WorkerRuntime>();
   private readonly listeners: ((e: RawAdapterEvent) => void)[] = [];
   private assets?: InstalledAssets;
+  private launch?: LaunchResolution;
 
   constructor(options: PiAdapterOptions) {
     this.options = options;
     this.workerLogsDir = options.workerLogsDir === null ? null : (options.workerLogsDir ?? join(options.stateDir, "logs"));
+  }
+
+  /** The argv the connector will spawn for pi, resolved once (Windows shim resolution lives
+   *  in pi-launch.ts). OTTO_PI_COMMAND wins over the default `pi`; an explicit `command`
+   *  option (tests, embedders) wins over both and is never rewritten. */
+  get launchResolution(): LaunchResolution {
+    this.launch = this.launch ?? resolveExecutableLaunch(this.options.command ?? piCommandFromEnv() ?? ["pi"]);
+    return this.launch;
   }
 
   on(event: "worker-event", fn: (e: RawAdapterEvent) => void): void {
@@ -158,7 +168,7 @@ export class PiAdapter implements AgentAdapter {
 
     let runtime!: WorkerRuntime;
     const proc = new PiProcess({
-      command: this.options.command ?? ["pi"],
+      command: this.launchResolution.argv,
       args: this.buildArgs(spec, this.assets),
       cwd: spec.cwd,
       env: childEnv(process.env, this.options.env),

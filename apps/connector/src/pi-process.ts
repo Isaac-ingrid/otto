@@ -9,6 +9,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { randomUUID } from "node:crypto";
 import { appendCapped } from "./logger.ts";
+import { terminateProcess } from "./kill.ts";
 import { redactText } from "./redact.ts";
 
 export class RpcError extends Error {
@@ -177,6 +178,14 @@ export class PiProcess {
 
   kill(): void {
     if (this.exited || !this.child) return;
+    const pid = this.child.pid;
+    if (pid === undefined) return;
+    // Windows: one signal ends node only — pi's tool children would be orphaned, so the tree
+    // goes down with it. POSIX keeps the direct SIGKILL (the process group is pi's job).
+    if (process.platform === "win32") {
+      terminateProcess(pid, "SIGKILL");
+      return;
+    }
     this.child.kill("SIGKILL");
   }
 

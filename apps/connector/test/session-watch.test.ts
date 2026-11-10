@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CommandLog } from "../src/commands.ts";
 import { ConnectorApp } from "../src/connector-app.ts";
-import { parseProcessArguments, referencesSession } from "../src/session-holders.ts";
+import { findSessionHolders, listProcessArguments, parseProcessArguments, referencesSession, tokenizeArgs } from "../src/session-holders.ts";
 import { inspectCommandDelivery, observeSession } from "../src/session-observation.ts";
 import { LocalStore } from "../src/store.ts";
 import { WorkerManager, type RecoveryOptions } from "../src/worker-manager.ts";
@@ -362,6 +362,28 @@ describe("session_in_use (§10: another live pi process holds the session)", () 
     expect(referencesSession("pi -c", "wabcdefghij", "/other.jsonl")).toBe(false);
     expect(referencesSession("tail -f /other.jsonl", "wabcdefghij", "/other.jsonl")).toBe(true); // positional path...
     // ...but the caller's viewer denylist keeps `tail` from counting as a holder.
+  });
+
+  it("a Windows command line keeps a quoted, spaced path whole so matching still works", () => {
+    const session = "C:\\Users\\me\\.otto\\sessions\\2026-01_wabcdefghij.jsonl";
+    const args = `"C:\\Program Files\\nodejs\\node.exe" "C:\\pi\\cli.js" --session-id wabcdefghij`;
+    expect(tokenizeArgs(args)).toEqual(["C:\\Program Files\\nodejs\\node.exe", "C:\\pi\\cli.js", "--session-id", "wabcdefghij"]);
+    expect(referencesSession(args, "wabcdefghij", session)).toBe(true);
+    expect(referencesSession(`"C:\\pi\\cli.js" --session "${session}"`, "wabcdefghij", session)).toBe(true);
+  });
+
+  it("reads holders out of the Windows table, ignoring viewers and the console-less entries", async () => {
+    const session = "C:\\sessions\\2026-01_wabcdefghij.jsonl";
+    const table = [
+      { pid: 111, ppid: 1, cpuMs: 0, commandLine: `"C:\\node.exe" "C:\\pi\\cli.js" --mode rpc --session-id wabcdefghij` },
+      { pid: 112, ppid: 1, cpuMs: 0, commandLine: `"C:\\Git\\usr\\bin\\tail.exe" -f "${session}"` },
+      { pid: 113, ppid: 1, cpuMs: 0, commandLine: `"C:\\pi\\cli.js" --session-id someotherworker` },
+      { pid: 114, ppid: 1, cpuMs: 0 }, // command line unreadable → dropped, never guessed
+    ];
+    const deps = { platform: "win32" as const, win32Table: async () => table, alive: () => true };
+    expect((await listProcessArguments(deps)).processes.map((proc) => proc.pid)).toEqual([111, 112, 113]);
+    // 112 references the session but is a viewer; 113 is a live pi on a different worker.
+    expect((await findSessionHolders("wabcdefghij", session, [], deps)).map((holder) => holder.pid)).toEqual([111]);
   });
 });
 

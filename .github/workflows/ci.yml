@@ -45,3 +45,22 @@ jobs:
           node -e "const p=require('./package.json'); \
             if (p.dependencies && Object.keys(p.dependencies).length > 0) { \
               console.error('runtime dependencies leaked into the manifest'); process.exit(1); }"
+
+  # ADR-0018: the Windows branches of the connector are platform-parameterized so most of them
+  # run on Linux, but the ones that must be real — the Win32_Process CIM query, taskkill, the
+  # launcher's shim resolution — only run where Windows exists. This job covers the platform
+  # files, not the whole connector suite (POSIX-shaped assertions elsewhere are separate debt).
+  windows-connector:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r typecheck
+      - name: platform tests
+        working-directory: apps/connector
+        run: pnpm vitest run test/pi-launch.test.ts test/win32.test.ts test/kill.test.ts test/watchdog.test.ts

@@ -23,6 +23,7 @@ import { AdapterError } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
 import { childEnv, extractTarget, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, WORKER_SYSTEM_PROMPT } from "./install.ts";
+import { resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -142,10 +143,19 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly listeners: ((e: RawAdapterEvent) => void)[] = [];
   /** The last StartSpec per worker: a prompt-path send relaunches from it with --resume. */
   private readonly lastSpecs = new Map<string, StartSpec>();
+  private launch?: LaunchResolution;
 
   constructor(options: ClaudeAdapterOptions) {
     this.options = options;
     this.workerLogsDir = options.workerLogsDir === null ? null : (options.workerLogsDir ?? join(options.stateDir, "logs"));
+  }
+
+  /** The argv the connector will spawn for claude, resolved once (npm installs claude as a
+   *  `.cmd` shim on Windows, which Node cannot spawn without a shell). An explicit `command`
+   *  option (tests, embedders) is never rewritten. */
+  get launchResolution(): LaunchResolution {
+    this.launch = this.launch ?? resolveExecutableLaunch(this.options.command ?? ["claude"]);
+    return this.launch;
   }
 
   get version(): string | undefined {
@@ -225,7 +235,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
     let runtime!: WorkerRuntime;
     const proc = new ClaudeProcess({
-      command: this.options.command ?? ["claude"],
+      command: this.launchResolution.argv,
       args: this.buildArgs(spec, configPath),
       cwd: spec.cwd,
       env: childEnv(process.env, this.options.env),
@@ -708,7 +718,10 @@ export interface ClaudeProcessOptions {
  *  is, issue #17 AC): `claude --version` must exit 0. Sync on purpose — a boot-time check. */
 export function detectClaude(command: string[] = ["claude"], timeoutMs = 5000): { installed: boolean; version?: string } {
   try {
-    const result = spawnSync(command[0]!, [...command.slice(1), "--version"], { timeout: timeoutMs, encoding: "utf8" });
+    // Same Windows shim resolution as a real run: `spawnSync("claude")` cannot start the
+    // npm `.cmd` shim, which would report "not installed" on a machine that has it.
+    const [file, ...rest] = resolveExecutableLaunch(command).argv;
+    const result = spawnSync(file!, [...rest, "--version"], { timeout: timeoutMs, encoding: "utf8" });
     if (result.status !== 0 || result.error) return { installed: false };
     const version = String(result.stdout ?? "").trim().split("\n")[0] ?? "";
     return { installed: true, version: version.length > 0 ? version : undefined };

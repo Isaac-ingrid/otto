@@ -40,6 +40,7 @@ import {
   type ProxyConfig,
 } from "./proxy.ts";
 import { getServiceInstaller, OTTO_LABEL, type ServiceInstaller, type ServiceSpec } from "./service.ts";
+import { piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
 import { LocalStore } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
 import { runUpgrade } from "./upgrade.ts";
@@ -114,8 +115,11 @@ function requireInstaller(): ServiceInstaller {
   const spec = serviceSpec(binEntryPath());
   const installer = getServiceInstaller(spec);
   if (!installer) {
+    // Windows has no service installer yet (ADR-0001 decision 10); a foreground run is the
+    // supported shape there, so say so instead of only naming the platforms that do have one.
+    const hint = process.platform === "win32" ? " — run `otto connect <url> <code> --foreground`" : "";
     fail(
-      `background services are not supported on ${process.platform} (ADR-0001: macOS launchd / Linux systemd only)`,
+      `background services are not supported on ${process.platform} (ADR-0001: macOS launchd / Linux systemd only)${hint}`,
     );
   }
   return installer;
@@ -431,8 +435,14 @@ async function statusCommand(): Promise<void> {
       `service:  ${installer.kind} ${OTTO_LABEL} — ${status.installed ? (status.running ? `running${pid} (${status.detail})` : `not running (${status.detail})`) : "not installed"}`,
     );
   } else {
-    console.log(`service:  not supported on ${process.platform}`);
+    console.log(`service:  not supported on ${process.platform}${process.platform === "win32" ? " — run `otto connect --foreground`" : ""}`);
   }
+
+  // What the connector will actually spawn for the agent. On Windows this is not the bare
+  // `pi` name: the `pi.cmd` shim is resolved to its real JS entry (pi-launch.ts), and seeing
+  // that here is how a "pi works in my shell but not from otto" report gets diagnosed.
+  const pi = resolveExecutableLaunch(piCommandFromEnv() ?? ["pi"]);
+  console.log(`pi:       ${pi.source}${pi.detail ? ` — ${pi.detail}` : ""}`);
 
   const dbPath = join(dir, "connector.sqlite");
   if (!existsSync(dbPath)) {

@@ -5,6 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { win32ProcessCreated } from "./win32.ts";
 
 export interface LockFileContent {
   workerId: string;
@@ -33,8 +34,12 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** Best-effort process start time (macOS/Linux `ps`); null when unavailable. */
+/** Best-effort process start time: `ps lstart=` on macOS/Linux, the Win32_Process creation
+ *  timestamp on Windows; undefined when unavailable. Both sides must be the same source as the
+ *  one used when the value is compared (see lockIsHeld), so the format is only ever compared
+ *  against a value this machine produced. */
 export function processStartTime(pid: number): string | undefined {
+  if (process.platform === "win32") return win32ProcessCreated(pid);
   try {
     return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 2000 }).trim() || undefined;
   } catch {
@@ -135,8 +140,11 @@ export function removeStaleLocks(stateDir: string): string[] {
 export function markLocksHeldByDeadProcess(stateDir: string): void {
   const dir = locksDir(stateDir);
   if (!existsSync(dir)) return;
-  const probe = spawnSync("true");
-  const deadPid = probe.pid ?? 999_999_999; // reaped before spawnSync returns
+  // A pid whose process has already been reaped. Windows has no `true`, so the probe is a
+  // shell that exits immediately; the sentinel covers a spawn that could not run at all.
+  const probe =
+    process.platform === "win32" ? spawnSync("cmd.exe", ["/c", "exit"]) : spawnSync("true");
+  const deadPid = probe.pid ?? 999_999_999;
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".lock")) continue;
     const path = join(dir, name);

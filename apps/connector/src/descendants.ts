@@ -6,6 +6,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pidAlive, processStartTime } from "./locks.ts";
+import { terminateProcess } from "./kill.ts";
+import { win32Table, type Win32Deps, type Win32Row } from "./win32.ts";
 
 const exec = promisify(execFile);
 
@@ -63,8 +65,30 @@ export function collectDescendants(rootPid: number, rows: PsRow[]): ProcRef[] {
   return out;
 }
 
-/** One `ps` pass over the whole process table; [] when ps is unavailable. */
-export async function listDescendants(rootPid: number): Promise<ProcRef[]> {
+/** Windows rows share the snapshot shape: the CIM table is the counterpart of one `ps` pass,
+ *  and `created` plays exactly the role of the `lstart` column. */
+export function win32RowsToPsRows(rows: Win32Row[]): PsRow[] {
+  return rows.map((row) => ({
+    pid: row.pid,
+    ppid: row.ppid,
+    ...(row.created ? { startTime: row.created } : {}),
+  }));
+}
+
+export interface DescendantDeps {
+  platform?: NodeJS.Platform;
+  /** Win32 table seam (tests inject a canned process table). */
+  win32Table?: (deps?: Win32Deps) => Promise<Win32Row[]>;
+  win32Deps?: Win32Deps;
+}
+
+/** One pass over the whole process table; [] when nothing could be read. macOS/Linux use
+ *  `ps`, Windows the Win32_Process CIM query — the same degrade either way. */
+export async function listDescendants(rootPid: number, deps: DescendantDeps = {}): Promise<ProcRef[]> {
+  if ((deps.platform ?? process.platform) === "win32") {
+    const rows = await (deps.win32Table ?? win32Table)(deps.win32Deps ?? {});
+    return collectDescendants(rootPid, win32RowsToPsRows(rows));
+  }
   let output: string;
   try {
     ({ stdout: output } = await exec("ps", ["-axo", "pid=,ppid=,lstart="], { timeout: 5000 }));
@@ -94,7 +118,7 @@ export interface KillDeps {
 export async function killOrphans(refs: ProcRef[], deps: KillDeps = {}): Promise<ProcRef[]> {
   const alive = deps.alive ?? pidAlive;
   const startTime = deps.startTime ?? processStartTime;
-  const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const kill = deps.kill ?? ((pid, signal) => terminateProcess(pid, signal));
   const stillOurs = (ref: ProcRef): boolean => {
     if (ref.pid <= 1 || ref.pid === process.pid) return false; // never signal init or ourselves
     if (!alive(ref.pid)) return false;

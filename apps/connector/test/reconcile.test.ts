@@ -6,7 +6,7 @@
 import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { collectDescendants, killOrphans, parsePsRows, type ProcRef } from "../src/descendants.ts";
+import { collectDescendants, killOrphans, listDescendants, parsePsRows, type ProcRef } from "../src/descendants.ts";
 import { inspectSessionTail } from "../src/session-tail.ts";
 import { LocalStore, type WorkerRow } from "../src/store.ts";
 import { EventLog } from "../src/events.ts";
@@ -204,6 +204,18 @@ describe("descendant snapshots and orphan cleanup (connector-pi.md §9.3)", () =
     expect(descendants.map((d) => d.pid)).toEqual([101, 102]); // pi itself excluded, grandchildren included
     expect(descendants[0]).toMatchObject({ startTime: "Sat Oct 16 20:02:00 2026" });
     expect(collectDescendants(200, rows)).toEqual([]);
+  });
+
+  it("reads the Windows process table through the same walk (creation time plays lstart's role)", async () => {
+    const table = [
+      { pid: 1, ppid: 0, cpuMs: 0 },
+      { pid: 100, ppid: 1, created: "2026-01-01T00:00:00Z", cpuMs: 0 },
+      { pid: 101, ppid: 100, created: "2026-01-01T00:00:01Z", cpuMs: 0 },
+      { pid: 102, ppid: 101, cpuMs: 0 }, // no creation time: still a descendant, just unverifiable
+      { pid: 5, ppid: 1, created: "2026-01-01T00:00:02Z", cpuMs: 0 },
+    ];
+    const refs = await listDescendants(100, { platform: "win32", win32Table: async () => table });
+    expect(refs).toEqual([{ pid: 101, startTime: "2026-01-01T00:00:01Z" }, { pid: 102 }]);
   });
 
   it("kills only alive pids whose start time still matches; spares the dead and the reused", async () => {

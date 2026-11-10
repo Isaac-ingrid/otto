@@ -11,7 +11,8 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { listDescendants, type ProcRef } from "./descendants.ts";
+import { listDescendants, collectDescendants, win32RowsToPsRows, type DescendantDeps, type ProcRef } from "./descendants.ts";
+import { win32Table, type Win32Deps } from "./win32.ts";
 
 const exec = promisify(execFile);
 
@@ -59,7 +60,8 @@ export interface TreeCpuSample {
   members: string[];
 }
 
-/** Linux reads /proc (10 ms tick resolution); elsewhere one `ps` pass over the tree.
+/** Linux reads /proc (10 ms tick resolution), macOS one `ps` pass, Windows one CIM pass over
+ *  the tree (see sampleTreeCpuWin32).
  *
  * Quantization caveat (PR #41 review, non-blocking): where `ps time=` is whole seconds
  * (procps; BSDs), a tree accruing under ~1 CPU-second across the ~2.6 s sample window can
@@ -67,6 +69,39 @@ export interface TreeCpuSample {
  * this path while /proc is readable (tick resolution), and macOS prints centiseconds, so
  * this bites only BSD-family platforms; the cost is bounded (one respawn) and the
  * member-churn and freshness guards still hold. */
+export interface WatchdogSampleDeps extends DescendantDeps {
+  /** Win32 table seam with the command-line variant signature (tests inject a canned table). */
+  win32Table?: (deps?: Win32Deps, opts?: { commandLine?: boolean }) => Promise<import("./win32.ts").Win32Row[]>;
+}
+
+/** One fresh Windows table read serving BOTH the member set and the CPU totals.
+ *
+ * The cache every other caller shares is deliberately bypassed here: a delta measured over a
+ * cached snapshot is exactly zero, which reads as a stone-cold tree and would strike a busy
+ * worker — the one outcome the watchdog must never produce. */
+async function sampleTreeCpuWin32(pid: number, deps: WatchdogSampleDeps): Promise<TreeCpuSample | undefined> {
+  const table = await (deps.win32Table ?? win32Table)({ ...(deps.win32Deps ?? {}), cacheMs: 0 }, {});
+  if (table.length === 0) return undefined;
+  const rows = win32RowsToPsRows(table);
+  // The root's own creation time is in the same table, so its identity key is as verifiable as
+  // any child's (a recycled pid changes the key and the two samples stop comparing).
+  const self = rows.find((row) => row.pid === pid);
+  const members: TreeMember[] = [
+    { pid, ...(self?.startTime ? { startTime: self.startTime } : {}) },
+    ...collectDescendants(pid, rows),
+  ];
+  const byPid = new Map(table.map((row) => [row.pid, row.cpuMs]));
+  let totalCpuMs = 0;
+  for (const member of members) {
+    const ms = byPid.get(member.pid);
+    // Absent or unreadable (NaN) means the total is not comparable: a smaller-than-real sum
+    // would read as "cold" and strike a healthy worker.
+    if (ms === undefined || !Number.isFinite(ms)) return undefined;
+    totalCpuMs += ms;
+  }
+  return { totalCpuMs, members: members.map(memberKey).sort() };
+}
+
 async function cumulativeCpuMs(members: TreeMember[]): Promise<Map<number, number> | undefined> {
   const out = new Map<number, number>();
   let sawProc = false;
@@ -107,8 +142,9 @@ const memberKey = (member: TreeMember): string => `${member.pid}@${member.startT
  * children actually work in. undefined when any member cannot be read — an unreadable sample
  * is never evidence of a stall.
  */
-export async function sampleTreeCpu(pid: number): Promise<TreeCpuSample | undefined> {
-  const descendants = await listDescendants(pid);
+export async function sampleTreeCpu(pid: number, deps: WatchdogSampleDeps = {}): Promise<TreeCpuSample | undefined> {
+  if ((deps.platform ?? process.platform) === "win32") return sampleTreeCpuWin32(pid, deps);
+  const descendants = await listDescendants(pid, deps);
   const members: TreeMember[] = [{ pid }, ...descendants];
   const cpu = await cumulativeCpuMs(members);
   if (!cpu) return undefined;

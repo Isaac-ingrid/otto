@@ -12,11 +12,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pidAlive } from "./locks.ts";
+import { win32Table, type Win32Deps, type Win32Row } from "./win32.ts";
 
 const exec = promisify(execFile);
 const psTimeout = { timeout: 5000 };
 
-export type ProcessArgumentsSource = "linux-procfs" | "ps";
+export type ProcessArgumentsSource = "linux-procfs" | "ps" | "win32-cim";
 
 /** Parses `ps -axo pid=,args=` style output into pid + argument lines. */
 export function parseProcessArguments(output: string): Array<{ pid: number; args: string }> {
@@ -31,12 +32,65 @@ export function parseProcessArguments(output: string): Array<{ pid: number; args
   return rows;
 }
 
+/** Splits an argument line into tokens, keeping quoted runs (a Windows path with spaces) whole
+ *  and dropping the quotes. A bare split on whitespace would cut `"C:\Program Files\…"` in
+ *  half, so the session path it names would never compare equal. */
+export function tokenizeArgs(args: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quoted = false;
+  let inToken = false;
+  for (const ch of args) {
+    if (ch === '"') {
+      quoted = !quoted;
+      inToken = true; // "" is still an argument, just an empty one
+      continue;
+    }
+    if (!quoted && /\s/.test(ch)) {
+      if (inToken) tokens.push(current);
+      current = "";
+      inToken = false;
+      continue;
+    }
+    inToken = true;
+    current += ch;
+  }
+  if (inToken) tokens.push(current);
+  return tokens.filter((token) => token.length > 0);
+}
+
+/** The executable name in one token: `pi`, `pi.exe`, `/usr/bin/pi` and `C:\\bin\\pi.exe` all
+ *  reduce to `pi`, so the viewer denylist matches regardless of how the process was started. */
+export function commandBasename(token: string): string {
+  const name = token.split(/[\\/]/).pop() ?? "";
+  return name.replace(/\.(exe|com|cmd|bat|ps1)$/i, "");
+}
+
+export interface ProcessArgumentsDeps {
+  platform?: NodeJS.Platform;
+  /** Win32 table seam (tests inject a canned process table). */
+  win32Table?: (deps?: Win32Deps, opts?: { commandLine?: boolean }) => Promise<Win32Row[]>;
+  win32Deps?: Win32Deps;
+  /** Aliveness seam; default pidAlive. Injectable so the Windows branch is testable off-Windows. */
+  alive?: (pid: number) => boolean;
+}
+
 /** The whole process table's argument lines; [] when nothing could be read. */
-export async function listProcessArguments(): Promise<{
+export async function listProcessArguments(deps: ProcessArgumentsDeps = {}): Promise<{
   source: ProcessArgumentsSource;
   processes: Array<{ pid: number; args: string }>;
 }> {
-  if (process.platform === "linux") {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    // The CIM query is the only supported way to read another process's command line on
+    // current Windows; a failure yields [] and the check degrades to "no holder found".
+    const rows = await (deps.win32Table ?? win32Table)(deps.win32Deps ?? {}, { commandLine: true });
+    const processes = rows
+      .filter((row): row is Win32Row & { commandLine: string } => typeof row.commandLine === "string" && row.commandLine.length > 0)
+      .map((row) => ({ pid: row.pid, args: row.commandLine }));
+    return { source: "win32-cim", processes };
+  }
+  if (platform === "linux") {
     try {
       const processes = await listProcfsArguments();
       if (processes.length > 0) return { source: "linux-procfs", processes };
@@ -83,7 +137,7 @@ export interface SessionHolder {
  *  Bare session *ids* match only as an explicit flag value; paths match as flag values or
  *  positional tokens (never as a bare id-like word in the middle of unrelated text). */
 export function referencesSession(args: string, workerId: string, sessionFile: string): boolean {
-  const tokens = args.split(/\s+/);
+  const tokens = tokenizeArgs(args);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!;
     if (token === "--session-id") {
@@ -117,16 +171,18 @@ export async function findSessionHolders(
   workerId: string,
   sessionFile: string | null | undefined,
   excludePids: number[] = [],
+  deps: ProcessArgumentsDeps = {},
 ): Promise<SessionHolder[]> {
   if (!sessionFile) return [];
   const excluded = new Set(excludePids.filter((pid) => pid > 0));
   excluded.add(process.pid);
-  const { processes } = await listProcessArguments();
+  const { processes } = await listProcessArguments(deps);
+  const alive = deps.alive ?? pidAlive;
   const holders: SessionHolder[] = [];
   for (const proc of processes) {
-    if (excluded.has(proc.pid) || !pidAlive(proc.pid)) continue;
+    if (excluded.has(proc.pid) || !alive(proc.pid)) continue;
     if (!referencesSession(proc.args, workerId, sessionFile)) continue;
-    const first = (proc.args.split(/\s+/)[0] ?? "").split("/").pop() ?? "";
+    const first = commandBasename(tokenizeArgs(proc.args)[0] ?? "");
     if (NON_SESSION_COMMANDS.has(first)) continue; // a viewer, not a session user
     if (proc.args.includes("fake-pi.mjs")) continue; // this repo's test double, never a session user
     holders.push({ pid: proc.pid, args: proc.args });
