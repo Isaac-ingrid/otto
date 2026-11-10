@@ -8,93 +8,61 @@
 
 <p align="center"><a href="README.md">English</a> · 简体中文</p>
 
-Otto 是一个可自行部署的 **Personal Agent（个人智能体）**，基于 **pi-durable** 和 **Cloudflare Durable Objects** 构建。它记住你的对话和进行中的任务，并连接你各台电脑上的 coding agent。
+Otto 是一个**自行托管的个人智能体**。总管作为 Node.js 进程运行，状态保存在 SQLite；各台电脑上的 connector（连接器）在你选择的目录中运行本地 coding agent。你可以在网页工作台和 Otto 对话、交代任务，之后从别的设备接着聊。
 
-它既可以跑在**你自己的 Cloudflare 账号**里（一个 Worker 加一个 Durable Object，无需运维），也可以**是你自己机器上的一个 Node 进程**，状态就是一个可以随时拷走的 SQLite 文件（[自托管指南](docs/self-hosted.md)）。两种方式下，网页工作台、connector 和两个对外接口完全一致。
-
-名字没有缩写含义：短、在中英文里都读得顺，作为命令 `otto` 也顺手。图标就是这个词本身。
-
-打开网页工作台，就能和 Otto 对话：让它处理某个仓库的任务、追问进度，或者接着上次的工作继续做。Otto 负责协调，每台电脑上的轻量 **connector（连接器）** 负责运行本地 agent，再把进展和结果带回来。
-
-- **多台机器，一处对话。** 在同一个地方跟进任务、继续讨论、处理需要你决定的事情。
-- **用你自己的电脑和 agent。** 支持 pi，以及已安装的 Claude Code；由你选择开放哪些仓库。
-- **上下文持续保留。** 对话和任务状态保存在服务端（Durable Object，或自托管机器上的 SQLite 文件）；coding agent 的完整会话记录留在本机，机器在线时可以查看。
-- **说错了可以停下。** 回复一次只跑一条，中途发的消息会排在后面，正在回答的那一行上有停止按钮。
+- **多台机器，一处对话。** 任务、待决事项、后续安排和进展集中在一起。
+- **代码留在自己的电脑上。** 连接器在本地运行 pi（或已安装的 Claude Code）；coding agent 的完整会话记录也留在本机。
+- **有边界的记忆。** 偏好和项目约定与聊天记录分开保存，记录来源及确认状态；过时事实被取代和仅为腾空间而归档是两回事。
+- **随时由你掌控。** 工作台显示正在进行的任务和需要你决定的事项；正在生成的回复可以停下。
 
 ## 开始使用
 
-先把 Otto 部署起来——到你的 Cloudflare 账号，或到你自己的机器——再连接实际执行任务的电脑。你需要准备：供 Otto 使用的模型 API key；除自托管外还需要 Cloudflare 账号；**Node.js 22.18+** 只有下面的 agent 路径和 connector 需要（自托管的主机需要 Node 24）。连接器支持 **macOS 和 Linux**，本地 coding agent 也需要安装并完成它自己的登录或模型配置。
+运行总管需要 **Node.js 24**；构建时使用 [`package.json`](package.json) 锁定的 pnpm 版本（若没有 `corepack` 命令，请先安装 Corepack），登录后还需在工作台填写总管的模型 API key。运行连接器的电脑需要 **Node.js 22.18+**、macOS 或 Linux，以及另行安装并完成登录／模型配置的本地 coding agent。总管的模型密钥不会替本地 agent 配置模型。
 
-### 1. 部署你的 Personal Agent
+### 1. 运行总管
 
-**从你的代码检出目录部署。** 把这个仓库部署到你自己的 Cloudflare 账号。完整步骤见[部署指南](docs/deploy.md)；在仓库根目录执行：
-
-开始前，请用密码管理器生成并保存一个**至少 15 个字符**的独立密码，填写到 `LOGIN_PASSWORD`。即使 Cloudflare 表单接受了短密码、常见密码或已泄露密码，Otto 启动后也会拒绝使用它们登录。
+从代码检出目录构建，先在自己的电脑上试用：
 
 ```sh
-pnpm install
-wrangler deploy
-wrangler secret put LOGIN_PASSWORD
-wrangler deploy
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @isaac2ingrid/steward build:node
+mkdir -p apps/steward/dist/ui
+cp -R apps/steward/ui/. apps/steward/dist/ui/
+cp .dev.vars.example .dev.vars
+# 编辑 .dev.vars：把 LOGIN_PASSWORD 设为至少 15 个字符的独立密码。
+HOST=127.0.0.1 PORT=8787 OTTO_CONFIG_DIR="$PWD" OTTO_DB_PATH="$PWD/apps/steward/data/steward.sqlite" \
+  node apps/steward/dist/node/steward-node.mjs
 ```
 
-构建完成后打开 Worker 地址登录，向导会引导你填写模型 API key。
+打开 <http://127.0.0.1:8787> 登录，在工作台的**设置**中填写总管的模型 API key。不要提交 `.dev.vars`，也不要在聊天里发送密码或密钥。上面的例子只监听本机，**其他电脑的连接器无法直接访问**。
 
-如果部署时提示 GitHub 授权过期，请按[部署排错指南](docs/deploy.md#deployment-troubleshooting)恢复连接。修改登录密码无法修复 GitHub 授权。
+要长期运行并让其他电脑连接，请按[自托管操作手册](docs/self-hosted.md)部署：除了 bundle，还要部署 **`dist/ui` 和运行时依赖 `ws`**；用服务管理进程和独立的 SQLite 数据目录；通过支持 WebSocket 转发的 HTTPS 反向代理对外提供工作台（仅本机访问时也可以用 SSH 隧道）。明确设置 `OTTO_CONFIG_DIR` 和 `OTTO_DB_PATH`。在线备份 SQLite 请用 SQLite 的 `.backup`，不要只复制处于 WAL 模式的数据库文件。
 
-**或交给你的 coding agent。** 复制这段，发给你的 coding agent：
+**完成标志：** 打开工作台，Otto 能回复消息。尚未连接电脑时也可以先对话。
 
-```text
-帮我把 Otto 这个 personal agent 部署到我自己的 Cloudflare 账号。
+### 2. 连接电脑
 
-项目仓库：本地的 otto 代码检出目录（找不到就问我路径）
-请先阅读该目录里的 docs/agent-deploy.md，并按其中的步骤操作。
-
-检查前置条件，部署 Worker 和 Durable Object，配置密钥，验证访问，
-然后打开网页工作台。需要 Cloudflare 授权时引导我完成；模型 API key
-由我直接在工作台的设置页填写，不要让密钥出现在聊天或日志里。
-最后确认 Otto 能回复一条消息，并告诉我部署地址。
-连接电脑这一步，我会另用 connector 安装 prompt 完成。
-```
-
-**完成标志：** 能打开网页工作台，Otto 能回复你的第一条消息。还没连接电脑时，也可以先和 Otto 对话。
-
-**或者部署到自己的机器上。** 不需要 Cloudflare 账号：同一个 steward 作为一个 Node 进程运行在它的 SQLite 文件旁边，前面挂 nginx 或直接走 SSH 隧道。
+在装有 Node.js 22.18+ 和已配置好的本地 coding agent 的 macOS 或 Linux 电脑上，安装已发布的连接器：
 
 ```sh
-pnpm install && pnpm --filter @isaac2ingrid/steward build:node
-# → 把 dist/node/steward-node.mjs 和 ui/ 拷到目标机，配置 LOGIN_PASSWORD，用 systemd 启动
+npm install --global @isaac2ingrid/otto
+otto --version
 ```
 
-密钥文件、systemd 单元、TLS、升级回滚和备份都在[自托管指南](docs/self-hosted.md)里。
+在 Otto 工作台打开**机器 → 添加机器 → 生成配对命令**，然后在**要连接的电脑上**使用安装好的 CLI，填入实际部署地址和一次性配对码：
 
-### 2. 连接你的电脑
-
-在**你希望 Otto 执行任务的那台电脑上**打开 coding agent，复制这段：
-
-```text
-帮我在这台电脑上安装 Otto connector，连接到我已经部署在 Cloudflare
-上的 personal agent。
-
-项目仓库：本地的 otto 代码检出目录（找不到就问我路径）
-请先阅读该目录里的 docs/agent-connect.md，并按其中的步骤操作。
-
-向我确认 Otto 部署地址，以及我要连接的本地仓库。检查 Node.js 和本地
-coding agent 的配置，安装 connector，并引导我从网页工作台的「机器」
-页面完成配对。启动 connector，只登记我选定的仓库，验证这台机器和
-仓库在 Otto 中显示在线。不要让长期凭证出现在聊天或日志里。
-最后运行一个小的只读任务，确认整条连接正常工作。
+```sh
+otto connect <你的-Otto-地址> <一次性配对码>
+otto status
 ```
 
-**完成标志：** Otto 中能看到机器在线，并且一个只读任务成功返回结果。要连接更多电脑，在每台电脑上重复这段 prompt 即可。
+配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务）。连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后用 pi 试一个小的只读任务。如果机器没有显示在线，用 `otto logs -n 50` 排查；执行任务时电脑需要保持唤醒和联网。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
 
-Connector 会主动连接 Otto，你无需给电脑开放入站端口。本地 agent 工作期间，电脑需要保持唤醒和联网。
-
-> 如果你的 agent 找不到仓库，请把它指向本地 checkout。npm 包暂不可用时，connector 指南提供从源码安装的路径。如果所在网络无法访问 `workers.dev`，部署指南也包含自定义域名的配置方法。
+**完成标志：** 机器和选定目录显示在线，测试任务返回结果。其他电脑重复这一步。
 
 ## 开始对话
 
-连接电脑后，可以试试：
+可以试试：
 
 > 「检查一下 my-app 的登录流程，告诉我发现了什么问题。」
 >
@@ -102,21 +70,18 @@ Connector 会主动连接 Otto，你无需给电脑开放入站端口。本地 a
 >
 > 「接着上次的任务做，这次用 pnpm。」
 
-工作台把消息、任务线程、待决事项、已连接的机器和会话记录放在一起。回复会边写边出现，中途发的消息排在当前回答之后，正在回答的那一行可以停下这次回答。界面支持中英文切换。
+工作台把消息、任务线程、待决事项、已连接的机器和会话记录放在一起。回复边写边出现；中途发的消息排在当前回复之后。
 
 ## 它如何工作
 
-**你 → Cloudflare 上的 Otto → 电脑上的 connector → pi / Claude Code**
+**你 → Otto（Node.js + SQLite）→ 主动建立的 WebSocket → connector → pi / Claude Code**
 
-云端 agent 使用 **`@earendil-works/pi-durable`** 运行，借助 **Cloudflare Durable Object** 持久化状态并协调任务。Connector 通过 WebSocket 保持连接，在本地启动 coding agent 会话，再把进度回传给 Otto。代码和完整会话文件留在本机；本地 coding agent 仍会照常使用它配置的模型服务。
-
-Cloudflare 是默认形态而不是前置条件：`apps/steward/node-host/` 用 `node:sqlite` 提供了 `ctx.storage`、定时器和 socket，同一份 `src/` 也能跑在普通 Node 进程上（[设计说明](docs/design/node-host.md)）。
+总管协调对话、任务和受治理的记忆；连接器启动本地 coding agent 并回传进展。总管状态存放在**你自己的主机**上的 SQLite 中，需要你自行运维和备份；仓库内容及完整的本地 agent 会话留在运行连接器的电脑上。总管与本地 agent 分别使用各自配置的模型服务。
 
 ## 进一步了解
 
-- [部署操作文档](docs/agent-deploy.md) · [Connector 操作文档](docs/agent-connect.md)：供你的 coding agent 执行。
-- [部署指南](docs/deploy.md)：手动部署、模型配置、自定义域名、费用和更新。
-- [自托管操作手册](docs/self-hosted.md)：在自己的机器上跑同一个 steward——systemd、nginx、TLS、备份与升级。
+- [自托管操作手册](docs/self-hosted.md)：服务、反向代理、TLS、升级和备份。
+- [连接器操作文档](docs/agent-connect.md)：配对、目录、代理和排错。
 - [使用说明与 API](docs/usage.md)：Owner API、本地 agent 行为和会话查看。
 - [架构设计](docs/design/steward.md) · [产品规格](docs/spec.md) · [路由评测](docs/routing-eval.md) · [记忆评测](docs/memory-eval.md)：面向贡献者。
 
