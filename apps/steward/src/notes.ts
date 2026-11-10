@@ -91,9 +91,27 @@ export interface NoteDraft {
   confirmed?: boolean;
 }
 
+/** A read-time verdict that a note's own basis has been overturned (steward.md §2.7). It is
+ *  COMPUTED, never stored: the note row does not change, it is not hidden, and a later failing
+ *  run clears the mark again. What the mark buys is that the reader (model, owner, the
+ *  answer_worker gate) is told, instead of silently re-using a dead conclusion. */
+export interface StaleMark {
+  /** The machine whose run history contradicts the note, when the note named one. */
+  deviceId: string | null;
+  /** The machine's display name, for the rendered remark. */
+  machine: string | null;
+  /** When the contradicting success landed (ms). */
+  at: number;
+  /** One sentence to append to the note wherever it is rendered. */
+  text: string;
+}
+
 export interface NoteRow {
   noteId: string;
   layer: NoteLayer;
+  /** Attached by the read paths (get/list/search/context/forRepos) — absent on rows with no
+   *  mark, so a stored/compared row is untouched. */
+  stale?: StaleMark | null;
   scopeRepoId: string | null;
   kind: NoteKind;
   text: string;
@@ -225,6 +243,7 @@ const viewNote = (r: Record<string, unknown>): NoteRow => ({
   bytes: r.bytes as number,
   source: r.source as NoteSource,
   evidence: (r.evidence as string | null) ?? null,
+
   confirmedBy: (r.confirmedBy as string | null) ?? null,
   confirmed: !!r.confirmed,
   pinned: !!r.pinned,
@@ -319,8 +338,144 @@ export function createNotes(deps: NotesDeps) {
   const now = deps.now ?? Date.now;
   const tx: <T>(fn: () => T) => T = deps.tx ?? (((fn: () => unknown) => fn()) as <T>(fn: () => T) => T);
 
-  const noteById = (noteId: string): NoteRow | null =>
-    (sql<Record<string, unknown>>`SELECT * FROM sh_note WHERE noteId = ${noteId}`.map(viewNote)[0] ?? null);
+  // ---- staleness: read-time evidence reversal (steward.md §2.7) ---------------------------------
+  // The memory-trust review's remaining hole was time: a note that was TRUE when written
+  // ("this machine cannot start pi") stays `project`/`active` forever, because nothing in the
+  // module ever looks at the run history again. The fix is deliberately narrow:
+  //   * only low-trust, `environment` claims (a worker's or an inference's report of how some
+  //     place behaves) — the owner's own words are not second-guessed by a run outcome;
+  //   * only when the SAME repo (and, when the evidence names a worker, the same machine) has
+  //     a later successful run than the failure the note rests on — for a note with no
+  //     resolvable evidence the signal is the repo's current state (its latest run there was a
+  //     success), which also catches a note written AFTER the success to explain away old
+  //     failures;
+  //   * annotate only, never hide or delete (a mark is not a verdict on the text): the gate
+  //     that refuses to SPEND the note is the answer_worker evidence gate, where „依据" is a
+  //     real security boundary. `pinned` overrides the refusal (the owner's explicit keep);
+  //     a later failure takes the mark away by itself.
+
+  /** The worker a note's evidence points at, if it points at one: `worker:<id>`, `report:<id>`
+   *  (the forms the tool layer hands out) or a bare worker id from an earlier row. */
+  const evidenceWorkerId = (evidence: string | null): string | null => {
+    if (!evidence) return null;
+    const m = /^(?:worker:|report:)?(w_[A-Za-z0-9_-]+)$/.exec(evidence.trim());
+    return m ? m[1]! : null;
+  };
+
+  interface DeviceRuns {
+    deviceId: string;
+    successAt: number | null;
+    failureAt: number | null;
+  }
+
+  /** Per-machine run facts for one repo: when it last reported a clean success, and when it
+   *  last ended any other way (`error:*`, `start_failed:*`, `reaped`, …). One query per repo,
+   *  issued only when there is a candidate note — an unbroken run history never costs a read. */
+  const repoRunFacts = (repoId: string): DeviceRuns[] =>
+    sql<Record<string, unknown>>`
+      SELECT deviceId,
+        MAX(CASE WHEN lastOutcome = 'reported:done' THEN updatedAt END) AS successAt,
+        MAX(CASE WHEN lastOutcome IS NOT NULL AND lastOutcome != 'reported:done' THEN updatedAt END) AS failureAt
+      FROM sh_worker WHERE repoId = ${repoId} GROUP BY deviceId
+    `.map((r) => ({
+      deviceId: r.deviceId as string,
+      successAt: (r.successAt as number | null) ?? null,
+      failureAt: (r.failureAt as number | null) ?? null,
+    }));
+
+  const workerRunFact = (
+    workerId: string,
+  ): { deviceId: string; repoId: string | null; lastOutcome: string | null; updatedAt: number } | null => {
+    const r = sql<Record<string, unknown>>`
+      SELECT deviceId, repoId, lastOutcome, updatedAt FROM sh_worker WHERE workerId = ${workerId}
+    `[0];
+    if (!r) return null;
+    return {
+      deviceId: r.deviceId as string,
+      repoId: (r.repoId as string | null) ?? null,
+      lastOutcome: (r.lastOutcome as string | null) ?? null,
+      updatedAt: r.updatedAt as number,
+    };
+  };
+
+  /** The mark a set of rows implies, keyed by noteId. Only rows that can carry one are looked
+   *  at, and each note costs at most one worker lookup plus one repo aggregate per repo. */
+  const staleMarks = (rows: NoteRow[]): Map<string, StaleMark> => {
+    const marks = new Map<string, StaleMark>();
+    const candidates = rows.filter(
+      (n) =>
+        n.status === "active" &&
+        n.kind === "environment" &&
+        n.scopeRepoId !== null &&
+        LOW_TRUST_SOURCES.includes(n.source),
+    );
+    if (candidates.length === 0) return marks;
+    const repoFacts = new Map<string, DeviceRuns[]>();
+    const machineNames = new Map<string, string | null>();
+    const factsFor = (repoId: string): DeviceRuns[] => {
+      const cached = repoFacts.get(repoId);
+      if (cached) return cached;
+      const facts = repoRunFacts(repoId);
+      repoFacts.set(repoId, facts);
+      return facts;
+    };
+    const nameOf = (deviceId: string): string | null => {
+      if (!machineNames.has(deviceId)) {
+        machineNames.set(
+          deviceId,
+          sql<{ name: string }>`SELECT name FROM sh_machine WHERE deviceId = ${deviceId}`[0]?.name ?? null,
+        );
+      }
+      return machineNames.get(deviceId) ?? null;
+    };
+    const markFor = (deviceId: string, at: number): StaleMark => {
+      const machine = nameOf(deviceId);
+      return {
+        deviceId,
+        machine,
+        at,
+        text: `可能已过时：${machine ?? deviceId} 上该仓库最近一次运行是成功的（${new Date(at).toISOString()}），这条结论建立在更早的失败之上`,
+      };
+    };
+    for (const note of candidates) {
+      const repoId = note.scopeRepoId!;
+      const namedWorker = evidenceWorkerId(note.evidence);
+      if (namedWorker !== null) {
+        const worker = workerRunFact(namedWorker);
+        // Only a failure can be overturned by a success; a note resting on a successful run
+        // has nothing to contradict it here.
+        if (!worker || worker.lastOutcome === null || worker.lastOutcome === "reported:done") continue;
+        const later = factsFor(worker.repoId ?? repoId).find(
+          (d) => d.deviceId === worker.deviceId && d.successAt !== null && d.successAt > worker.updatedAt,
+        );
+        if (later?.successAt != null) marks.set(note.noteId, markFor(worker.deviceId, later.successAt));
+        continue;
+      }
+      // No evidence to name a machine: the repo's current state is the only honest signal.
+      // (That machine has a failure on record AND its latest run was a success → a claim that
+      // the place is broken is overtaken, whenever it was written. A repo that has only ever
+      // succeeded has nothing to overturn: a "how this place behaves" note there is not a
+      // claim about a failure at all.)
+      const overtaken = factsFor(repoId)
+        .filter((d) => d.successAt !== null && d.failureAt !== null && d.successAt > d.failureAt)
+        .sort((a, b) => (b.successAt ?? 0) - (a.successAt ?? 0))[0];
+      if (overtaken?.successAt != null) marks.set(note.noteId, markFor(overtaken.deviceId, overtaken.successAt));
+    }
+    return marks;
+  };
+
+  /** Rows plus whatever marks their own basis implies — the mark field stays absent when there
+   *  is nothing to say, so every caller that ignores it sees exactly the row it saw before. */
+  const withStaleMarks = (rows: NoteRow[]): NoteRow[] => {
+    const marks = staleMarks(rows);
+    if (marks.size === 0) return rows;
+    return rows.map((n) => (marks.has(n.noteId) ? { ...n, stale: marks.get(n.noteId)! } : n));
+  };
+
+  const noteById = (noteId: string): NoteRow | null => {
+    const row = sql<Record<string, unknown>>`SELECT * FROM sh_note WHERE noteId = ${noteId}`.map(viewNote)[0] ?? null;
+    return row === null ? null : withStaleMarks([row])[0]!;
+  };
 
   const loadedNotes = (): NoteRow[] =>
     sql<Record<string, unknown>>`
@@ -833,7 +988,7 @@ export function createNotes(deps: NotesDeps) {
                     SELECT * FROM sh_note WHERE layer IN ('resident', 'project')
                     ORDER BY pinned DESC, createdAt, noteId
                   `;
-    return rows.map(viewNote).filter((n) => n.status !== "removed" || filter.includeRemoved === true);
+    return withStaleMarks(rows.map(viewNote).filter((n) => n.status !== "removed" || filter.includeRemoved === true));
   };
 
   /** Search: multi-term OR recall over the FTS index (LIKE fallback when every term is too
@@ -882,7 +1037,7 @@ export function createNotes(deps: NotesDeps) {
       hits.push(note);
       chars += note.bytes;
     }
-    return hits;
+    return withStaleMarks(hits);
   };
 
   /** Resident notes + the project notes of the given repos; assembly counts as use (§2.5).
@@ -918,7 +1073,12 @@ export function createNotes(deps: NotesDeps) {
     for (const note of [...resident, ...project]) {
       sql`UPDATE sh_note SET lastUsedAt = ${at} WHERE noteId = ${note.noteId}`;
     }
-    return { resident, project, omitted: ranked.length - project.length };
+    const marked = withStaleMarks([...resident, ...project]);
+    return {
+      resident: marked.slice(0, resident.length),
+      project: marked.slice(resident.length),
+      omitted: ranked.length - project.length,
+    };
   };
 
   /** The project notes for one fetch of the Threads that involve these repos (get_thread).
@@ -937,15 +1097,17 @@ export function createNotes(deps: NotesDeps) {
       `.map(viewNote),
     );
     for (const note of rows) sql`UPDATE sh_note SET lastUsedAt = ${at} WHERE noteId = ${note.noteId}`;
-    return rows;
+    return withStaleMarks(rows);
   };
 
   /** The resident layer as a system-prompt section body (§4.1); empty string omits it. */
   const renderResidentSection = (): string => {
-    const notes = sql<Record<string, unknown>>`
-      SELECT * FROM sh_note WHERE layer = 'resident' AND status = 'active'
-      ORDER BY pinned DESC, createdAt, noteId
-    `.map(viewNote);
+    const notes = withStaleMarks(
+      sql<Record<string, unknown>>`
+        SELECT * FROM sh_note WHERE layer = 'resident' AND status = 'active'
+        ORDER BY pinned DESC, createdAt, noteId
+      `.map(viewNote),
+    );
     if (notes.length === 0) return "";
     const label: Record<NoteSource, string> = {
       user_said: "用户说的",
@@ -953,7 +1115,10 @@ export function createNotes(deps: NotesDeps) {
       worker_reported: "worker 汇报",
       inferred: "推断",
     };
-    const lines = notes.map((n) => `- ${n.pinned ? "📌 " : ""}${n.text}（${label[n.source]}${n.confirmed ? "" : "，待确认"}）`);
+    const lines = notes.map(
+      (n) =>
+        `- ${n.pinned ? "📌 " : ""}${n.text}（${label[n.source]}${n.confirmed ? "" : "，待确认"}${n.stale ? `；${n.stale.text}` : ""}）`,
+    );
     return ["这些是用户的偏好与全局约定，影响你如何派发与回复（每轮可见）：", ...lines].join("\n");
   };
 

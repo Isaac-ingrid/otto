@@ -63,6 +63,14 @@ function buildWorld(c: MemoryCase): World {
     mode: "write",
     repoId: c.workerWithoutRepo ? undefined : REPO_A,
   });
+  // Run history for the staleness read (§2.7): a seeded failure/success pair on the case's
+  // repo is what makes an environment note's basis overtaken.
+  for (const [i, run] of (c.runs ?? []).entries()) {
+    const deviceId = run.deviceId ?? "dev_mem";
+    const ranAt = at + run.atOffsetMs;
+    sql`INSERT INTO sh_worker (workerId, threadId, deviceId, repoId, agent, mode, state, lastOutcome, createdAt, updatedAt)
+        VALUES (${`w_run_${c.id}_${i}`}, ${thread.threadId}, ${deviceId}, ${run.repo === "B" ? REPO_B : REPO_A}, 'pi', 'write', 'idle', ${run.outcome}, ${ranAt}, ${ranAt})`;
+  }
 
   const ref: Record<string, string> = {};
   for (const seed of c.seed) {

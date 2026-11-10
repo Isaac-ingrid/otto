@@ -27,6 +27,16 @@ export interface SeedNote {
   confirmed?: boolean;
 }
 
+/** A run-history row seeded into sh_worker (the staleness read's input): what happened on the
+ *  case's repo, and when, relative to the fixtures. `outcome` is a real sh_worker.lastOutcome
+ *  (`reported:done` = a clean success, anything else = a failure of that shape). */
+export interface SeedRun {
+  repo?: "A" | "B";
+  deviceId?: string;
+  outcome: string;
+  atOffsetMs: number;
+}
+
 /** One scripted model step: a tool call (built from the resolved ids), or plain text. */
 export type ScriptedStep =
   | { text: string }
@@ -72,6 +82,8 @@ export interface MemoryCase {
   input?: string;
   /** Worker deliberately has no repo binding (fail-closed evidence case). */
   workerWithoutRepo?: boolean;
+  /** Run history for the case's repos (staleness, §2.7): seeded before the fixtures. */
+  runs?: SeedRun[];
   script?: ScriptedStep[];
   expect: MemoryExpectation;
 }
@@ -206,6 +218,29 @@ export const MEMORY_CASES: MemoryCase[] = [
         { ref: "cur", layer: "project", status: "active" },
         { ref: "report", confirmed: false },
       ],
+    },
+  },
+  {
+    id: "environment-conclusion-stale-after-a-later-success",
+    family: "evidence",
+    title: "依据已被后续成功运行推翻的环境结论也不能作为派发依据",
+    why: "这条环境结论是已确认的（低信任规则的例外，所以不是「未确认的汇报」拦下的），写的时候也确实为真。同一台机器后来成功跑过——结论已经被时间推翻：条目仍可检索、不隐藏，但标注且不再能拿去派发。这就是 2026-11 Windows 事故的形状。",
+    seed: [
+      { ref: "env", text: "这台机器上 pi 起不来", kind: "environment", source: "worker_reported", layer: "project", repo: "A", confirmed: true },
+    ],
+    runs: [
+      { repo: "A", outcome: "start_failed:pi startup failed", atOffsetMs: -120_000 },
+      { repo: "A", outcome: "reported:done", atOffsetMs: -60_000 },
+    ],
+    script: [
+      { tool: "answer_worker", args: (ids) => ({ workerId: ids.workerId, questionId: ids.questionId, text: "这台机器上 pi 起不来", evidence: `note:${ids.ref.env}`, basis: "memory" }) },
+      { tool: "notes_search", args: () => ({ q: "pi 起不来" }) },
+      END,
+    ],
+    expect: {
+      results: ["可能已过时", "不能作为派发依据", "这台机器上 pi 起不来"],
+      relays: { contains: "起不来", count: 0 },
+      state: [{ ref: "env", layer: "project", status: "active", confirmed: true }],
     },
   },
 

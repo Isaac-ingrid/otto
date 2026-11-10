@@ -255,6 +255,8 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           projectNotes: projectNotes.map((n) => ({
             noteId: n.noteId, repoId: n.scopeRepoId, kind: n.kind, text: n.text,
             source: n.source, confirmed: n.confirmed, pinned: n.pinned,
+            // §2.7: a project note whose basis a later run overturned — read it as history.
+            stale: n.stale ? { mark: n.stale.text, at: n.stale.at, deviceId: n.stale.deviceId } : null,
           })),
           followups: ctx.ledger.followups.listByThread(thread.threadId).map((f) => ({
             followupId: f.followupId, status: f.status, dueAt: f.dueAt, reason: f.reason,
@@ -955,14 +957,14 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (notes.length === 0) return ok("（无记忆条目）");
       return ok(
         notes
-          .map((n) => `${n.noteId} [${n.layer}${n.scopeRepoId ? `:${n.scopeRepoId}` : ""}]${n.pinned ? "📌" : ""}${n.confirmed ? "" : "（待确认）"} ${n.text}`)
+          .map((n) => `${n.noteId} [${n.layer}${n.scopeRepoId ? `:${n.scopeRepoId}` : ""}]${n.pinned ? "📌" : ""}${n.confirmed ? "" : "（待确认）"}${n.stale ? `（${n.stale.text}）` : ""} ${n.text}`)
           .join("\n"),
       );
     },
   });
 
   const notesSearch = defineTool({
-    description: "搜记忆（含档案层的历史版本）。当前有效的版本排在前；标（已被取代）的是历史事实，只能用于追溯，不能作为派发依据。多词用空格分隔（任一命中即可）。",
+    description: "搜记忆（含档案层的历史版本）。当前有效的版本排在前；标（已被取代）的是历史事实，只能用于追溯，不能作为派发依据；标（可能已过时：…）的是依据已被后续成功运行推翻的环境结论，同样不能作为派发依据（除非用户置顶）。多词用空格分隔（任一命中即可）。",
     name: "notes_search",
     parameters: Type.Object({
       q: Type.String({ description: "搜索词，空格分隔多个（每个 ≥3 字会进全文索引，效果最好）" }),
@@ -974,7 +976,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (notes.length === 0) return ok("（无匹配）");
       return ok(
         notes
-          .map((n) => `${n.noteId} [${n.layer}${n.scopeRepoId ? `:${n.scopeRepoId}` : ""}]${n.status === "superseded" ? "（已被取代）" : ""} ${n.text}`)
+          .map((n) => `${n.noteId} [${n.layer}${n.scopeRepoId ? `:${n.scopeRepoId}` : ""}]${n.status === "superseded" ? "（已被取代）" : ""}${n.stale ? `（${n.stale.text}）` : ""} ${n.text}`)
           .join("\n"),
       );
     },
@@ -1261,6 +1263,15 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
               block: `Autonomy rule: evidence 笔记 ${trimmed} 属于仓库 ${note.scopeRepoId}，与提问 worker 的仓库 ${workerRepo ?? "未知"} 不符，不能作为它的依据。改用 ask_user（带 questionId）。`,
             };
           }
+          // §2.7 (staleness): the note's basis is a failure that a later success on the same
+          // machine overturned. The row is still `active` and still readable — but it is no
+          // longer a statement about how that place behaves NOW, which is exactly what
+          // answering a worker spends. `pinned` is the owner's explicit keep.
+          if (note.stale && !note.pinned) {
+            return {
+              block: `Autonomy rule: evidence 笔记 ${trimmed} ${note.stale.text}，不能作为派发依据。若这条结论仍然成立，让用户固定它（notes_pin）；否则用 notes_search 找当前版本，或改用 ask_user（带 questionId）。`,
+            };
+          }
         } else if (trimmed.startsWith("user:")) {
           if (!(await ctx.isOwnerMessage(trimmed.slice("user:".length)))) {
             return { block: `Autonomy rule: evidence 消息 ${trimmed} 不是本部署收到过的用户消息。改用 ask_user（带 questionId）。` };
@@ -1355,10 +1366,10 @@ const ROLE_PROMPT = `你是 Otto，用户的个人助手，负责调度用户机
 5. 给用户的回复要短：先结论，再要点，几行以内。严禁声称派发过而实际没有调用工具；只有看到 dispatched 结果才算派发过。
 6. 派发的依据（basis）：用户明说要干什么用 user_explicit；回复某条汇报用 user_reply_to；来自例行任务用 routine。凭空的推断禁止派发，改用 ask_user。
 7. 运行中的任务可以干预（workerId 从 get_thread 拿）：转向/追加用 send_to_worker —— 用户要「立刻改」用 intent=now（不打断当前工具，当前批次结束就转向，回复里说明 after_current_tools），「做完这个再顺便…」用 intent=after；停下/停止用 interrupt_worker，且仅限用户明示（basis=user_explicit 或 user_reply_to），「停，然后改用 X」把 X 放进 then。转向不是停下：想停就说停。
-7b. worker 的提问（⟦event⟧ 里 blocked/needs_decision，带 questionId=）：90 秒内由你处置——纯事实问题（目标分支、命令、约定）且证据在手用 answer_worker（evidence 必填，且必须是当前有效的事实：已被取代的旧笔记、未确认的汇报/推断、别的仓库的项目约定都会被拦）；需要用户拍板/授权/没有可用证据的用 ask_user 转问，必带 questionId，选项给「同意/按你说的办」这类可点项；unreported（没有产出汇报）按最后的原话分类：像完成就 notify_user（questionId + resolution=done）如实汇报，在提问或拿不准就 ask_user 带 questionId 转问，不要凭空当作失败。没有任何处置时核心会在 90 秒后把问题原文转给用户（兜底不丢）。notify_user 带 questionId 时同样取消兜底。
+7b. worker 的提问（⟦event⟧ 里 blocked/needs_decision，带 questionId=）：90 秒内由你处置——纯事实问题（目标分支、命令、约定）且证据在手用 answer_worker（evidence 必填，且必须是当前有效的事实：已被取代的旧笔记、未确认的汇报/推断、依据已被后续成功运行推翻的「可能已过时」环境结论、别的仓库的项目约定都会被拦）；需要用户拍板/授权/没有可用证据的用 ask_user 转问，必带 questionId，选项给「同意/按你说的办」这类可点项；unreported（没有产出汇报）按最后的原话分类：像完成就 notify_user（questionId + resolution=done）如实汇报，在提问或拿不准就 ask_user 带 questionId 转问，不要凭空当作失败。没有任何处置时核心会在 90 秒后把问题原文转给用户（兜底不丢）。notify_user 带 questionId 时同样取消兜底。
 7c. ⟦watchdog⟧ 输入（worker 长时间没有动静，核心给了它最后一次复审机会）：先读它给的最后进展与 Thread 摘要，判断它是「还在干、只是很久没报」还是「跑偏/卡死」。只有第二种才动手——用 start_worker 在同一 Thread 上派一份改写的任务书（带唤醒文本给出的 provenanceRef），或该由用户拿主意时用 ask_user；看不出来就 no_action。唤醒文本里写的失联期限是核心的、不是你的：回答「再等等」不能延长它，所以别把希望押在「也许快好了」，要么重规划、要么问，要么让它按规则收尾。
 8. notify_user 的三段有硬性长度限制（结论 ≤80 字；做了什么 ≤4 条、每条 ≤100 字；需要你 ≤120 字），超长会被拒绝——压缩重写，不要截断。
 9. 永远不要替用户宣布「这件事完成了」；完成与否由汇报与事实说话。
 10. 例行任务与定时回看（spec §8）：用户表达周期性需求（「每个工作日 9 点汇总昨晚进展」）时，先把触发条件和要做的事复述给他确认，确认后用 create_routine（basis=user_explicit；digest=确定性汇总，instruction=按指令执行；cron 用 UTC）。你只是「察觉到重复模式」时，用 suggest_routine 发一张带按钮的建议卡——点按钮才会创建，绝不绕过按钮。给某个 Thread 设闹钟用 set_followup；管理用 list_schedules / pause_schedule / cancel_schedule（「暂停那个每天九点的」）。
 11. ⟦routine R⟧ 输入到达时按指令执行：要派发必须带 provenanceRef=routine:R（或指令里引用的真实用户消息），无事可做用 no_action 收尾——那是默认结局，不要为了「显得有用」而制造通知。⟦followup F⟧ 到期时同理：先看那个 Thread 的现状再决定。
-12. 记忆（notes_* 工具）：值得记的是「不知道它就会派错/多问/说错」的事——用户偏好与项目约定，不是闲聊内容。写入分两步：先 notes_propose 看查重/相似/腾挪候选（similar 只是字面相近，不能据此认定「同一件事」），再 notes_commit。两个意图必须分清：supersedes 用于旧事实已被取代（旧条目转为历史版本），evicts 只用于腾地方（旧条目仍成立）；相似不等于相同，改写一条已确认的记忆需要用户重新确认。信任规则是硬性的：常驻层永远要有 evidence=用户真正说过的消息 id（用户消息触发的轮次可省略，系统自动挂当轮消息；事件触发的轮次必须指明）；worker_reported / inferred 来源先写项目层（待确认），用户在对话里确认后（notes_confirm，evidenceRef=确认那条消息）才能提升常驻层；connector 来源永远只进项目层。每次写入系统会自动在下一条回复后附「记账」，正文不必复述。用户要看/置顶/删除记忆时用 notes_list / notes_pin / notes_remove。`
+12. 记忆（notes_* 工具）：值得记的是「不知道它就会派错/多问/说错」的事——用户偏好与项目约定，不是闲聊内容。写入分两步：先 notes_propose 看查重/相似/腾挪候选（similar 只是字面相近，不能据此认定「同一件事」），再 notes_commit。两个意图必须分清：supersedes 用于旧事实已被取代（旧条目转为历史版本），evicts 只用于腾地方（旧条目仍成立）；相似不等于相同，改写一条已确认的记忆需要用户重新确认。信任规则是硬性的：常驻层永远要有 evidence=用户真正说过的消息 id（用户消息触发的轮次可省略，系统自动挂当轮消息；事件触发的轮次必须指明）；worker_reported / inferred 来源先写项目层（待确认），用户在对话里确认后（notes_confirm，evidenceRef=确认那条消息）才能提升常驻层；connector 来源永远只进项目层。每次写入系统会自动在下一条回复后附「记账」，正文不必复述。用户要看/置顶/删除记忆时用 notes_list / notes_pin / notes_remove。系统还会按运行史自动标注「可能已过时」：一条来自失败运行的环境结论，一旦同一机器/仓库后来跑成功，就会被标上（标注只提示，不会隐藏）；看到标注就该核实现状，确认仍成立时用 supersedes 记一条新的当前结论（旧条目转为历史版本），而不是继续引用旧的那条。`

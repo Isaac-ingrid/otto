@@ -256,6 +256,65 @@ describe("answer_worker (steward.md §4.3/§7.2, AC2)", () => {
     fake.close();
   }, 45_000);
 
+  it("a note whose basis a later run overturned is refused as a dispatch basis — unless the owner pinned it (§2.7)", async () => {
+    const { fake, workerId } = await runningWorker("pi 现在能起来吗");
+    const ids = await runInDurableObject(ownerStub(), (instance: Steward) => {
+      const ledger = (instance as unknown as { ledger: Ledger }).ledger;
+      const bound = (
+        instance as unknown as {
+          sql: <T = Record<string, unknown>>(s: TemplateStringsArray, ...v: (string | number | null)[]) => T[];
+        }
+      ).sql.bind(instance);
+      const worker = ledger.workers.get(workerId)!;
+      const scopeRepoId = worker.repoId!;
+      // The run history that makes both notes doubtful: this machine failed to start pi, and
+      // then a later run on it finished cleanly.
+      bound`INSERT OR REPLACE INTO sh_machine (deviceId, name, online, maxWorkers)
+             VALUES ('dev-wq', 'wq-machine', 1, 8)`;
+      for (const run of [
+        { workerId: "w_wq_fail", outcome: "start_failed:pi startup failed", at: 1_000 },
+        { workerId: "w_wq_ok", outcome: "reported:done", at: 2_000 },
+      ]) {
+        bound`INSERT INTO sh_worker (workerId, threadId, deviceId, repoId, agent, mode, state, lastOutcome, createdAt, updatedAt)
+               VALUES (${run.workerId}, ${worker.threadId}, 'dev-wq', ${scopeRepoId}, 'pi', 'write', 'idle', ${run.outcome}, ${run.at}, ${run.at})`;
+      }
+      // Both are already owner-confirmed, so the refusal below can only come from staleness.
+      const stale = ledger.notes.commit({ text: "这个仓库上 pi 起不来", kind: "environment", source: "worker_reported", layer: "project", scopeRepoId });
+      const pinned = ledger.notes.commit({ text: "这个仓库装的 pi 版本很旧", kind: "environment", source: "worker_reported", layer: "project", scopeRepoId });
+      if (!stale.ok || !pinned.ok) throw new Error("note fixtures failed");
+      ledger.notes.confirm(stale.note.noteId, "user:om_wq");
+      ledger.notes.confirm(pinned.note.noteId, "user:om_wq");
+      ledger.notes.pin(pinned.note.noteId, true);
+      ledger.notes.drainPendingForReply();
+      return { stale: stale.note.noteId, pinned: pinned.note.noteId };
+    });
+
+    await fake.emit("report", workerId, { type: "report", status: "needs_decision", summary: "准备跑", question: "这台机器上 pi 能用吗？" });
+    const snap = await waitFor(
+      () => ownerStub().debugSnapshot(),
+      (s) => s.questions.some((x) => x.workerId === workerId && x.status === "open"),
+      "question opened",
+    );
+    const q = snap.questions.find((x) => x.workerId === workerId)!;
+    const answer = (evidence: string, text: string) =>
+      fauxAssistantMessage([fauxToolCall("answer_worker", { workerId, questionId: q.qid, text, evidence, basis: "memory" })], { stopReason: "toolUse" });
+    await scriptModel(
+      answer(`note:${ids.stale}`, "不能用"),
+      answer(`note:${ids.pinned}`, "可以用"),
+      fauxAssistantMessage([fauxText("已代答。")]),
+    );
+    await waitRunsSettled();
+    await waitWhileOutboundPending();
+
+    const results = await allToolResults();
+    expect(results.some((r) => r.includes("可能已过时") && r.includes("不能作为派发依据"))).toBe(true);
+    // The stale conclusion never reached the worker; the pinned one did.
+    const sends = fake.cmds.filter((c) => c.kind === "send");
+    expect(sends).toHaveLength(1);
+    expect(String((sends[0]!.args as Record<string, unknown>).text)).toContain("可以用");
+    fake.close();
+  }, 45_000);
+
   it("answer_worker refuses failure-class and unreported questions — those are the user's, not the worker's", async () => {
     const { fake, workerId } = await runningWorker("凭据坏了");
     await fake.emit("settled", workerId, { type: "settled", outcome: "error", errorClass: "auth" });

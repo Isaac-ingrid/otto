@@ -674,6 +674,111 @@ describe("notes unit: context and the resident section", () => {
   });
 });
 
+// ---- staleness: a note's basis reversed by a later run (steward.md §2.7) -----------------------
+
+describe("notes unit: staleness of environment conclusions (§2.7)", () => {
+  /** A run-history row (plus the machine it belongs to): what the staleness read consults. */
+  const seedRun = (
+    sql: RawSql,
+    run: { workerId: string; repoId: string; outcome: string; at: number; deviceId?: string },
+  ): void => {
+    const deviceId = run.deviceId ?? "dev-a";
+    sql`INSERT OR REPLACE INTO sh_machine (deviceId, name, online, maxWorkers)
+        VALUES (${deviceId}, ${`机器-${deviceId}`}, 1, 8)`;
+    sql`INSERT INTO sh_worker (workerId, threadId, deviceId, repoId, agent, mode, state, lastOutcome, createdAt, updatedAt)
+        VALUES (${run.workerId}, 't_runs', ${deviceId}, ${run.repoId}, 'pi', 'write', 'idle', ${run.outcome}, ${run.at}, ${run.at})`;
+  };
+  const envNote = (n: Notes, repoId = "repo-stale", evidence?: string, text = "这个仓库上 pi 起不来") => {
+    const done = n.commit({
+      text,
+      kind: "environment",
+      source: "worker_reported",
+      layer: "project",
+      scopeRepoId: repoId,
+      ...(evidence !== undefined ? { evidence } : {}),
+    });
+    if (!done.ok) throw new Error(done.message);
+    return done.note;
+  };
+
+  it("marks an environment conclusion once the same machine runs successfully again", async () => {
+    await inNotesDo((n, _ledger, sql) => {
+      seedRun(sql, { workerId: "w_fail", repoId: "repo-stale", outcome: "start_failed:pi startup failed", at: 1_000 });
+      seedRun(sql, { workerId: "w_ok", repoId: "repo-stale", outcome: "reported:done", at: 2_000 });
+      // A repo this run history says nothing about: the note there stays unmarked.
+      const elsewhere = envNote(n, "repo-other");
+      const note = envNote(n);
+      expect(n.get(elsewhere.noteId)!.stale ?? null).toBeNull();
+
+      // The row itself is untouched (still active, still readable) — the mark is computed.
+      const marked = n.get(note.noteId)!;
+      expect(marked.status).toBe("active");
+      expect(marked.stale?.deviceId).toBe("dev-a");
+      expect(marked.stale?.machine).toBe("机器-dev-a");
+      expect(marked.stale?.at).toBe(2_000);
+      expect(marked.stale?.text).toContain("可能已过时");
+      expect(marked.stale?.text).toContain(new Date(2_000).toISOString());
+
+      // Every read path that renders a note to the model carries it.
+      expect(n.list({ layer: "project", scopeRepoId: "repo-stale" })[0]!.stale?.at).toBe(2_000);
+      // Find it by id: both notes match the query, and same-millisecond creation makes their
+      // order a tie-break on generated ids.
+      expect(n.search("pi").find((x) => x.noteId === note.noteId)?.stale?.at).toBe(2_000);
+      expect(n.context({ repoIds: ["repo-stale"] }).project[0]!.stale?.at).toBe(2_000);
+      expect(n.forRepos(["repo-stale"])[0]!.stale?.at).toBe(2_000);
+      expect(n.forRepos(["repo-other"])[0]!.stale ?? null).toBeNull();
+    });
+  });
+
+  it("marks a note written after the success too — the signal is the repo's current state", async () => {
+    await inNotesDo((n, _ledger, sql) => {
+      seedRun(sql, { workerId: "w_fail", repoId: "repo-stale", outcome: "error:unknown", at: 1_000 });
+      seedRun(sql, { workerId: "w_ok", repoId: "repo-stale", outcome: "reported:done", at: 9_000 });
+      const note = envNote(n); // createdAt is NOW, long after the success at 9_000
+      expect(n.get(note.noteId)!.stale?.at).toBe(9_000);
+    });
+  });
+
+  it("takes the mark away again when that machine fails", async () => {
+    await inNotesDo((n, _ledger, sql) => {
+      seedRun(sql, { workerId: "w_fail", repoId: "repo-stale", outcome: "error:auth", at: 1_000 });
+      seedRun(sql, { workerId: "w_ok", repoId: "repo-stale", outcome: "reported:done", at: 2_000 });
+      const note = envNote(n);
+      expect(n.get(note.noteId)!.stale).toBeTruthy();
+      seedRun(sql, { workerId: "w_fail2", repoId: "repo-stale", outcome: "start_failed:pi startup failed", at: 3_000 });
+      const after = n.get(note.noteId)!;
+      expect(after.stale ?? null).toBeNull();
+    });
+  });
+
+  it("never marks a repo that has only ever succeeded, the owner's words, or non-environment claims", async () => {
+    await inNotesDo((n, _ledger, sql) => {
+      seedRun(sql, { workerId: "w_ok", repoId: "repo-stale", outcome: "reported:done", at: 2_000 });
+      const env = envNote(n);
+      const userSaid = n.commit({ text: "这个仓库上 pi 起不来", kind: "environment", source: "user_said", layer: "project", scopeRepoId: "repo-stale" });
+      const fact = n.commit({ text: "入口在 src/index.ts", kind: "fact", source: "worker_reported", layer: "project", scopeRepoId: "repo-stale" });
+      const convention = n.commit({ text: "提交要走 PR", kind: "convention", source: "inferred", layer: "project", scopeRepoId: "repo-stale" });
+      if (!userSaid.ok || !fact.ok || !convention.ok) throw new Error("fixtures failed");
+      for (const note of [env, userSaid.note, fact.note, convention.note]) {
+        expect(n.get(note.noteId)!.stale ?? null).toBeNull();
+      }
+    });
+  });
+
+  it("scopes the mark to the machine the note's evidence names", async () => {
+    await inNotesDo((n, _ledger, sql) => {
+      // dev-a: failed, then succeeded. dev-b: failed, and has not run since.
+      seedRun(sql, { workerId: "w_a_fail", repoId: "repo-stale", outcome: "start_failed:pi startup failed", at: 1_000, deviceId: "dev-a" });
+      seedRun(sql, { workerId: "w_a_ok", repoId: "repo-stale", outcome: "reported:done", at: 2_000, deviceId: "dev-a" });
+      seedRun(sql, { workerId: "w_b_fail", repoId: "repo-stale", outcome: "start_failed:pi startup failed", at: 1_500, deviceId: "dev-b" });
+      const onBrokenMachine = envNote(n, "repo-stale", "worker:w_b_fail");
+      const unbound = envNote(n, "repo-stale", undefined, "这个仓库的 pi 版本太旧");
+      expect(n.get(onBrokenMachine.noteId)!.stale ?? null).toBeNull();
+      expect(n.get(unbound.noteId)!.stale?.deviceId).toBe("dev-a");
+    });
+  });
+});
+
 // ---- the conversation surface: tools, section, relay (faux model, production paths) -------------------
 
 beforeEach(async () => {
