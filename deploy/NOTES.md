@@ -132,6 +132,12 @@ ssh -N -L 8787:127.0.0.1:8787 root@115.29.164.8   # then http://127.0.0.1:8787
 `GET /` renders the sign-in page; `POST /api/pairing` with `authorization: Bearer $SERVER_KEY`
 returns the `npx @isaac2ingrid/otto connect …` line.
 
+This tunnel is the whole reachability story right now, and that has a consequence worth stating: a
+paired connector stores the URL it was paired with (`~/.otto/connector.sqlite`), so a machine paired
+through `127.0.0.1:8787` cannot come back online after a logoff or reboot until that tunnel exists
+again — the connector retries and reconnects within a minute once it does (observed: `connection_closed
+1006` until the tunnel returned, then `welcomed`), but nothing restarts the tunnel itself.
+
 ## Going public: `deploy/enable-tls.sh`
 
 The vhost lives in git as `deploy/nginx-otto.conf`, rendered by `deploy/enable-tls.sh`. It is not
@@ -150,6 +156,17 @@ Both modes back up `/etc/nginx` first and abort if the domain does not resolve t
 Rehearsed on 2026-11 against a throwaway `server_name`: `nginx -t` clean, the `default` vhost
 (tstock) still answered on its own `Host`, and the steward saw
 `Host`/`X-Forwarded-For`/`X-Forwarded-Proto` with a live `upgrade: websocket`.
+
+**Where it stands on the box (audited 2026-11-10, read-only).** Neither mode has been run against
+the real name: `/etc/nginx/conf.d/otto.conf` does not exist (only `websocket-upgrade.conf`), there
+is no `certbot` binary, no `/etc/letsencrypt`, and nothing listens on 443. Everything else the step
+needs is already in place — `otto.service` enabled with `Restart=always`, the memory/`StartLimit`
+drop-in, `/etc/otto/.dev.vars` (root:otto 640), `otto-backup.timer` taking a daily online `.backup`
+(15 kept, same disk only — an offsite copy is still a gap), and `ufw` allowing 80/443. Probing from a
+client: `:80` answers `200` (the tstock site) but `:443` and `:8443` both **time out** rather than
+refuse, which points at the Aliyun security group having no rule for them — that is a console step,
+not something the scripts can do. So the resume order is exactly: ICP review → security group 443 →
+`--stage` → pair on `http://<name>` → `--live` → re-pair on `https://<name>` and retire the tunnel.
 
 Two headers are load-bearing, not decoration: `node-host/server.ts` builds the request origin
 from `Host` + `X-Forwarded-Proto`, and the app stores it in `sh_deploy.origin` to mint absolute
