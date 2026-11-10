@@ -53,7 +53,7 @@ otto connect <你的-Otto-地址> <一次性配对码>
 otto status
 ```
 
-配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务）。**Windows 目前还没有后台服务**，请在保持开启的终端里用 `--foreground` 运行：
+配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务）；如果这台机器装不了（Windows 没有服务管理器，或者当前会话够不到服务管理器），`connect` 会在**兑换配对码之前**就说清楚，重试不需要新码。**Windows 目前还没有后台服务**，请在保持开启的终端里用 `--foreground` 运行：
 
 ```sh
 otto connect <你的-Otto-地址> <一次性配对码> --foreground

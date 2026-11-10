@@ -98,6 +98,16 @@ until a per-user logon autostart exists.
    branches run on Linux CI; the tests that must be real (the CIM query, `taskkill`, the sampler
    against a genuinely busy child) are `runIf(win32)` and run on a Windows CI job.
 
+9. **`connect` refuses before it spends the pairing code.** Pairing is single-use (protocol §5.2),
+   so a machine that cannot install the service must say so before the `/pair` call rather than
+   after it: Windows has no installer at all, and a headless Linux session has no reachable
+   systemd user bus. `ServiceInstaller` gained an optional `preflight()` — systemd: one
+   `systemctl --user show-environment`; launchd: `launchctl print gui/<uid>`, the same domain
+   `install()` bootstraps into — and `connect` runs it before pairing, skipping it for
+   `--foreground`, which needs no service. Only facts that would fail the install outright are
+   allowed in there, never a preference; the cost of getting this wrong was a freshly generated
+   code for every retry on Windows.
+
 ## Consequences
 
 - The Windows branches are exercised by CI, but the acceptance test for this phase stays a manual

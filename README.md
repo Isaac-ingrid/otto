@@ -53,7 +53,7 @@ otto connect <your-otto-url> <one-time-pairing-code>
 otto status
 ```
 
-The code expires after 10 minutes and is single-use; keep it out of chat and logs. Pairing installs and starts a background service — launchd on macOS, a systemd user service on Linux. **On Windows there is no background service yet**, so pair and run with `--foreground` in a terminal that stays open:
+The code expires after 10 minutes and is single-use; keep it out of chat and logs. Pairing installs and starts a background service — launchd on macOS, a systemd user service on Linux. When that is not possible on this machine (no service manager on Windows, or a session that cannot reach it), `connect` says so *before* redeeming the code, so a retry costs no new code. **On Windows there is no background service yet**, so pair and run with `--foreground` in a terminal that stays open:
 
 ```sh
 otto connect <your-otto-url> <one-time-pairing-code> --foreground
