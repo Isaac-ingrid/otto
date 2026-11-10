@@ -131,35 +131,70 @@ Two ways in. The steward itself stays on loopback in both.
 ssh -N -L 8787:127.0.0.1:8787 root@115.29.164.8   # then http://127.0.0.1:8787
 ```
 
-**2. Bare IP on `:8080`** (added 2026-11-10, so a phone can look at the workspace while the domain
-sits in ICP review): `http://115.29.164.8:8080`.
+**2. TLS on the bare IP** (2026-11-10, so a phone can reach the workspace while the domain sits in
+ICP review): **`https://115.29.164.8`**.
+
+Let's Encrypt issues certificates for IP identifiers now (January 2026), under the `shortlived`
+profile with a 6-day lifetime, so a deployment without a domain can still serve real TLS. There is
+no usable `certbot` on this box — Ubuntu 22.04 ships 1.21.0, too old for `--ip-address`, and
+`snap install certbot --classic` never finished on this network — so it lives in a venv:
 
 ```bash
-# on the box: vhost + port; then one console step — Aliyun security group, inbound TCP 8080/8080
-install -m 644 otto-8080.conf /etc/nginx/sites-available/otto
-ln -sf /etc/nginx/sites-available/otto /etc/nginx/sites-enabled/otto
-nginx -t && systemctl reload nginx && ufw allow 8080/tcp
+apt-get install -y python3.10-venv            # without it, venv creation dies on ensurepip
+python3 -m venv /usr/local/certbot-venv
+/usr/local/certbot-venv/bin/pip install -i https://mirrors.aliyun.com/pypi/simple/ certbot
+ln -sf /usr/local/certbot-venv/bin/certbot /usr/local/bin/certbot    # 5.9.0
 ```
 
-The vhost is `deploy/nginx-otto.conf` with two changes — `listen 8080` / `listen [::]:8080`, and
-`server_name 115.29.164.8`. It is deliberately **not** on `:80`: this box's `default` server
-answers `:80` *by IP* (`server_name _`) with the tstock build, so a vhost carrying `server_name
-115.29.164.8` on `:80` takes that traffic over. Not theory — the first attempt installed exactly
-that, and `http://115.29.164.8/` served Otto's sign-in page for two minutes before it was rolled
-back (symlink removed, `nginx -t`, reload; `http://115.29.164.8/` then answered the tstock page
-again).
-
-Verified from a client outside the box: `GET /` → `200 Sign in - Otto`; `/app/api/workspace` →
-`401`; a real WebSocket handshake to `/app/ws?view=workspace` reaches the app and comes back with
-its `401` session gate, so the security-group rule, the `upgrade`/`Connection` headers and the
-route are all good; `:80` still returns the tstock page. It is cleartext: the login password and
-every task's content cross the public internet unencrypted, and a passkey cannot be registered or
-used at all without a secure context. Roll back with:
+Issuance uses **webroot against the `default` vhost** (`root /root/tstock/dist`), so nginx serves
+the HTTP-01 challenge on `:80` and nothing has to be stopped or edited — but renewal then depends
+on that vhost and that directory staying where they are:
 
 ```bash
-rm /etc/nginx/sites-enabled/otto && systemctl reload nginx && ufw delete allow 8080/tcp
-# plus deleting the security-group rule
+certbot certonly --preferred-profile shortlived \
+  --webroot --webroot-path /root/tstock/dist \
+  --ip-address 115.29.164.8 --cert-name otto-ip \
+  --register-unsafely-without-email --agree-tos --non-interactive
+certbot renew --dry-run                       # proves the challenge path end to end
 ```
+
+A 6-day certificate needs care a 90-day one does not: certbot renews when 30 days remain, which is
+*always* true here, so a plain timer run would renew every time and walk straight into Let's
+Encrypt's duplicate-certificate rate limit. The renewal config therefore carries
+`renew_before_expiry = 2 days`, and renewal is a systemd timer, not cron:
+
+```
+/etc/systemd/system/certbot-renew.{service,timer}          # 00:17 and 12:17, RandomizedDelaySec=3600
+/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh      # systemctl reload nginx
+```
+
+The vhost is `deploy/nginx-otto-ip.conf` — `listen 443 ssl`, `server_name 115.29.164.8`,
+certificate from `/etc/letsencrypt/live/otto-ip/`, still proxying to `127.0.0.1:8787`. It is
+deliberately **not** on `:80`: this box's `default` server answers `:80` *by IP* (`server_name _`)
+with the tstock build, so a vhost carrying `server_name 115.29.164.8` on `:80` takes that traffic
+over. Not theory — an earlier attempt installed exactly that, and `http://115.29.164.8/` served
+Otto's sign-in page for two minutes before it was rolled back.
+
+Verified from a client outside the box: `https://115.29.164.8/` → `200 Sign in - Otto` with the
+chain validating against the public trust store and `subjectAltName = IP Address:115.29.164.8`;
+`/app/api/workspace` → `401`; `POST /auth/password` → `401 {"error":"invalid_password"}` (so
+sameOrigin passes and the password is really compared); a `wss://…/app/ws?view=workspace`
+handshake reaches the app's `401` session gate in 70 ms; `:80` still answers the tstock page. The
+cleartext run on `:8080` is gone (nothing listens, `ufw` rule deleted — drop the security-group
+rule too). Roll back by restoring the cleartext vhost:
+
+```bash
+cp /etc/nginx/sites-available/otto.ip8080.saved /etc/nginx/sites-available/otto
+nginx -t && systemctl reload nginx && ufw allow 8080/tcp   # plus its security-group rule
+```
+
+**Passkeys still cannot be used here, and that is the address's fault, not the browser's.** WebAuthn
+defines the RP ID as a *valid domain string*, and an IP literal is not one
+([w3c/webauthn#1358](https://github.com/w3c/webauthn/issues/1358)); the steward derives it from the
+request host (`steward.ts`: `webauthnLoginVerify(url.hostname, …)`), so over `https://<ip>` the API
+is present in the page but every ceremony throws `SecurityError`. The login page and the settings
+dialog now detect an IP-literal host and say so, instead of offering a button that can only fail —
+and once the domain is live, passkeys start working on their own.
 
 **The port in the `Host` header is load-bearing.** The first phone sign-in failed with
 `无法连接 Otto，请检查网络后重试`, and the access log said `POST /auth/password 403`.
@@ -214,8 +249,9 @@ Rehearsed on 2026-11 against a throwaway `server_name`: `nginx -t` clean, the `d
 
 **Where it stands on the box (audited 2026-11-10, read-only).** Neither mode has been run against
 the real name: `/etc/nginx/conf.d/otto.conf` does not exist (only `websocket-upgrade.conf`), there
-is no `certbot` binary, no `/etc/letsencrypt`, and nothing listens on 443 (8080 is now taken by
-the by-IP vhost above — do not reuse it). Everything else the step
+is no `certbot` binary in the distribution and nothing listens on 443 for a domain vhost — the
+venv `certbot` and `/etc/letsencrypt` belong to the by-IP certificate above, and the cleartext
+`:8080` vhost has been retired). Everything else the step
 needs is already in place — `otto.service` enabled with `Restart=always`, the memory/`StartLimit`
 drop-in, `/etc/otto/.dev.vars` (root:otto 640), `otto-backup.timer` taking a daily online `.backup`
 (15 kept, same disk only — an offsite copy is still a gap), and `ufw` allowing 80/443. Probing from a
@@ -223,6 +259,8 @@ client: `:80` answers `200` (the tstock site) but `:443` and `:8443` both **time
 refuse, which points at the Aliyun security group having no rule for them — that is a console step,
 not something the scripts can do. So the resume order is exactly: ICP review → security group 443 →
 `--stage` → pair on `http://<name>` → `--live` → re-pair on `https://<name>` and retire the tunnel.
+(As of 2026-11-10 that security-group rule exists and `https://115.29.164.8` serves a trusted
+certificate, so the by-IP path is already the working way in; the domain path stays unrun.)
 
 Two headers are load-bearing, not decoration: `node-host/server.ts` builds the request origin
 from `Host` + `X-Forwarded-Proto`, and the app stores it in `sh_deploy.origin` to mint absolute
