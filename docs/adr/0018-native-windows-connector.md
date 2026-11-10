@@ -3,8 +3,9 @@
 Status: accepted. Amends decision 10 of [ADR-0001](0001-mvp-implementation-baseline.md) ("background
 service on macOS (launchd) and Linux (systemd user unit); no Windows"). Phase 1 — a foreground
 connector that runs a real pi task on a real Windows machine, read-only and then write — is
-implemented and accepted (see the two acceptance records below); the background lifecycle
-(phase 2, shape sketched at the end of this file) and an installer are explicitly later phases.
+implemented and accepted (see the two acceptance records below); phase 2 (the background lifecycle)
+has started with its prerequisite, the one-daemon-per-state-directory lock (decision 10 below),
+while the logon-start mechanism and supervision stay open; an installer is explicitly a later phase.
 
 Context: the deployment shape this project settled on is a steward running 24/7 on a small cloud
 server with connectors on the machines the owner actually works on — and those include Windows.
@@ -179,12 +180,43 @@ the change exists only under `~/.otto/worktrees/`) and the agent's own report (i
 checkout it wrote into). Deliberately *not* covered by this run: the commit → push → PR path, since
 the task text forbade committing (`ahead 0`, `pushed false`).
 
-## Phase 2 (planned): the background lifecycle
+## Phase 2 (implementing): the background lifecycle
 
 Decision 6 stands for phase 1: `getServiceInstaller` returns `null` on win32 and the supported shape
-is `otto connect … --foreground`. Phase 2 is the per-user autostart it defers. This section records
-the *shape of the decision*, not a decision — three questions are open, and each has a Windows
-answer that the launchd/systemd path gets for free.
+is `otto connect … --foreground`. Phase 2 is the per-user autostart it defers. Question 3 is now
+decided and implemented (below); questions 1 and 2 still record the *shape of the decision*.
+
+### Decision 10 (phase 2, step 1): one daemon per state directory
+
+**A daemon lock is a prerequisite for any autostart, and it is implemented as such** — step 1 of
+phase 2, because neither of the other two questions is safe to answer without it.
+
+- `~/.otto/daemon.lock`, claimed by `otto daemon` and by `otto connect --foreground` (the supported
+  shape on Windows, and the escape hatch everywhere else), released on SIGTERM/SIGINT.
+- Identity discipline is `locks.ts`'s: `pid` + process start time; a dead pid or a live pid whose
+  start time differs is stale, and a live pid whose start time cannot be read is *unknown* and the
+  lock stays held. An unparseable lock file is held for the same reason — the holder cannot be
+  checked at all. Refusing costs one retry; granting costs a second daemon.
+- Release is owner-checked, so a daemon that lost a race does not delete the new holder's lock.
+- It lives in the state-dir root, not `locks/`, because the §9.1 worker sweep rewrites every
+  `*.lock` in that directory.
+- `otto status` prints it as its own `daemon:` line. On Windows the `service:` line is always "not
+  supported", so this is the only truthful answer to "is a connector running", and it separates
+  *running* from *a stale lock left by a crash*.
+- `otto connect --foreground` checks it before redeeming the pairing code, under decision 9’s rule
+  (a fact that would make the run fail outright, never a preference). The service path deliberately
+  does **not** check it: the installer restarts the machine's single daemon, which releases the lock
+  on the way out, and refusing there would break a legitimate re-pair.
+
+Accepted on the real machine (Windows 11, build 26100): the lock was written with the live pid and
+its creation timestamp; a second `otto daemon` refused with the holding pid, start time and version
+(exit 1); a `--foreground` connect refused the same way before any `/pair` traffic; a hand-corrupted
+lock file was refused with the file left in place; a stale lock (dead pid, left by a `taskkill /F`
+of the previous build) was replaced and the directory was clean again after the daemon exited on an
+unrelated failure. Unit tests (`daemon-lock.test.ts`) cover each verdict with injected process
+identities, and `connect-preflight.test.ts` covers the ordering for `--foreground` on every platform.
+
+### Open (phase 2)
 
 1. **What starts the daemon at logon.** A `HKCU\…\Run` value needs no elevation and is trivial to
    remove, but gives no restart-on-failure and no control over the window (a console program
@@ -194,20 +226,18 @@ answer that the launchd/systemd path gets for free.
    hidden — but creating a task may require elevation, which a managed company machine will not
    grant. Whichever wins must start the daemon inside the user's own session; session 0 is rejected
    by decision 6 because the agent it spawns is an interactive, user-profile program.
+   *Machine evidence so far: `wscript.exe`/`cscript.exe` are present (a hidden launch is possible),
+   the `Run` key holds seven per-user entries and no `NoRun` policy blocks it, and a
+   `schtasks /Create /SC ONLOGON` probe on this (non-domain, UAC-on) machine failed with
+   "access is denied" — from an unelevated shell, the Run key is the only zero-elevation option of
+   the three.*
 2. **Who supervises the process.** launchd (`KeepAlive`) and systemd (`Restart=on-failure`) restart a
    crashed daemon; nothing on Windows does. If the chosen mechanism does not, a small
    platform-independent supervisor mode is the alternative (`otto daemon --supervise`: spawn,
    restart with backoff, append the child's stdout/stderr under the log dir). The daemon's own log
    (`~/.otto/logs/connector.log`, rotated) already covers what the process does; what a hidden
-   autostart loses is whatever is printed to the console before the logger exists.
-3. **One daemon per machine, enforced.** The steward would not catch two: a duplicate `hello` is
-   resolved by `connEpoch` (the newer connection supersedes the older, `steward.ts`), so the two
-   would take turns superseding each other — while both run reconcile, orphan cleanup and the stall
-   watchdog over one state directory and one set of pi process trees. Startup cleanup kills what the
-   shared store's orphan snapshots name; that guard only rules out pid reuse (alive + start-time
-   match), so it cannot tell another daemon's live worker children from its own. A daemon lock file
-   in the state dir, checked with the same `pid + creation time` discipline as `locks.ts`
-   (unreadable ⇒ held, fail closed), is therefore a prerequisite for any autostart.
+   autostart loses is whatever is printed to the console before the logger exists. A supervisor adds
+   a second process layer, so the lock's holding pid becomes the supervisor's.
 
 The acceptance test decision 6 asked for still applies: after logoff/logon the machine is online in
 the workspace with no terminal opened; `otto stop` keeps it down across the next logon until

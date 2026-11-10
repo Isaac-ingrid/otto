@@ -126,6 +126,17 @@ Start:
 
 Stop: close stdin → wait 3 seconds (pi disposes and kills the tool process tree, measured) → if it still has not exited, SIGKILL, then clean up orphans with the descendant list from §9.3.
 
+### 4.5 One daemon per state directory
+
+`~/.otto/daemon.lock`, claimed by the daemon for as long as it lives (ADR-0018 phase 2). The steward does **not** catch a second daemon: a duplicate `hello` is settled by `connEpoch`, so two daemons would take turns superseding each other while both ran reconciliation (§9.1), startup orphan cleanup (§9.3, whose alive + start-time guard cannot tell another daemon's live worker children from its own) and the stall watchdog over one state directory.
+
+- Identity discipline as in §4.3: `pid` + process start time; a dead pid is stale, a live pid whose start time differs is a reused pid (stale), a live pid whose start time cannot be read is *unknown* and the lock stays held.
+- A lock file that cannot be parsed is held, not free — the holder cannot be checked at all, and refusing costs one retry while granting costs a second daemon. The refusal names the file so the operator can delete it after confirming nothing is running.
+- Takeover is `write tmp + rename`; release happens on SIGTERM/SIGINT *and only if the lock is still ours*, so a daemon that lost a race cannot delete the new holder's lock on its way out.
+- It sits in the state-dir root, not in `locks/`: the worker sweep (§9.1) rewrites and removes every `*.lock` in that directory.
+- `otto status` prints the lock as its own `daemon:` line — on Windows, where the `service:` line is always "not supported", this is the only answer to "is a connector running", and it distinguishes *running* from *stale lock left by a crash*.
+- POSIX already serializes service starts (launchd, systemd), but `otto connect --foreground` and PowerShell-started daemons do not go through the service manager, and this lock is what any Windows autostart will rest on. `otto connect --foreground` checks it *before* redeeming the pairing code, for the reason in ADR-0018 decision 9.
+
 ## 5. States and outcomes
 
 ### 5.1 Worker states (the connector's view)
@@ -441,4 +452,4 @@ Settled by [ADR-0018](../adr/0018-native-windows-connector.md). The design above
 
 The stall watchdog (§12) measures tree CPU the same way on both platforms, but on Windows each of the two samples takes one fresh table: a cached snapshot would make the delta exactly zero, which reads as a cold tree and would respawn a healthy worker. A member that cannot be read yields no sample at all, never a low one.
 
-Background lifecycle: none on Windows yet. `otto connect --foreground` is the supported shape (a per-user logon autostart is a later phase; session 0 is rejected because the agent is an interactive, user-profile program). Operators see the resolved launch in `otto status`; when it reads `windows-unresolved` or `NOT SPAWNABLE`, no task should be dispatched until `OTTO_PI_COMMAND` names a startable argv. Without `--foreground` the command refuses on this platform *before* it redeems the pairing code (ADR-0018 decision 9), so a wrong invocation costs no code — the same preflight also covers a Linux session whose systemd user bus cannot be reached, which used to burn a code and then fail to install.
+Background lifecycle: none on Windows yet. `otto connect --foreground` is the supported shape (a per-user logon autostart is a later phase; session 0 is rejected because the agent is an interactive, user-profile program). On this platform the §4.5 daemon lock is the only thing serializing two connector runs, because there is no service manager to do it; a second `--foreground` run refuses with the holding pid instead of quietly sharing the state directory. Operators see the resolved launch in `otto status`; when it reads `windows-unresolved` or `NOT SPAWNABLE`, no task should be dispatched until `OTTO_PI_COMMAND` names a startable argv. Without `--foreground` the command refuses on this platform *before* it redeems the pairing code (ADR-0018 decision 9), so a wrong invocation costs no code — the same preflight also covers a Linux session whose systemd user bus cannot be reached, which used to burn a code and then fail to install.
