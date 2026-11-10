@@ -43,7 +43,7 @@ If the connector is already installed globally, use the shorter form:
 otto connect https://otto.example.com <pairing-code>
 ```
 
-The pairing code is single-use and expires after 10 minutes. `connect` saves the device credential, installs a launchd service on macOS or a systemd user service on Linux, and starts the connector. On a machine without a supported service manager, add `--foreground` and keep the terminal open.
+The pairing code is single-use and expires after 10 minutes. `connect` saves the device credential, installs a background service — launchd on macOS, a systemd user service on Linux, a per-user logon entry (the `Run` key plus a generated `~/.otto/otto-daemon.vbs`) on Windows — and starts the connector. On a machine whose policy forbids that entry, or whose session cannot reach its service manager, add `--foreground` and keep the terminal open.
 
 ### Networks that block the deployment
 
@@ -126,7 +126,7 @@ npx @isaac2ingrid/otto connect https://otto.example.com <pairing-code>
 otto connect https://otto.example.com <pairing-code>
 ```
 
-配对码只能使用一次，10 分钟后过期。`connect` 会保存设备凭证，在 macOS 安装 launchd 服务、在 Linux 安装 systemd 用户服务，并启动 connector。没有受支持服务管理器的机器可以加 `--foreground`，并保持终端打开。
+配对码只能使用一次，10 分钟后过期。`connect` 会保存设备凭证，安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务，Windows 用当前用户登录自启动：`Run` 注册表项加生成的 `~/.otto/otto-daemon.vbs`）。机器策略禁止自启动、或当前会话够不到服务管理器时，可以加 `--foreground`，并保持终端打开。
 
 ### 无法直连部署地址的网络
 

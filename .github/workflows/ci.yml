@@ -63,4 +63,7 @@ jobs:
       - run: pnpm -r typecheck
       - name: platform tests
         working-directory: apps/connector
-        run: pnpm vitest run test/pi-launch.test.ts test/win32.test.ts test/kill.test.ts test/watchdog.test.ts
+        run: pnpm vitest run test/pi-launch.test.ts test/win32.test.ts test/kill.test.ts test/watchdog.test.ts test/daemon-lock.test.ts test/service.test.ts test/connect-preflight.test.ts
+      # test/windows-live.test.ts is deliberately not run here: it writes the runner's real Run
+      # key and starts a hidden process. It is the real-machine acceptance test, run with
+      # OTTO_WIN_LIVE_INSTALL=1 (ADR-0018 decision 11).

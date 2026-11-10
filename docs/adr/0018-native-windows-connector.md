@@ -4,8 +4,9 @@ Status: accepted. Amends decision 10 of [ADR-0001](0001-mvp-implementation-basel
 service on macOS (launchd) and Linux (systemd user unit); no Windows"). Phase 1 — a foreground
 connector that runs a real pi task on a real Windows machine, read-only and then write — is
 implemented and accepted (see the two acceptance records below); phase 2 (the background lifecycle)
-has started with its prerequisite, the one-daemon-per-state-directory lock (decision 10 below),
-while the logon-start mechanism and supervision stay open; an installer is explicitly a later phase.
+has landed its first two steps — the one-daemon-per-state-directory lock (decision 10) and the
+per-user logon autostart (decision 11) — while restart-on-failure, the last open question, is step
+3; an installer is explicitly a later phase.
 
 Context: the deployment shape this project settled on is a steward running 24/7 on a small cloud
 server with connectors on the machines the owner actually works on — and those include Windows.
@@ -182,9 +183,10 @@ the task text forbade committing (`ahead 0`, `pushed false`).
 
 ## Phase 2 (implementing): the background lifecycle
 
-Decision 6 stands for phase 1: `getServiceInstaller` returns `null` on win32 and the supported shape
-is `otto connect … --foreground`. Phase 2 is the per-user autostart it defers. Question 3 is now
-decided and implemented (below); questions 1 and 2 still record the *shape of the decision*.
+Decision 6 was phase 1's shape: `getServiceInstaller` returned `null` on win32 and the supported
+shape was `otto connect … --foreground`. Phase 2 is the per-user autostart it deferred. Question 3
+(what starts the daemon) and question 1 (what starts it at logon) are now decided and implemented
+as decisions 10 and 11; question 2 (who supervises it) is the remaining step.
 
 ### Decision 10 (phase 2, step 1): one daemon per state directory
 
@@ -200,9 +202,10 @@ phase 2, because neither of the other two questions is safe to answer without it
 - Release is owner-checked, so a daemon that lost a race does not delete the new holder's lock.
 - It lives in the state-dir root, not `locks/`, because the §9.1 worker sweep rewrites every
   `*.lock` in that directory.
-- `otto status` prints it as its own `daemon:` line. On Windows the `service:` line is always "not
-  supported", so this is the only truthful answer to "is a connector running", and it separates
-  *running* from *a stale lock left by a crash*.
+- `otto status` prints it as its own `daemon:` line, which separates *running* from *a stale lock left
+  by a crash*. Since decision 11 the `service:` line above it is no longer "not supported" on
+  Windows; the two answer different questions (a Run value can exist with nothing running, and
+  `otto daemon` runs with no Run value at all), so both lines are kept.
 - `otto connect --foreground` checks it before redeeming the pairing code, under decision 9’s rule
   (a fact that would make the run fail outright, never a preference). The service path deliberately
   does **not** check it: the installer restarts the machine's single daemon, which releases the lock
@@ -216,21 +219,78 @@ of the previous build) was replaced and the directory was clean again after the 
 unrelated failure. Unit tests (`daemon-lock.test.ts`) cover each verdict with injected process
 identities, and `connect-preflight.test.ts` covers the ordering for `--foreground` on every platform.
 
+### Decision 11 (phase 2, step 2): a per-user Run key, launched through a generated wscript file
+
+**The Windows logon autostart is one `HKCU\…\Run` value pointing at a generated `~/.otto/otto-daemon.vbs`,
+and `otto connect` installs it without elevation.** A Windows *Service* is rejected by decision 6
+(session 0 has no user profile, no desktop and no user PATH, and the agent it spawns is a
+user-profile program), so what is left is per-user autostart, and of its three shapes:
+
+- **Task Scheduler's logon trigger** is the structural analogue — a unit on disk, hidden, with
+  restart-on-failure — and it is what a managed machine would use. It cannot be what `otto connect`
+  does: on this machine a `schtasks /Create /SC ONLOGON` probe was refused with `access is denied`
+  (exit 1, no task created) from an unelevated shell.
+- **A Startup-folder shortcut** has the Run key's limits and adds a `.lnk` that needs PowerShell COM
+  to write.
+- **The Run key** needs no elevation, is visible to the user in Task Manager's startup tab, and is
+  one value to remove. It wins by elimination, not preference.
+
+The launcher is not decoration: `node.exe` is a console program, so a Run value pointing straight at
+it opens a console window that the user can close. Through `wscript.exe` the window is style 0
+(hidden), and the VBS also does the job the plist/unit's `EnvironmentVariables` does — at logon the
+environment knows nothing of `OTTO_HOME` or of whatever directory `node`/`git` were installed into.
+It is the Windows analogue of the unit file: written by `connect`, named by `status`, removed by
+`uninstall`, and it holds no credential (the daemon reads its own from the state directory).
+
+Consequences carried into the CLI:
+
+- `start` re-enables the value and waits for the **daemon lock** (decision 10) before reporting
+  success, so a launcher that cannot start says so instead of leaving a dead autostart entry. It
+  refuses when the launcher is missing — the same "not installed" answer launchd/systemd give —
+  rather than writing a Run value for a machine that never paired.
+- `stop` removes the value first (so being stopped survives the next logon, like launchd's
+  `disable` before `bootout`) and then ends the daemon named by the lock. A Windows force-kill
+  cannot run the daemon's SIGTERM handler, so the lock file it leaves is cleared with it — otherwise
+  `otto status` would claim a connector that is not there.
+- `status` reads the run value, the launcher and the lock: *not in the Run key* / *starts at the next
+  logon* / *Run key + otto-daemon.vbs* with the pid. A Run value whose launcher is gone is reported
+  as not installed, because it would fail silently at logon.
+- `preflight` (decision 9) refuses three read-only facts — a policy-disabled Run key
+  (`…\Policies\Explorer\NoRun`), Windows Script Host turned off (`…\Windows Script Host\Settings\Enabled=0`),
+  or a missing `wscript.exe` — because each makes the install pointless and each is discoverable
+  before the single-use pairing code is spent. Whether the registry write itself will be allowed is
+  not checked: that cannot be known without writing, and `HKCU` is the user's own hive.
+
+**Not covered: restart-on-failure.** launchd's `KeepAlive` and systemd's `Restart=on-failure` have no
+Run-key counterpart, so a crashed daemon stays down until the next logon. `install` says exactly that
+in its notes instead of leaving a user to discover it; step 3 (`otto daemon --supervise`) is the
+platform-independent answer.
+
+Accepted on the real machine (Windows 11, build 26100), with a throwaway state directory and entry
+script so no credential or steward was involved: `install` wrote the launcher and the Run value
+(`reg query` returns `C:\Windows\System32\wscript.exe "…\otto-daemon.vbs"`), the launcher really ran —
+the hidden child wrote back the `OTTO_HOME`, a PATH prefixed with a test directory and a marker
+variable it was given through `sh.Environment("PROCESS")`, with its cwd set to the state directory —
+and `start` only returned once the child's lock was held, which `status` then reported with its pid.
+`stop` removed the value, ended the child (verified by `tasklist`) and cleared the lock; a second
+`install` after that stop worked, and `uninstall` removed the launcher and the value while keeping
+`connector.sqlite`. The same run is available as `test/windows-live.test.ts`, skipped unless
+`OTTO_WIN_LIVE_INSTALL=1` is set (it refuses to run while `dev.otto.connector` is already in the Run
+key, so it can never overwrite a working installation). Unit tests cover the rest with injected
+`reg.exe`, launch, taskkill and lock deps, and ten mutations of the new code (dropping the
+start-refusal, the kill, the lock cleanup, the path quoting, window style 0, the policy check, the
+launcher check, the env block, the Run write, the lock wait) each fail at least one test.
+
 ### Open (phase 2)
 
-1. **What starts the daemon at logon.** A `HKCU\…\Run` value needs no elevation and is trivial to
-   remove, but gives no restart-on-failure and no control over the window (a console program
-   launched from it gets a console window). A Startup-folder shortcut has the same limits and is
-   visible as a file. Task Scheduler's logon trigger is the structural analogue of
-   launchd/systemd — a unit on disk (`/Query /XML`), enable/disable/start/stop, restart-on-failure,
-   hidden — but creating a task may require elevation, which a managed company machine will not
-   grant. Whichever wins must start the daemon inside the user's own session; session 0 is rejected
-   by decision 6 because the agent it spawns is an interactive, user-profile program.
-   *Machine evidence so far: `wscript.exe`/`cscript.exe` are present (a hidden launch is possible),
-   the `Run` key holds seven per-user entries and no `NoRun` policy blocks it, and a
-   `schtasks /Create /SC ONLOGON` probe on this (non-domain, UAC-on) machine failed with
-   "access is denied" — from an unelevated shell, the Run key is the only zero-elevation option of
-   the three.*
+1. **What starts the daemon at logon — decided (decision 11).** The Run key plus a generated
+   `otto-daemon.vbs`, because it is the only zero-elevation option of the three shapes above.
+   *Machine evidence: `wscript.exe`/`cscript.exe` are present, the `Run` key holds seven per-user
+   entries and no `NoRun` policy blocks it, the machine is not domain-joined, UAC is on and the shell
+   is not elevated, and a `schtasks /Create /SC ONLOGON` probe failed with "access is denied"*.
+   What this choice does **not** answer is restart-on-failure (below). The remaining fork if a
+   managed machine ever needs it: Task Scheduler as an *opt-in* path (`otto install-task`, documented
+   as needing elevation or an admin's approval) rather than what `connect` does by default.
 2. **Who supervises the process.** launchd (`KeepAlive`) and systemd (`Restart=on-failure`) restart a
    crashed daemon; nothing on Windows does. If the chosen mechanism does not, a small
    platform-independent supervisor mode is the alternative (`otto daemon --supervise`: spawn,
@@ -239,7 +299,10 @@ identities, and `connect-preflight.test.ts` covers the ordering for `--foregroun
    autostart loses is whatever is printed to the console before the logger exists. A supervisor adds
    a second process layer, so the lock's holding pid becomes the supervisor's.
 
-The acceptance test decision 6 asked for still applies: after logoff/logon the machine is online in
-the workspace with no terminal opened; `otto stop` keeps it down across the next logon until
-`otto start`; a killed daemon comes back if supervision is claimed; `uninstall` leaves neither an
-autostart entry nor an orphan process; and a second daemon refuses to start.
+The acceptance test decision 6 asked for still applies, and three of its five checks are now
+reachable: after logoff/logon the machine is online in the workspace with no terminal opened (the
+one part that needs a real logoff, still to be run); `otto stop` keeps it down across the next logon
+until `otto start`; a killed daemon comes back **only if** supervision is claimed — with decision 11
+and no supervisor it stays down until the next logon, which is why step 3 exists; `uninstall` leaves
+neither an autostart entry nor an orphan process (verified on the machine); and a second daemon
+refuses to start (decision 10, verified).
