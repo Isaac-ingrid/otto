@@ -61,7 +61,7 @@ function buildWorld(c: MemoryCase): World {
     deviceId: "dev_mem",
     agent: "pi",
     mode: "write",
-    repoId: REPO_A,
+    repoId: c.workerWithoutRepo ? undefined : REPO_A,
   });
 
   const ref: Record<string, string> = {};
@@ -95,7 +95,7 @@ function buildWorld(c: MemoryCase): World {
 
 /** The extension context over a memory world: dispatch/ask are inert, the relay is recorded,
  *  and a confirmation's message always postdates the note it confirms. */
-function buildContext(ledger: Ledger, relays: string[]): StewardExtensionContext {
+function buildContext(ledger: Ledger, relays: string[], input: string): StewardExtensionContext {
   return {
     ledger,
     buildBrief: () => "",
@@ -107,6 +107,7 @@ function buildContext(ledger: Ledger, relays: string[]): StewardExtensionContext
     }),
     checkProvenanceRef: async () => true,
     messageReceivedAt: async () => Date.now() + 1_000,
+    ownerMessageText: async (ref) => ref === "user:eval_mem" ? input : null,
     isOwnerMessage: async (msgId) => msgId.startsWith("eval_") || msgId.startsWith("om_"),
     startWorker: async () => ({ kind: "refused", reason: "memory eval does not dispatch" }),
     sendToWorker: async () => ({ kind: "refused", reason: "memory eval does not relay instructions" }),
@@ -145,7 +146,7 @@ async function runCase(c: MemoryCase): Promise<RunResult> {
   const steps = c.script !== undefined && c.script.length > 0 ? c.script : [END];
   const built = buildStewardModels({ provider: "faux", modelId: "faux-1", explicit: true }, undefined);
   const registry = createRegistry();
-  registry.install(buildStewardExtension(buildContext(world.ledger, world.relays)));
+  registry.install(buildStewardExtension(buildContext(world.ledger, world.relays, c.input ?? "（记忆评测输入）")));
   const harness = await Harness.open(new MemoryStorage(), { models: built.models, registry }, BACKGROUND_CONTEXT);
   try {
     const conversation = await harness.root(BACKGROUND_CONTEXT, {
@@ -195,6 +196,12 @@ function judge(c: MemoryCase, run: RunResult): string[] {
   }
   for (const leak of c.expect.leaks ?? []) {
     if (haystack.includes(leak)) failures.push(`leak: 「${leak}」 appeared in a result or relay`);
+  }
+  if (c.expect.storedTexts !== undefined) {
+    const stored = run.ledger.notes.list({ layer: "all" }).map((n) => n.text);
+    if (JSON.stringify(stored) !== JSON.stringify(c.expect.storedTexts)) {
+      failures.push(`stored texts: ${JSON.stringify(stored)} ≠ ${JSON.stringify(c.expect.storedTexts)}`);
+    }
   }
   for (const want of c.expect.state ?? []) {
     const note = run.ledger.notes.get(idOf(want.ref));

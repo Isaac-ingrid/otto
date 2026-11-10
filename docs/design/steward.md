@@ -156,7 +156,7 @@ sh_note_pressure(layer, scopeRepoId, text, chars, kind, evidence, supersedes, ev
 
 | `source` | Meaning | Trust | Allowed into the resident layer? |
 |---|---|---|---|
-| `user_said` | Said by the user directly; `evidence` is a message ID | High | Yes |
+| `user_said` | A verbatim excerpt of an owner-authored inbound message; `evidence` identifies that message (a valid id alone is insufficient) | High | Yes |
 | `connector` | Environment facts reported by a connector (repo paths, installed agents) | High | No — project layer only; live reports are the source of truth, notes are not relied on |
 | `worker_reported` | From a worker's `report.decisions` and the like | Low | **No** — promoted only after the user confirms |
 | `inferred` | Inferred by the steward | Low | **No** — promoted only after the user confirms |

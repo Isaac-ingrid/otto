@@ -876,7 +876,9 @@ export function createNotes(deps: NotesDeps) {
     const hits: NoteRow[] = [];
     let chars = 0;
     for (const note of ranked) {
-      if (hits.length >= SEARCH_MAX_ITEMS || chars + note.bytes > SEARCH_MAX_CHARS) break;
+      if (hits.length >= SEARCH_MAX_ITEMS) break;
+      // One long result must not hide every shorter result behind it.
+      if (chars + note.bytes > SEARCH_MAX_CHARS) continue;
       hits.push(note);
       chars += note.bytes;
     }

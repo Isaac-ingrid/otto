@@ -52,6 +52,8 @@ export interface StewardExtensionContext {
   /** When that message was received (ms), or null for unknown refs — lets the notes tools
    *  bind a confirmation to the note it confirms (received AFTER the note existed). */
   messageReceivedAt(ref: string): Promise<number | null>;
+  /** Original owner-authored text, never a model paraphrase. Null for unknown/non-owner refs. */
+  ownerMessageText(ref: string): Promise<string | null>;
   /** notify_user / ask_user land in the outbound queue; only these reach the user.
    *  `dedupeId` (from the tool taskId) makes replayed calls converge on one message. */
   notifyUser(input: {
@@ -744,7 +746,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   const notesCommit = defineTool({
     name: "notes_commit",
     description:
-      "写入记忆的第二步（唯一写入路径）。两个意图必须分清：supersedes＝旧条目的事实已被这条取代（旧条目转为历史版本，不再可作为依据）；evicts＝旧条目仍然成立、只是腾出空间（内容保持有效）。常驻层的门是硬性的：evidence 必须指向用户真正说过的那条消息（user:<om_…>；用户消息触发的轮次里可省略，系统会用当轮消息）；worker_reported / inferred 要进常驻层必须先在项目层经 notes_confirm 确认（supersedes 指向它，且必须内容一致），或当轮就是用户的确认消息（confirmEvidence=user:<om_…>）；connector 来源只能进项目层。写入会记入下一条回复的「记账」，无需在正文里复述。",
+      "写入记忆的第二步（唯一写入路径）。两个意图必须分清：supersedes＝旧条目的事实已被这条取代；evicts＝旧条目仍然成立、只是腾出空间。source=user_said 必须引用真实用户消息，且笔记文本必须是用户原话的连续片段（允许空白归一化）；不要把改写或推断冒充用户原话，改用 inferred 先记项目层。用户轮次可省略 evidence，系统自动挂当轮消息；事件轮次须明确指向 user:<消息id>。worker_reported / inferred 要进常驻层必须先在项目层经 notes_confirm 确认（supersedes 指向它，且必须内容一致），或当轮就是用户的确认消息（confirmEvidence=user:<om_…>）；connector 来源只能进项目层。写入会记入下一条回复的「记账」，无需在正文里复述。",
     // Type.Object merge, not Type.Intersect: an intersect serializes as bare `allOf` with no
     // top-level `type: "object"`, which DeepSeek's tool-schema validation rejects with 400
     // (`schema must be a JSON Schema of 'type: "object"', got 'type: null'`) — found by the
@@ -773,13 +775,26 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       // rests on a confirmation that is bound to something: either a project note this
       // deployment already marked confirmed (notes_confirm verified its evidence), or the
       // user message that triggered THIS run (event runs have neither and must park first).
-      if (args.layer === "resident" && draft.source === "user_said") {
+      if (draft.source === "user_said") {
         const run = await ctx.currentRun();
         const claimed = args.evidence ?? (run?.kind === "user" ? run.provenance : undefined);
-        if (!claimed || !(await ctx.checkProvenanceRef(claimed))) {
-          return err(
-            "refused: 常驻层记忆必须挂在用户真正说过的消息上（evidence=user:<om_…>）。用户消息触发的轮次可省略 evidence；系统输入的轮次必须指明用户原话所在的消息。",
-          );
+        // A real message id alone does not prove the model's proposed sentence came from
+        // that message. Only verbatim excerpts can carry user_said trust; paraphrases must
+        // park as inferred, and an event cannot borrow an unrelated owner's old message.
+        if (!claimed || !claimed.startsWith("user:") || !(await ctx.checkProvenanceRef(claimed))) {
+          return err("refused: user_said 记忆必须挂在用户真正说过的消息上（evidence=user:<om_…>）；用户轮次可省略 evidence。");
+        }
+        const original = await ctx.ownerMessageText(claimed);
+        const normalize = (s: string) => s.normalize("NFC").replace(/\s+/gu, " ").trim();
+        const quote = normalize(draft.text);
+        const message = normalize(original ?? "");
+        // A substring beginning inside a word can reverse its meaning: 不允许自动推送
+        // contains 允许自动推送. Require a clause boundary before the excerpt; this is
+        // deliberately conservative, not a semantic entailment checker.
+        const start = message.indexOf(quote);
+        const boundary = start === 0 || (start > 0 && /[\s，,。.!！？?：:；;]/u.test(message[start - 1]!));
+        if (!quote || !boundary) {
+          return err("refused: user_said 笔记必须是该用户消息的原话片段（从句首开始）；改写/推断请用 inferred 先记项目层，不要借真实消息 id 冒充用户原话。");
         }
         draft.evidence = claimed;
       }
@@ -1241,9 +1256,9 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           // worker is exactly the cross-repo misuse this gate exists for.
           const workerRepo =
             typeof args.workerId === "string" ? (ctx.ledger.workers.get(args.workerId)?.repoId ?? null) : null;
-          if (note.scopeRepoId !== null && workerRepo !== null && note.scopeRepoId !== workerRepo) {
+          if (note.scopeRepoId !== null && note.scopeRepoId !== workerRepo) {
             return {
-              block: `Autonomy rule: evidence 笔记 ${trimmed} 属于仓库 ${note.scopeRepoId}，与提问 worker 的仓库 ${workerRepo} 不符，不能作为它的依据。改用 ask_user（带 questionId）。`,
+              block: `Autonomy rule: evidence 笔记 ${trimmed} 属于仓库 ${note.scopeRepoId}，与提问 worker 的仓库 ${workerRepo ?? "未知"} 不符，不能作为它的依据。改用 ask_user（带 questionId）。`,
             };
           }
         } else if (trimmed.startsWith("user:")) {

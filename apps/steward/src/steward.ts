@@ -870,6 +870,14 @@ export class Steward extends Agent<Env> {
         }
         return false;
       },
+      ownerMessageText: async (ref) => {
+        if (!ref.startsWith("user:")) return null;
+        const msgId = ref.slice("user:".length);
+        if (!msgId) return null;
+        return this.sql<{ text: string | null }>`
+          SELECT text FROM sh_inbound WHERE channel = 'local' AND ownerAuthorized = 1 AND msgId = ${msgId}
+        `[0]?.text ?? null;
+      },
       messageReceivedAt: async (ref) => {
         // Notes' temporal binding (PR #44 review finding 3b): when the owner's message
         // arrived, so a confirmation can be required to postdate the note it confirms.

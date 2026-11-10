@@ -17,9 +17,8 @@ node eval/run-memory-eval.ts --only evidence-gate-three-shapes
 node eval/run-memory-eval.ts --verbose
 ```
 
-Unlike `eval:routing`, this can run in regular CI: it is deterministic and spends no tokens. It
-is not wired into `.github/workflows/ci.yml` yet — add it beside the test step when the case set
-has more than one contributor's worth of history, so the gate does not churn.
+Unlike `eval:routing`, this runs in regular CI (`.github/workflows/ci.yml`): it is deterministic
+and spends no tokens. The `user_said` quote check rejects fragments cut out of the middle of a clause (e.g. `不允许` → `允许`); it does **not** prove semantic entailment. A quoted sentence in a denial may still need owner confirmation.
 
 ## What the cases claim
 
@@ -28,8 +27,8 @@ regression it catches. The families:
 
 | Family | The claim | Cases |
 |---|---|---|
-| confirmation | A confirmation is bound to the exact claim it was given for — it cannot be spent on a rewording, a negation, or another note. The identical claim still promotes. | `confirmation-not-transferable-negation`, `confirmation-promotes-the-identical-claim` |
-| evidence | Memory used as a reason at a worker must be current, confirmed, and placed for **that worker's own repo**. | `evidence-gate-three-shapes` |
+| confirmation | A confirmation is bound to the exact claim it was given for; `user_said` additionally needs a verbatim excerpt of the owner message, not merely a valid message id. The identical claim still promotes. | `confirmation-not-transferable-negation`, `confirmation-promotes-the-identical-claim`, `user-said-must-be-a-quote`, `user-said-negation-is-not-an-excerpt` |
+| evidence | Memory used as a reason at a worker must be current, confirmed, and placed for **that worker's own repo**; a worker with no repo cannot use a project note. | `evidence-gate-three-shapes`, `repo-unknown-rejects-project-evidence` |
 | history | A superseded version stays searchable (traceability) but is never current: it cannot be confirmed, and it cannot be revived by a later confirmation. | `history-cannot-be-confirmed` |
 | retrieval | The current version leads its own history in `search`; a budget-limited `context()` reports what it left out instead of silently truncating. | `search-current-version-first`, `context-budget-reports-omitted` |
 
@@ -40,7 +39,7 @@ What each case asserts (see `MemoryExpectation` in `eval/memory-dataset.ts`):
 - `relays` — answers that actually reached a worker, counted exactly (the stub records instead of
   sending). This is the "one leak" detector for the evidence gate.
 - `leaks` — substrings that must not appear in any tool result or relayed answer.
-- `state` — the end state of the fixtures (layer / status / confirmed).
+- `state` / `storedTexts` — end state of fixtures (layer / status / confirmed) and all persisted text (catches invented writes).
 - `search` / `context` — ledger-level checks with no model involved.
 
 `status` is what separates the two intents the module now names: an **evicted** row stays

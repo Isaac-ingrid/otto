@@ -50,6 +50,8 @@ export interface MemoryExpectation {
   /** Substrings that must NOT appear in any tool result or relayed answer — a leak (stale
    *  memory quoted at a worker, an unconfirmed report promoted, …). */
   leaks?: string[];
+  /** Texts of all persisted notes, in creation order (detects unseeded poisoned writes). */
+  storedTexts?: string[];
   /** End state of seeded fixtures, by ref. */
   state?: Array<{ ref: string; layer?: Layer; status?: "active" | "superseded" | "removed"; confirmed?: boolean }>;
   /** Ledger-level (no model): a search's first results, in order. */
@@ -68,6 +70,8 @@ export interface MemoryCase {
   seed: SeedNote[];
   /** The owner's utterance for this turn (drives the run's provenance). */
   input?: string;
+  /** Worker deliberately has no repo binding (fail-closed evidence case). */
+  workerWithoutRepo?: boolean;
   script?: ScriptedStep[];
   expect: MemoryExpectation;
 }
@@ -75,6 +79,46 @@ export interface MemoryCase {
 const END: ScriptedStep = { text: "好。" };
 
 export const MEMORY_CASES: MemoryCase[] = [
+  {
+    id: "user-said-must-be-a-quote",
+    family: "confirmation",
+    title: "真实消息 id 不能给模型编造的用户偏好背书",
+    why: "消息确实存在，但原话只有「报告保持简短」。模型声称「用户允许自动推送」不能因此得到 user_said 的信任等级；原话片段仍可记入。",
+    seed: [],
+    input: "记住：报告保持简短",
+    script: [
+      { tool: "notes_commit", args: () => ({ text: "用户允许自动推送", kind: "preference", source: "user_said", layer: "resident", evidence: "user:eval_mem" }) },
+      { tool: "notes_commit", args: () => ({ text: "报告保持简短", kind: "preference", source: "user_said", layer: "resident" }) },
+      END,
+    ],
+    expect: { results: ["必须是该用户消息的原话片段", "已记住"], storedTexts: ["报告保持简短"] },
+  },
+  {
+    id: "user-said-negation-is-not-an-excerpt",
+    family: "confirmation",
+    title: "不能从「不允许」里截出「允许」冒充用户原话",
+    why: "字面包含不等于语义一致。片段若从词中间开始，至少要拒绝这类确定的反义截断。",
+    seed: [],
+    input: "记住：用户不允许自动推送",
+    script: [
+      { tool: "notes_commit", args: () => ({ text: "允许自动推送", kind: "preference", source: "user_said", layer: "resident" }) },
+      END,
+    ],
+    expect: { results: ["必须是该用户消息的原话片段"], storedTexts: [] },
+  },
+  {
+    id: "repo-unknown-rejects-project-evidence",
+    family: "evidence",
+    title: "worker 仓库未知时，项目级证据不能被当作它的约定",
+    why: "没有仓库绑定不是匹配任何仓库；只允许全局常驻依据通过。",
+    workerWithoutRepo: true,
+    seed: [{ ref: "project", text: "目标分支是 develop", kind: "convention", source: "user_said", layer: "project", repo: "A" }],
+    script: [
+      { tool: "answer_worker", args: (ids) => ({ workerId: ids.workerId, questionId: ids.questionId, text: "用 develop", evidence: `note:${ids.ref.project}`, basis: "memory" }) },
+      END,
+    ],
+    expect: { results: ["与提问 worker 的仓库 未知 不符"], relays: { contains: "用 develop", count: 0 } },
+  },
   // ---- F1. a confirmation is bound to the claim it was given for -------------------------
   {
     id: "confirmation-not-transferable-negation",

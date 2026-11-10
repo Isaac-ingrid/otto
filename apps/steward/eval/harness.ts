@@ -164,6 +164,7 @@ export function buildEvalContext(ledger: Ledger, caseId: number, observation: Ob
     answerWorker: async () => ({ kind: "refused", reason: "eval world has no workers to answer" }),
     isOwnerMessage: async (msgId) => msgId.startsWith("eval_"),
     messageReceivedAt: async () => Date.now(), // consistent with checkProvenanceRef=true
+    ownerMessageText: async () => null, // routing eval never seeds owner message text
     recordProactiveOutcome: () => {},
     // The proactive-behavior service (issue #20): a minimal in-memory stand-in. The real
     // RoutineService needs the Agents SDK scheduler + outbound queue; the eval only needs

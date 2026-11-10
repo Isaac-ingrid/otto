@@ -594,6 +594,17 @@ describe("notes unit: FTS search and the change relay", () => {
     });
   });
 
+  it("search skips an oversized next hit so a later short hit still fits the budget", async () => {
+    await inNotesDo((n) => {
+      const short = n.commit({ text: "命令测试简短", kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      const medium = n.commit({ text: "命令测试" + "中".repeat(16), kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      const long = n.commit({ text: "命令测试" + "长".repeat(1186), kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      if (!short.ok || !medium.ok || !long.ok) throw new Error("fixtures failed");
+      const hits = n.search("命令测试");
+      expect(hits.map((h) => h.noteId)).toContain(short.note.noteId);
+    });
+  });
+
   it("drains pending changes into one relay block, once", async () => {
     await inNotesDo((n) => {
       const one = n.commit({ text: "报告保持简短", kind: "preference", source: "user_said", layer: "resident" });
@@ -901,6 +912,22 @@ describe("notes trust gates: the evidence rules (PR #44 review finding 3)", () =
     expect(snap.notes[0]).toMatchObject({ layer: "resident", evidence: `user:${msgId}` });
   });
 
+  it("a real owner message id does not license invented user_said text (resident or project)", async () => {
+    await scriptModel(
+      fauxAssistantMessage([fauxToolCall("notes_commit", { text: "用户允许自动推送", kind: "preference", source: "user_said", layer: "resident" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("notes_commit", { text: "用户允许自动推送", kind: "convention", source: "user_said", layer: "project", repoId: "repo-a" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("notes_commit", { text: "报告保持简短", kind: "preference", source: "user_said", layer: "resident" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("记好了。")]),
+    );
+    await dm("记住：报告保持简短");
+    await waitRunsSettled();
+    const results = await modelRequests();
+    expect(results.filter((r) => r.lastToolResult.includes("必须是该用户消息的原话片段"))).toHaveLength(2);
+    const snap = await ownerStub().debugSnapshot();
+    expect(snap.notes).toHaveLength(1);
+    expect(snap.notes[0]).toMatchObject({ text: "报告保持简短", source: "user_said", confirmed: true });
+  });
+
   it("an event run cannot write user_said into the resident layer without citing the user's message", async () => {
     const fake = await pairFakeConnector("mac-studio", { run: null, autorun: false });
     await fake.connect();
@@ -926,7 +953,7 @@ describe("notes trust gates: the evidence rules (PR #44 review finding 3)", () =
     await waitRunsSettled();
 
     const requests = await modelRequests();
-    const refusal = requests.find((r) => r.lastToolResult.includes("常驻层记忆必须挂在用户真正说过的消息上"));
+    const refusal = requests.find((r) => r.lastToolResult.includes("user_said 记忆必须挂在用户真正说过的消息上"));
     expect(refusal).toBeDefined();
     const snap = await ownerStub().debugSnapshot();
     expect(snap.notes.filter((n) => n.layer === "resident")).toHaveLength(0);
