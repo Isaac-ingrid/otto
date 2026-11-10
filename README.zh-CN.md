@@ -118,7 +118,7 @@ Cloudflare 是默认形态而不是前置条件：`apps/steward/node-host/` 用 
 - [部署指南](docs/deploy.md)：手动部署、模型配置、自定义域名、费用和更新。
 - [自托管操作手册](docs/self-hosted.md)：在自己的机器上跑同一个 steward——systemd、nginx、TLS、备份与升级。
 - [使用说明与 API](docs/usage.md)：Owner API、本地 agent 行为和会话查看。
-- [架构设计](docs/design/steward.md) · [产品规格](docs/spec.md) · [路由评测](docs/routing-eval.md)：面向贡献者。
+- [架构设计](docs/design/steward.md) · [产品规格](docs/spec.md) · [路由评测](docs/routing-eval.md) · [记忆评测](docs/memory-eval.md)：面向贡献者。
 
 ## 许可证
 

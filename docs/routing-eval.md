@@ -32,6 +32,10 @@ Results land in `eval/results/` as JSON (committed files are named baselines; ti
 ones are ad-hoc). **Exit code 0 only when all three thresholds are met** — wire it into the
 merge check as `pnpm --filter @shepherd/steward eval:routing`.
 
+> Memory has its own gate, built the opposite way (deterministic, no key, all-or-nothing):
+> [memory-eval.md](memory-eval.md). Routing asks *how often* the model is right; memory asks whether
+> a boundary holds at all.
+
 ## The metrics (steward.md §3.4)
 
 | Metric | Definition | Target |

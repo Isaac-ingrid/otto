@@ -746,16 +746,27 @@ export function createNotes(deps: NotesDeps) {
     });
 
   /** `evidence` is the user message that carried the confirmation (verified one layer up);
-   *  it rides the log row so a later promotion's provenance stays traceable. */
-  const confirm = (noteId: string, evidence?: string): { ok: boolean; changes: ChangeReport[] } =>
+   *  it rides the log row so a later promotion's provenance stays traceable.
+   *
+   *  History cannot be confirmed (memory-trust review): a `superseded` row is no longer the
+   *  current fact, so a confirmation spent on it would authorize nothing — and worse, it
+   *  could be laundered back through the promotion path. Only the current version is
+   *  confirmable; the caller hears which case it hit. */
+  const confirm = (
+    noteId: string,
+    evidence?: string,
+  ): { ok: true; changes: ChangeReport[] } | { ok: false; reason: "missing" | "removed" | "superseded" | "already" } =>
     tx(() => {
       const note = noteById(noteId);
-      if (!note || note.status === "removed" || note.confirmed) return { ok: note !== null, changes: [] };
+      if (!note) return { ok: false as const, reason: "missing" as const };
+      if (note.status === "removed") return { ok: false as const, reason: "removed" as const };
+      if (note.status === "superseded") return { ok: false as const, reason: "superseded" as const };
+      if (note.confirmed) return { ok: false as const, reason: "already" as const };
       sql`
         UPDATE sh_note SET confirmed = 1, confirmedBy = COALESCE(${evidence ?? null}, confirmedBy), lastUsedAt = ${now()}
         WHERE noteId = ${noteId}
       `;
-      return { ok: true, changes: [log("confirmed", note, evidence ? `confirmed_by:${evidence}` : "owner_confirmed")] };
+      return { ok: true as const, changes: [log("confirmed", note, evidence ? `confirmed_by:${evidence}` : "owner_confirmed")] };
     });
 
   const pin = (noteId: string, pinned: boolean): { ok: boolean; changes: ChangeReport[] } =>

@@ -121,7 +121,7 @@ The Cloudflare binding is the default, not a requirement: `apps/steward/node-hos
 - [Deployment guide](docs/deploy.md) — manual deployment, model configuration, custom domains, costs, and updates.
 - [Self-hosted runbook](docs/self-hosted.md) — the same steward on your own box: systemd, nginx, TLS, backups, upgrades.
 - [Usage and API](docs/usage.md) — owner API, local agent behavior, and session viewing.
-- [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Routing eval](docs/routing-eval.md) — for contributors.
+- [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Routing eval](docs/routing-eval.md) · [Memory eval](docs/memory-eval.md) — for contributors.
 
 ## License
 

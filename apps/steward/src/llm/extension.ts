@@ -852,7 +852,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   const notesConfirm = defineTool({
     name: "notes_confirm",
     description:
-      "用户确认了某条待确认记忆（worker 汇报/推断来源）。evidenceRef 必须是用户说确认的那条消息（user:<om_…>），且必须晚于笔记创建（「记账」先告知、用户再确认——引用更早的消息不算确认）。确认后方可提升常驻层（notes_commit + supersedes，且必须是同一条内容）。",
+      "用户确认了某条待确认记忆（worker 汇报/推断来源）。evidenceRef 必须是用户说确认的那条消息（user:<om_…>），且必须晚于笔记创建（「记账」先告知、用户再确认——引用更早的消息不算确认）。确认后方可提升常驻层（notes_commit + supersedes，且必须是同一条内容）。已被取代的历史版本不能被确认：那不是当前事实，先找到当前版本。",
     parameters: Type.Object({
       noteId: Type.String(),
       evidenceRef: Type.String({ description: "用户确认消息：user:<om_…>" }),
@@ -862,6 +862,11 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       const note = ctx.ledger.notes.get(args.noteId);
       if (!note) return err(`笔记 ${args.noteId} 不存在。`);
       if (note.status === "removed") return err(`笔记 ${args.noteId} 已被删除。`);
+      if (note.status === "superseded") {
+        return err(
+          `refused: ${args.noteId} 是已被取代的历史版本（不再是当前事实），确认它没有意义。用 notes_search 找当前版本；用户说的是新情况就按新内容记一条。`,
+        );
+      }
       if (note.confirmed) return ok("已是确认状态。");
       const receivedAt = await ctx.messageReceivedAt(args.evidenceRef);
       if (receivedAt === null) {
@@ -873,7 +878,17 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (receivedAt <= note.createdAt) {
         return err("refused: 确认消息必须晚于笔记创建（用户先看到「记账」才能确认）。");
       }
-      ctx.ledger.notes.confirm(args.noteId, args.evidenceRef);
+      const confirmed = ctx.ledger.notes.confirm(args.noteId, args.evidenceRef);
+      if (!confirmed.ok) {
+        // The module re-decides under the write (the row can sink between the read above and
+        // the UPDATE) — report what actually happened, not what we hoped.
+        if (confirmed.reason === "superseded") {
+          return err(`refused: ${args.noteId} 已被更新的记忆取代，确认历史版本没有意义。用 notes_search 找当前版本。`);
+        }
+        if (confirmed.reason === "already") return ok("已是确认状态。");
+        if (confirmed.reason === "removed") return err(`笔记 ${args.noteId} 已被删除。`);
+        return err(`笔记 ${args.noteId} 不存在。`);
+      }
       return ok("已确认。现在可以用 notes_commit（supersedes 指向它）提升到常驻层。");
     },
   });

@@ -297,6 +297,8 @@ Re-run this evaluation set whenever the model, prompts, or candidate-assembly ru
 > live). `pnpm --filter @isaac2ingrid/steward eval:routing` enforces the thresholds as the exit
 > code — the required merge check for routing changes per ADR-0001 decision 14. Recorded
 > runs, the key handling, and the OpenAI-compatible `--endpoint` override: [routing-eval.md](../routing-eval.md).
+> The memory trust boundary has its own deterministic, no-key gate — `pnpm eval:memory`,
+> [memory-eval.md](../memory-eval.md).
 
 ## 4. The steward (LLM)
 

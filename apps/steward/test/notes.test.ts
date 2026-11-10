@@ -280,7 +280,7 @@ describe("notes unit: trust rules", () => {
 
       // Confirmation flips the flag; a resident commit replacing it is then allowed.
       const confirmed = n.confirm(parked.ok ? parked.note.noteId : "");
-      expect(confirmed.changes.map((c) => c.op)).toEqual(["confirmed"]);
+      expect(confirmed.ok ? confirmed.changes.map((c) => c.op) : []).toEqual(["confirmed"]);
       const promoted = n.commit(
         { text: "这个仓库用 pnpm", kind: "convention", source: "worker_reported", layer: "resident", confirmed: true },
       );
@@ -503,6 +503,24 @@ describe("notes unit: eviction ordering", () => {
         expect(bad.message).toContain("不在本层");
       }
       expect(n.get(parked.note.noteId)).toMatchObject({ layer: "project", status: "active" });
+    });
+  });
+
+  it("history cannot be confirmed: a superseded row is not the current fact", async () => {
+    await inNotesDo((n) => {
+      const parked = n.commit({ text: "这个仓库用 npm", kind: "convention", source: "worker_reported", layer: "project", scopeRepoId: "repo-a" });
+      if (!parked.ok) throw new Error(parked.message);
+      const next = n.commit(
+        { text: "这个仓库用 pnpm", kind: "convention", source: "worker_reported", layer: "project", scopeRepoId: "repo-a" },
+        { supersedes: [parked.note.noteId] },
+      );
+      expect(next.ok).toBe(true);
+      // The predecessor is still reachable (traceability) but a confirmation spent on it
+      // would authorize nothing — and could be laundered back through the promotion path.
+      expect(n.confirm(parked.note.noteId, "user:om_late")).toMatchObject({ ok: false, reason: "superseded" });
+      expect(n.get(parked.note.noteId)).toMatchObject({ status: "superseded", confirmed: false });
+      // The current version is the confirmable one.
+      expect(n.confirm(next.ok ? next.note.noteId : "").ok).toBe(true);
     });
   });
 });
