@@ -1,12 +1,12 @@
 # Deploying Otto
 
-A Otto deployment lives entirely in **your own Cloudflare account**: one Worker (the steward, with its Durable Object), no third-party service in the middle. Around it you connect machines, each running a small connector process. This guide walks the whole path: deploy → custom domain → model key → connector, then everything operational (costs, secret rotation, updates).
+Otto's primary deployment is a **Node process you own**: the steward runs beside a single SQLite file on a small always-on server (VPS), and each computer you connect runs a small connector process. That path is [running Otto on your own machine](self-hosted.md) — start there.
+
+This page covers the **alternative** shape: the whole deployment inside **your own Cloudflare account** (one Worker, with its Durable Object, no third-party service in the middle). Both shapes run the same steward, the same workspace and the same connector. This guide walks the Cloudflare path end to end: deploy → custom domain → model key → connector, then everything operational (costs, secret rotation, updates).
 
 Open the deployment URL to use the web workspace. Sign in with your deployment password or a registered passkey. Existing deployments can also use their `SERVER_KEY`-gated [owner API](usage.md#the-owner-api). [ADR-0010](adr/0010-browser-password-authentication.md) describes browser authentication and recovery.
 
-Cloudflare is one of two shapes. If you would rather not use it at all, the same steward runs as a single Node process beside its SQLite file on a machine you own — same workspace, same connector, no `wrangler`: [running Otto on your own machine](self-hosted.md).
-
-## Two ways to deploy
+## Two ways to deploy to Cloudflare
 
 - **From a checkout** — deploy from your local clone straight into your own account. The hosted Deploy-to-Cloudflare button needs a public mirror of this repository; [ADR-0012](adr/0012-deploy-button-primary.md) records that channel.
 - **With your coding agent** — the guided channel ([ADR-0007](adr/0007-agent-driven-deploy.md)): end-to-end verification, custom domains where workers.dev is unreachable, and agent-operated setups. Use the [prompts in the README](../README.md#get-started): [agent-deploy.md](agent-deploy.md) deploys Otto, configures the secrets, and opens the workspace; [agent-connect.md](agent-connect.md) installs and pairs each machine separately. `npm run deploy -- --name <name>` wraps the deploy step.

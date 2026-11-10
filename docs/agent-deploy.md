@@ -1,6 +1,6 @@
 # Agent deploy runbook
 
-You are a coding agent helping the owner deploy Otto to their own Cloudflare account. This runbook ends with a working personal agent and an open web workspace. Connecting computers is a separate step: use [agent-connect.md](agent-connect.md) on each target machine afterwards. Follow this runbook top to bottom, verify each numbered step before moving on, and report each step in one line as you complete it. Anything unexpected: surface it, don't improvise around it.
+You are a coding agent helping the owner deploy Otto to their own Cloudflare account. This is the **alternative** shape; the primary one is the steward as a single Node process on a server the owner controls, which has its own runbook ([self-hosted.md](self-hosted.md)). This runbook ends with a working personal agent and an open web workspace. Connecting computers is a separate step: use [agent-connect.md](agent-connect.md) on each target machine afterwards. Follow this runbook top to bottom, verify each numbered step before moving on, and report each step in one line as you complete it. Anything unexpected: surface it, don't improvise around it.
 
 Decisions behind the flow: [ADR-0010](adr/0010-browser-password-authentication.md) defines browser sign-in and key ownership. [ADR-0007](adr/0007-agent-driven-deploy.md) defines agent-guided deployment.
 

@@ -1,8 +1,6 @@
 # Running Otto on your own machine
 
-Otto deploys to Cloudflare by default ([deploy.md](deploy.md)). This page is the other shape: the
-same steward running as a **single Node process** on a VPS, a home server, or a laptop — no
-Cloudflare account, no `wrangler`, one SQLite file you can copy.
+Otto's primary shape is the one on this page: the steward as a **single Node process** on a VPS, a home server, or a laptop — one SQLite file you can copy and back up, no Cloudflare account, no `wrangler`. The same steward also runs on Cloudflare ([deploy.md](deploy.md)) for owners who prefer a managed edge deployment; that is the alternative, and nothing below depends on it.
 
 It is not a port. `apps/steward/node-host/` supplies the four platform APIs the steward uses —
 SQLite storage, a durable alarm timer, `WebSocketPair`, and an `env` object — so `src/` runs

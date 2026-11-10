@@ -18,7 +18,7 @@ Otto is a **self-hosted personal agent** with an **always-on steward in the clou
 
 ## Get started
 
-You need an **always-on cloud server** for the steward (Linux with Node.js 24, a service manager, persistent storage and an HTTPS address that your computers can reach). Build with the pnpm version pinned in [`package.json`](package.json) (install Corepack if `corepack` is unavailable); enter the steward's model-provider API key in the workspace after sign-in. Each connector computer needs **Node.js 22.18+**, macOS or Linux, and a separately installed and authenticated coding agent. Otto's model key does not configure the local agent.
+You need an **always-on cloud server** for the steward (Linux with Node.js 24, a service manager, persistent storage and an HTTPS address that your computers can reach). Build with the pnpm version pinned in [`package.json`](package.json) (install Corepack if `corepack` is unavailable); enter the steward's model-provider API key in the workspace after sign-in. Each connector computer needs **Node.js 22.18+** — macOS, Linux or Windows — and a separately installed and authenticated coding agent. Otto's model key does not configure the local agent.
 
 ### 1. Deploy the steward to your cloud server
 
@@ -39,7 +39,7 @@ Open **your server's HTTPS address**, sign in and enter the steward's model API 
 
 ### 2. Connect a computer
 
-On a macOS or Linux computer with Node.js 22.18+ and a configured local coding agent, install the published connector:
+On a macOS, Linux or Windows computer with Node.js 22.18+ and a configured local coding agent, install the published connector:
 
 ```sh
 npm install --global @isaac2ingrid/otto
@@ -53,7 +53,13 @@ otto connect <your-otto-url> <one-time-pairing-code>
 otto status
 ```
 
-The code expires after 10 minutes and is single-use; keep it out of chat and logs. Pairing installs and starts a background service (launchd on macOS, systemd user service on Linux). The connector calls out to Otto, so the computer needs no inbound port. In **Machines**, add only the local directories you want Otto to work in, then try a small read-only pi task. Run `otto logs -n 50` if the machine does not show online. It must stay awake and connected while working. For a proxy, a host without a service manager, or a source installation, see the [connector runbook](docs/agent-connect.md).
+The code expires after 10 minutes and is single-use; keep it out of chat and logs. Pairing installs and starts a background service — launchd on macOS, a systemd user service on Linux. **On Windows there is no background service yet**, so pair and run with `--foreground` in a terminal that stays open:
+
+```sh
+otto connect <your-otto-url> <one-time-pairing-code> --foreground
+```
+
+The connector calls out to Otto, so the computer needs no inbound port. In **Machines**, add only the local directories you want Otto to work in, then try a small read-only pi task. `otto status` prints the agent Otto will actually run (useful on Windows, where `pi` is a `.cmd` shim); `otto logs -n 50` shows why a machine did not come online. It must stay awake and connected while working. For a proxy, a host without a service manager, or a source installation, see the [connector runbook](docs/agent-connect.md).
 
 **Done when:** the machine and its chosen directories appear online and the test task returns a result. Repeat for each computer.
 

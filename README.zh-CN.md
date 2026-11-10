@@ -18,7 +18,7 @@ Otto 是一个**自行托管的个人智能体**：**总管部署在你自己的
 
 ## 开始使用
 
-你需要一台**长期在线的云服务器**运行总管（Linux、Node.js 24、服务管理器、持久磁盘和各台电脑可访问的 HTTPS 地址）。构建时使用 [`package.json`](package.json) 锁定的 pnpm 版本（若没有 `corepack` 命令，请先安装 Corepack）；登录后在工作台填写总管的模型 API key。连接器所在电脑需要 **Node.js 22.18+**、macOS 或 Linux，以及另行安装并完成登录／模型配置的本地 coding agent。总管的模型密钥不会替本地 agent 配置模型。
+你需要一台**长期在线的云服务器**运行总管（Linux、Node.js 24、服务管理器、持久磁盘和各台电脑可访问的 HTTPS 地址）。构建时使用 [`package.json`](package.json) 锁定的 pnpm 版本（若没有 `corepack` 命令，请先安装 Corepack）；登录后在工作台填写总管的模型 API key。连接器所在电脑需要 **Node.js 22.18+**（macOS、Linux 或 Windows），以及另行安装并完成登录／模型配置的本地 coding agent。总管的模型密钥不会替本地 agent 配置模型。
 
 ### 1. 把总管部署到云服务器
 
@@ -39,7 +39,7 @@ cp -R apps/steward/ui/. apps/steward/dist/ui/
 
 ### 2. 连接电脑
 
-在装有 Node.js 22.18+ 和已配置好的本地 coding agent 的 macOS 或 Linux 电脑上，安装已发布的连接器：
+在装有 Node.js 22.18+ 和已配置好的本地 coding agent 的 macOS、Linux 或 Windows 电脑上，安装已发布的连接器：
 
 ```sh
 npm install --global @isaac2ingrid/otto
@@ -53,7 +53,13 @@ otto connect <你的-Otto-地址> <一次性配对码>
 otto status
 ```
 
-配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务）。连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后用 pi 试一个小的只读任务。如果机器没有显示在线，用 `otto logs -n 50` 排查；执行任务时电脑需要保持唤醒和联网。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
+配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务）。**Windows 目前还没有后台服务**，请在保持开启的终端里用 `--foreground` 运行：
+
+```sh
+otto connect <你的-Otto-地址> <一次性配对码> --foreground
+```
+
+连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后用 pi 试一个小的只读任务。`otto status` 会打印 Otto 实际要启动的 agent 命令（Windows 上 `pi` 是 `.cmd` 垫片，这一行很有用）；机器没上线的排查用 `otto logs -n 50`；执行任务时电脑需要保持唤醒和联网。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
 
 **完成标志：** 机器和选定目录显示在线，测试任务返回结果。其他电脑重复这一步。
 
