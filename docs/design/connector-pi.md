@@ -434,11 +434,11 @@ Settled by [ADR-0018](../adr/0018-native-windows-connector.md). The design above
 
 | Seam | POSIX | Windows |
 |---|---|---|
-| Launching the agent (§4.2) | spawn the bare `pi` name, kernel resolves PATH | `pi-launch.ts`: native `pi.exe` → the real JS entry behind the `pi.cmd`/`pi` shim (run with the connector's own node) → `cmd.exe` last resort. A single bare command name is the only thing rewritten; a path, an `.exe`, an explicit `command` or `OTTO_PI_COMMAND` passes through |
+| Launching the agent (§4.2) | spawn the bare `pi` name, kernel resolves PATH | `pi-launch.ts`: native `pi.exe` → the real JS entry behind the `pi.cmd`/`pi` shim (run with the connector's own node) → **refuse** (`windows-unresolved`) when neither exists, because Node cannot start a `.cmd`/`.bat` and a shell would re-parse our whole command line. A refusal makes `otto status`/`otto doctor`/the daemon boot line report the reason, and a worker start fail with it instead of spawning an unstartable name. A single bare command name is the only thing rewritten; a path, an `.exe`, an explicit `command` or `OTTO_PI_COMMAND` passes through |
 | Descendants and pid identity (§4.3, §9.3) | `ps -axo pid=,ppid=,lstart=` | one `Get-CimInstance Win32_Process` query (`win32.ts`), cached per sweep; the creation timestamp plays `lstart`'s role |
 | Session holders (§10) | `/proc/<pid>/cmdline` or `ps -axo pid=,args=` | the same table's command line; quoted paths stay whole, `.exe` is stripped before the viewer denylist |
 | Termination (§4.3, §9.3) | `SIGTERM`, then `SIGKILL` | `taskkill /PID <pid> /T [/F]` — the run is a tree, and a single signal reaches only node |
 
 The stall watchdog (§12) measures tree CPU the same way on both platforms, but on Windows each of the two samples takes one fresh table: a cached snapshot would make the delta exactly zero, which reads as a cold tree and would respawn a healthy worker. A member that cannot be read yields no sample at all, never a low one.
 
-Background lifecycle: none on Windows yet. `otto connect --foreground` is the supported shape (a per-user logon autostart is a later phase; session 0 is rejected because the agent is an interactive, user-profile program). Operators see the resolved launch in `otto status`.
+Background lifecycle: none on Windows yet. `otto connect --foreground` is the supported shape (a per-user logon autostart is a later phase; session 0 is rejected because the agent is an interactive, user-profile program). Operators see the resolved launch in `otto status`; when it reads `windows-unresolved` or `NOT SPAWNABLE`, no task should be dispatched until `OTTO_PI_COMMAND` names a startable argv.

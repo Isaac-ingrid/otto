@@ -31,16 +31,23 @@ until a per-user logon autostart exists.
 
 1. **Resolve the agent launch instead of shelling out.** `pi-launch.ts` turns the bare command
    name into an argv Windows can spawn: a native `pi.exe` if present, otherwise the real
-   JavaScript entry read out of the shim and run with the connector's **own** node, and only as a
-   last resort `cmd.exe /d /s /c <shim>`. `stdio` pipes and argv stay byte-exact in the first two
-   shapes; the shell fallback is the shape that can re-quote an argument, which is why it is last.
-   Resolution is deliberately narrow: only a single bare command name is rewritten. An explicit
-   `command` option (tests, embedders), a path, or an `.exe` is returned untouched, and
-   `OTTO_PI_COMMAND` remains the escape hatch for installs that are not on `PATH`.
+   JavaScript entry read out of the shim and run with the connector's **own** node. `stdio` pipes
+   and argv stay byte-exact in both shapes. The third shape is a **refusal**, not a launch: a shim
+   that is neither a native binary nor readable as a JavaScript entry (a `.bat` with its own
+   logic, a PowerShell shim, a broken install) resolves to `windows-unresolved` with the reason,
+   `argv` stays the untouched command, and every spawn path fails with that reason instead of
+   falling back to `cmd.exe`. Resolution is deliberately narrow: only a single bare command name
+   is rewritten. An explicit `command` option (tests, embedders), a path, or an `.exe` is
+   returned untouched, and `OTTO_PI_COMMAND` remains the escape hatch for installs that are not on
+   `PATH` — including a wrapper a human deliberately wants a shell to run
+   (`OTTO_PI_COMMAND="cmd /c C:\path\pi.bat"`).
    The Claude adapter resolves through the same path (npm installs `claude.cmd` too), and
    `detectClaude` resolves before `spawnSync` for the same reason.
    *Why:* the alternative — always going through `cmd.exe` — re-quotes session paths, extension
-   paths and worktree paths, which is the fragile path the spike's protocol work avoided.
+   paths and worktree paths, which is the fragile path the spike's protocol work avoided. A
+   shell fallback would therefore be a silent, argument-mangling launch chosen automatically,
+   and it is the one shape whose failure cannot be told from a bad install; refusing keeps the
+   diagnosis (and the fix, which is an explicit `OTTO_PI_COMMAND`) in the operator's hands.
 
 2. **One process table per sweep, read through Win32_Process.** `win32.ts` runs a single
    `Get-CimInstance Win32_Process` query (PowerShell, falling back to `pwsh`; `wmic` is gone in
@@ -78,11 +85,13 @@ until a per-user logon autostart exists.
    program.
 
 7. **`otto status` prints the resolved agent launch, and checks that it can be spawned.** One
-   line — source, detail, and `NOT SPAWNABLE: …` when the executable it names does not exist — so
-   "pi works in my shell but otto cannot start it" is diagnosable before a task is dispatched
-   rather than after, from a worker's stderr. `otto doctor` fails the same check, and the daemon's
-   `daemon_start` line records the resolved argv. A wrong `OTTO_PI_COMMAND` (a spaced path whose
-   inner quotes were lost) used to reach the user as "the task failed" with no reason.
+   line — source, detail, and `NOT SPAWNABLE: …` when the executable it names does not exist, or
+   the resolution's own refusal when it produced no launchable argv at all — so "pi works in my
+   shell but otto cannot start it" is diagnosable before a task is dispatched rather than after,
+   from a worker's stderr. `otto doctor` fails the same check, the daemon's `daemon_start` line
+   records the resolved argv (and the refusal, if any), and both adapters refuse to spawn a
+   refused launch. A wrong `OTTO_PI_COMMAND` (a spaced path whose inner quotes were lost) used to
+   reach the user as "the task failed" with no reason.
 
 8. **Testing is platform-parameterized, and Windows is a CI target.** New platform code takes its
    platform, environment and subprocess runners as injectable dependencies, so the Windows
