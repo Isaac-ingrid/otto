@@ -452,3 +452,12 @@ verified on the machine); `otto stop` keeps it down across the next logon until 
 start (decision 10). What is still to be run is the one check no unit test can stand in for: a real
 logoff/logon (and one real reboot) with the autostart installed, after which the machine must be
 online in the workspace with no terminal opened.
+
+**Deferred (2026-11-10).** The owner does not log off in normal use, and doing it deliberately costs
+the terminal that would verify the result — so the launcher's own path was exercised the other way
+instead: running the generated `otto-daemon.vbs` by hand put a new supervisor and child in place and
+took over `daemon.lock`, which is everything the Run key does except the Run key firing. What remains
+untested is therefore only whether Windows runs it at logon. Keep that check opportunistic: after the
+next ordinary reboot, `otto status` must show a `service:`/`daemon:` pair whose pids and start time
+are newer than the logon, and `supervisor.log` must gain a `supervising … as pid N` line. The "online
+with no terminal" half is separate and still blocked on replacing the tunnel (phase 3).
