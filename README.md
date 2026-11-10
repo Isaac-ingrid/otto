@@ -8,8 +8,9 @@
 
 <p align="center">English · <a href="README.zh-CN.md">简体中文</a></p>
 
-Otto is a **self-hosted personal agent**. Its steward runs as a Node.js process with SQLite state; connectors on your computers run local coding agents in the repositories you choose. Talk to Otto in its web workspace, ask it to work on a task, and pick up the same conversation later from another device.
+Otto is a **self-hosted personal agent** with an **always-on steward in the cloud**. Run the steward 24/7 on your own cloud server (VPS) as a Node.js process with SQLite state. Connectors on your computers run local coding agents in the repositories you choose. Talk to Otto in its web workspace, ask it to work on a task, and pick up the same conversation later from another device.
 
+- **An always-on coordinator.** The steward stays online on your VPS even when your computers are asleep; it keeps conversations, memory and scheduled follow-ups. Local coding work waits for an available connector.
 - **One conversation across machines.** Tasks, decisions, follow-ups and progress stay together.
 - **Your code stays on your machines.** A connector runs pi (or an installed Claude Code) locally; full coding-agent session records stay there.
 - **Memory with boundaries.** Otto keeps preferences and project conventions separately from conversation history. It tracks their source and confirmation, and distinguishes replacing an outdated fact from merely making room.
@@ -17,28 +18,24 @@ Otto is a **self-hosted personal agent**. Its steward runs as a Node.js process 
 
 ## Get started
 
-You need **Node.js 24** for the steward, the pnpm version pinned in [`package.json`](package.json) for building (install Corepack if `corepack` is unavailable), and a model-provider API key (entered in the workspace after sign-in). A computer running the connector needs **Node.js 22.18+**, macOS or Linux, and a separately installed and authenticated coding agent. Otto's model key does not configure the local agent.
+You need an **always-on cloud server** for the steward (Linux with Node.js 24, a service manager, persistent storage and an HTTPS address that your computers can reach). Build with the pnpm version pinned in [`package.json`](package.json) (install Corepack if `corepack` is unavailable); enter the steward's model-provider API key in the workspace after sign-in. Each connector computer needs **Node.js 22.18+**, macOS or Linux, and a separately installed and authenticated coding agent. Otto's model key does not configure the local agent.
 
-### 1. Run the steward
+### 1. Deploy the steward to your cloud server
 
-From a checkout, build and try it on your own machine:
+Build from a checkout on a machine with enough memory (this can be your development computer; a small VPS need not build the bundle itself):
 
 ```sh
 corepack pnpm install --frozen-lockfile
 corepack pnpm --filter @isaac2ingrid/steward build:node
 mkdir -p apps/steward/dist/ui
 cp -R apps/steward/ui/. apps/steward/dist/ui/
-cp .dev.vars.example .dev.vars
-# Edit .dev.vars: set LOGIN_PASSWORD to a unique password of at least 15 characters.
-HOST=127.0.0.1 PORT=8787 OTTO_CONFIG_DIR="$PWD" OTTO_DB_PATH="$PWD/apps/steward/data/steward.sqlite" \
-  node apps/steward/dist/node/steward-node.mjs
 ```
 
-Open <http://127.0.0.1:8787>, sign in and enter the steward's model API key in **Settings**. Do not commit `.dev.vars` or send passwords or keys through chat. This loopback-only example is for local use; it is **not** reachable by connectors on other machines.
+Then follow the [cloud-server runbook](docs/self-hosted.md) to install **`apps/steward/dist/node/steward-node.mjs`, `dist/ui/` and the `ws` runtime dependency** on the server. Set a unique `LOGIN_PASSWORD` of at least 15 characters in its protected `.dev.vars`; set `OTTO_CONFIG_DIR` and `OTTO_DB_PATH` explicitly. Run the process under systemd (automatic restart), bind it to loopback, and put an HTTPS reverse proxy with WebSocket forwarding in front. Keep the VPS and its persistent disk running **24/7**; back up the live SQLite database with SQLite's online backup, not a plain copy while WAL is active. Do not commit secrets or send them through chat.
 
-For a persistent, remotely reachable installation, follow the [self-hosted runbook](docs/self-hosted.md): deploy the bundle **and `dist/ui` and the `ws` runtime dependency**, use a service and a private SQLite data directory, and expose the workspace through HTTPS with WebSocket forwarding (or use an SSH tunnel for local access). Set `OTTO_CONFIG_DIR` and `OTTO_DB_PATH` explicitly. Back up a live SQLite database using SQLite's online backup, not a plain copy of its WAL file.
+Open **your server's HTTPS address**, sign in and enter the steward's model API key in **Settings**. The server must be reachable from every computer you want to connect; an SSH tunnel to a loopback-only address is useful for private access, but not a public connector endpoint.
 
-**Done when:** the workspace opens and Otto replies to a message. You can chat before adding any machines.
+**Done when:** the workspace is reachable at its intended address and Otto replies to a message. You can chat before adding any machines.
 
 ### 2. Connect a computer
 
@@ -74,13 +71,13 @@ The workspace brings together messages, task threads, decisions, connected machi
 
 ## How it works
 
-**You → Otto (Node.js + SQLite) → outbound WebSocket → connector → pi / Claude Code**
+**You → Otto on your always-on cloud server (Node.js + SQLite) ← outbound WebSocket from each computer's connector → pi / Claude Code**
 
-The steward coordinates conversations, tasks and governed memory; the connector starts coding-agent sessions and relays their progress. The steward's state lives in SQLite on **your host**, so you operate and back it up yourself. Repository contents and full local agent sessions stay on the computer running the connector. The steward and local agents each use their own configured model provider.
+The VPS steward stays available for conversations, memory and scheduling around the clock; connectors initiate outbound connections to it and start coding-agent sessions only when their computers are online. The steward's state lives in SQLite on **your server**, so you operate and back it up yourself. Repository contents and full local agent sessions stay on the computer running the connector. The steward and local agents each use their own configured model provider.
 
 ## Documentation
 
-- [Self-hosted runbook](docs/self-hosted.md) — service, reverse proxy, TLS, upgrades and backups.
+- [Cloud-server runbook](docs/self-hosted.md) — service, reverse proxy, TLS, upgrades and backups.
 - [Connector runbook](docs/agent-connect.md) — pairing, directories, proxies and diagnostics.
 - [Usage and API](docs/usage.md) — owner API, local agent behavior and session viewing.
 - [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Routing eval](docs/routing-eval.md) · [Memory eval](docs/memory-eval.md) — for contributors.
