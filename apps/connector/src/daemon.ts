@@ -8,7 +8,7 @@ import type { AgentAdapter } from "./agent.ts";
 import { ConnectorApp } from "./connector-app.ts";
 import { installAssets } from "./install.ts";
 import { Logger } from "./logger.ts";
-import { checkLaunchSpawnable, piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
+import { launchCheck, piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
 import { applyProxy, proxyLogFields, resolveProxyConfig } from "./proxy.ts";
 import { LocalStore } from "./store.ts";
 import { VERSION } from "./version.ts";
@@ -55,7 +55,7 @@ export async function runDaemon(options: DaemonOptions): Promise<DaemonHandle> {
   // OTTO_PI_COMMAND whose spaced path lost its quotes) the only other trace is a worker's
   // stderr, logged after the task was already dispatched (2026-11-10).
   const piLaunch = resolveExecutableLaunch(piCommandFromEnv() ?? ["pi"]);
-  const piCheck = checkLaunchSpawnable(piLaunch.argv);
+  const piCheck = launchCheck(piLaunch);
   logger.info("daemon_start", {
     version: VERSION,
     pid: process.pid,
@@ -69,6 +69,7 @@ export async function runDaemon(options: DaemonOptions): Promise<DaemonHandle> {
     pi: piLaunch.source,
     piArgv: piLaunch.argv,
     piDetail: piLaunch.detail ?? null,
+    piError: piLaunch.error ?? null,
     piSpawnable: piCheck.ok,
   });
 

@@ -11,8 +11,9 @@
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 
-/** How the final argv was obtained; logged and surfaced by `otto doctor`. */
-export type LaunchSource = "as-is" | "windows-node-entry" | "windows-exe" | "windows-shell";
+/** How the final argv was obtained; logged and surfaced by `otto doctor`. `windows-unresolved`
+ *  is a refusal rather than a launch (see `resolveExecutableLaunch`'s last resort). */
+export type LaunchSource = "as-is" | "windows-node-entry" | "windows-exe" | "windows-unresolved";
 
 export interface LaunchResolution {
   /** The argv prefix PiProcess should spawn (its own args are appended after this). */
@@ -20,14 +21,15 @@ export interface LaunchResolution {
   source: LaunchSource;
   /** The resolved file/command, for diagnostics. */
   detail?: string;
+  /** Set when no spawnable argv exists. `argv` is then the untouched command and callers must
+   *  not spawn it — the resolution is a diagnosis, not a launch. */
+  error?: string;
 }
 
 export interface LaunchDeps {
   platform?: NodeJS.Platform;
   /** node used to run a resolved JS entry; default process.execPath. */
   nodePath?: string;
-  /** Shell used only for the last-resort shim fallback; default %ComSpec%. */
-  comspec?: string;
   env?: Record<string, string | undefined>;
   fileExists?: (path: string) => boolean;
   readFile?: (path: string) => string;
@@ -148,12 +150,23 @@ export function resolveExecutableLaunch(command: string[], deps: LaunchDeps = {}
     const entry = jsEntryFromShim(candidate, deps);
     if (entry) return { argv: [nodePath, entry], source: "windows-node-entry", detail: entry };
   }
-  // Last resort: let cmd.exe run the shim. Our argv travels as one command line, so arguments
-  // containing cmd metacharacters are a known risk — hence the preference order above.
+  // Last resort: the shim exists but is not a native binary and its JS entry could not be read
+  // (a `.bat` wrapper with its own logic, a PowerShell shim, a broken install). Refuse instead
+  // of handing our argv to cmd.exe: Node cannot start a `.cmd`/`.bat` without a shell
+  // (CVE-2024-27980), and `cmd /d /s /c <shim> <our args>` re-parses the whole command line —
+  // which is how probe/session/extension paths get mangled, and how a task's text could reach
+  // a shell. A refusal is diagnosable; a silently re-quoted spawn is not.
   const shim = candidates.find((candidate) => /\.(cmd|bat)$/i.test(candidate)) ?? candidates[0];
   if (shim) {
-    const comspec = deps.comspec ?? (deps.env ?? process.env).ComSpec ?? "cmd.exe";
-    return { argv: [comspec, "/d", "/s", "/c", shim], source: "windows-shell", detail: shim };
+    return {
+      argv: command,
+      source: "windows-unresolved",
+      detail: shim,
+      error:
+        `${shim} is not a native executable and its JavaScript entry could not be read; ` +
+        `Node cannot start it without a shell (which would re-quote our arguments). ` +
+        `Set ${PI_COMMAND_ENV} to the real entry instead — e.g. "node <path\\to\\pi-launcher.js>" — or install a native build.`,
+    };
   }
   return { argv: command, source: "as-is" };
 }
@@ -183,5 +196,20 @@ export function checkLaunchSpawnable(argv: string[], deps: LaunchDeps = {}): Lau
   if (platform !== "win32") return { ok: true, detail: `${head} (PATH)` };
   const found = whichWindows(head, deps);
   if (found.length === 0) return { ok: false, detail: `not on PATH: ${head}` };
-  return { ok: true, detail: found[0]! };
+  // A bare name is only spawnable if a native executable answers to it. A `.cmd`/`.bat` shim
+  // is on PATH and still unspawnable (Node refuses it without a shell), which is exactly the
+  // mistake this check exists to catch before a task is dispatched.
+  const exe = found.find((candidate) => /\.exe$/i.test(candidate));
+  if (!exe) return { ok: false, detail: `only a shim on PATH: ${found[0]}` };
+  return { ok: true, detail: exe };
+}
+
+/**
+ * The verdict for a *resolved* launch. A refusal carried by the resolution outranks the argv
+ * probe: a batch shim nobody can read reports as "on PATH", so the probe alone would call it
+ * healthy. `otto status` / `otto doctor` / the daemon boot line all ask this.
+ */
+export function launchCheck(resolution: LaunchResolution, deps: LaunchDeps = {}): LaunchCheck {
+  if (resolution.error) return { ok: false, detail: resolution.error };
+  return checkLaunchSpawnable(resolution.argv, deps);
 }

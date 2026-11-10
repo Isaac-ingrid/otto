@@ -7,6 +7,7 @@ import {
   PI_COMMAND_ENV,
   checkLaunchSpawnable,
   jsEntryFromShim,
+  launchCheck,
   piCommandFromEnv,
   resolveExecutableLaunch,
   splitCommandLine,
@@ -93,12 +94,27 @@ describe("resolveExecutableLaunch: Windows shim resolution", () => {
     expect(resolveExecutableLaunch(["pi"], deps)).toEqual({ argv: [exe], source: "windows-exe", detail: exe });
   });
 
-  it("falls back to cmd.exe for a shim whose target cannot be located, and reports it", () => {
+  it("refuses a shim whose JS entry cannot be read, instead of handing argv to cmd.exe (§4.4)", () => {
     const cmd = join(BIN, "mystery.cmd");
-    const deps = { ...fsDeps({ [cmd]: "@echo off\nrem no js here\n" }), comspec: "C:\\Windows\\System32\\cmd.exe" };
+    const deps = fsDeps({ [cmd]: "@echo off\nrem no js here\n" });
     const resolved = resolveExecutableLaunch(["mystery"], deps);
-    expect(resolved.source).toBe("windows-shell");
-    expect(resolved.argv).toEqual(["C:\\Windows\\System32\\cmd.exe", "/d", "/s", "/c", cmd]);
+    expect(resolved.source).toBe("windows-unresolved");
+    expect(resolved.detail).toBe(cmd);
+    // argv stays the untouched command: the resolution is a diagnosis, not a launch.
+    expect(resolved.argv).toEqual(["mystery"]);
+    expect(resolved.error).toContain(cmd);
+    expect(resolved.error).toContain(PI_COMMAND_ENV);
+    // The verdict status/doctor print must carry that reason, not the argv probe's "on PATH".
+    expect(launchCheck(resolved, deps)).toEqual({ ok: false, detail: resolved.error });
+  });
+
+  it("refuses an extensionless shim the same way, and still names the fix", () => {
+    const sh = join(BIN, "pi"); // the git-bash style shim some CI machines carry
+    const deps = fsDeps({ [sh]: "#!/bin/sh" });
+    const resolved = resolveExecutableLaunch(["pi"], deps);
+    expect(resolved.source).toBe("windows-unresolved");
+    expect(resolved.argv).toEqual(["pi"]);
+    expect(resolved.error).toContain(PI_COMMAND_ENV);
   });
 
   it("ignores a shim that names a JS file which does not exist", () => {
@@ -141,6 +157,14 @@ describe("checkLaunchSpawnable", () => {
     expect(broken.detail).toContain("C:\Program");
   });
 
+  it("treats a bare name that only resolves to a shim as unspawnable", () => {
+    const cmd = join(BIN, "pi.cmd");
+    const deps = fsDeps({ [cmd]: "@echo off" });
+    const check = checkLaunchSpawnable(["pi"], deps);
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain(cmd);
+  });
+
   it("resolves a bare name through PATH on Windows and skips the check on POSIX", () => {
     const deps: LaunchDeps = {
       platform: "win32",
@@ -148,6 +172,8 @@ describe("checkLaunchSpawnable", () => {
       fileExists: (path) => path === join("C:\tools", "node.exe"),
     };
     expect(checkLaunchSpawnable(["node", "x.js"], deps)).toMatchObject({ ok: true });
+    // Callers pass the whole resolution; with no refusal inside it, it is the argv probe.
+    expect(launchCheck({ argv: ["node", "x.js"], source: "as-is" }, deps)).toMatchObject({ ok: true });
     expect(checkLaunchSpawnable(["nope"], deps)).toMatchObject({ ok: false, detail: "not on PATH: nope" });
     // POSIX: the kernel resolves the bare name; there is nothing to check here.
     expect(checkLaunchSpawnable(["pi"], { platform: "linux" })).toMatchObject({ ok: true });

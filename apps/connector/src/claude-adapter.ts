@@ -112,6 +112,8 @@ export interface ClaudeAdapterOptions {
   initTimeoutMs?: number;
   /** Grace between SIGTERM and SIGKILL on stop (default 3 s, §4.4). */
   stopGraceMs?: number;
+  /** A pre-resolved launch (pi-launch.ts); see PiAdapterOptions.launch. */
+  launch?: LaunchResolution;
 }
 
 interface WorkerRuntime {
@@ -154,7 +156,7 @@ export class ClaudeAdapter implements AgentAdapter {
    *  `.cmd` shim on Windows, which Node cannot spawn without a shell). An explicit `command`
    *  option (tests, embedders) is never rewritten. */
   get launchResolution(): LaunchResolution {
-    this.launch = this.launch ?? resolveExecutableLaunch(this.options.command ?? ["claude"]);
+    this.launch = this.launch ?? this.options.launch ?? resolveExecutableLaunch(this.options.command ?? ["claude"]);
     return this.launch;
   }
 
@@ -227,6 +229,9 @@ export class ClaudeAdapter implements AgentAdapter {
     if (this.runtimes.has(spec.workerId)) {
       throw new AdapterError("lock_held", `a claude process for ${spec.workerId} is already running`);
     }
+    // Same refusal as PiAdapter.start: no spawnable argv means no spawn, with the reason.
+    const launch = this.launchResolution;
+    if (launch.error) throw new AdapterError("launch_unresolved", launch.error);
     const assets = installClaudeAssets(this.options.stateDir);
     const serverPath = assets.serverPath;
     if (this.workerLogsDir) mkdirSync(this.workerLogsDir, { recursive: true });
@@ -235,7 +240,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
     let runtime!: WorkerRuntime;
     const proc = new ClaudeProcess({
-      command: this.launchResolution.argv,
+      command: launch.argv,
       args: this.buildArgs(spec, configPath),
       cwd: spec.cwd,
       env: childEnv(process.env, this.options.env),

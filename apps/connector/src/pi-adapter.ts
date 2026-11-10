@@ -37,6 +37,9 @@ export interface PiAdapterOptions {
   env?: Record<string, string | undefined>;
   /** Where per-worker stderr tails are kept (§12); default <stateDir>/logs. Pass null to disable. */
   workerLogsDir?: string | null;
+  /** A pre-resolved launch (pi-launch.ts), for embedders and tests that cannot exercise the
+   *  platform's PATH themselves. A resolution carrying `error` is refused rather than spawned. */
+  launch?: LaunchResolution;
 }
 
 /** Env for the agent child (§4.2: "inherit the user's environment; the connector's own
@@ -110,7 +113,7 @@ export class PiAdapter implements AgentAdapter {
    *  in pi-launch.ts). OTTO_PI_COMMAND wins over the default `pi`; an explicit `command`
    *  option (tests, embedders) wins over both and is never rewritten. */
   get launchResolution(): LaunchResolution {
-    this.launch = this.launch ?? resolveExecutableLaunch(this.options.command ?? piCommandFromEnv() ?? ["pi"]);
+    this.launch = this.launch ?? this.options.launch ?? resolveExecutableLaunch(this.options.command ?? piCommandFromEnv() ?? ["pi"]);
     return this.launch;
   }
 
@@ -163,12 +166,16 @@ export class PiAdapter implements AgentAdapter {
     if (this.runtimes.has(spec.workerId)) {
       throw new AdapterError("lock_held", `a pi process for ${spec.workerId} is already running`);
     }
+    // A resolution that refused to produce an argv (a Windows shim with no readable JS entry)
+    // must fail here, with its reason, instead of spawning a bare name that cannot start.
+    const launch = this.launchResolution;
+    if (launch.error) throw new AdapterError("launch_unresolved", launch.error);
     this.assets = this.assets ?? installAssets(this.options.stateDir);
     if (this.workerLogsDir) mkdirSync(this.workerLogsDir, { recursive: true });
 
     let runtime!: WorkerRuntime;
     const proc = new PiProcess({
-      command: this.launchResolution.argv,
+      command: launch.argv,
       args: this.buildArgs(spec, this.assets),
       cwd: spec.cwd,
       env: childEnv(process.env, this.options.env),
