@@ -43,7 +43,7 @@ If the connector is already installed globally, use the shorter form:
 otto connect https://otto.example.com <pairing-code>
 ```
 
-The pairing code is single-use and expires after 10 minutes. `connect` saves the device credential, installs a background service — launchd on macOS, a systemd user service on Linux, a per-user logon entry (the `Run` key plus a generated `~/.otto/otto-daemon.vbs`) on Windows — and starts the connector. On a machine whose policy forbids that entry, or whose session cannot reach its service manager, add `--foreground` and keep the terminal open.
+The pairing code is single-use and expires after 10 minutes. `connect` saves the device credential, installs a background service — launchd on macOS, a systemd user service on Linux, a per-user logon entry (the `Run` key plus a generated `~/.otto/otto-daemon.vbs`) on Windows — and starts the connector. The Windows entry starts the daemon under `otto daemon --supervise`, which restarts it with backoff after a crash — a `Run` value can start a process but never restart one. On a machine whose policy forbids that entry, or whose session cannot reach its service manager, add `--foreground` and keep the terminal open.
 
 ### Networks that block the deployment
 
@@ -69,6 +69,7 @@ otto start                  # enable and start
 otto restart                # restart the background service
 otto upgrade                # install the latest package and restart
 otto uninstall              # remove the service, preserve local state
+otto daemon --supervise     # run the daemon in this terminal, restarting it on failure
 ```
 
 State remains in `~/.otto/`. You can revoke a machine from the Otto workspace at any time.
@@ -126,7 +127,7 @@ npx @isaac2ingrid/otto connect https://otto.example.com <pairing-code>
 otto connect https://otto.example.com <pairing-code>
 ```
 
-配对码只能使用一次，10 分钟后过期。`connect` 会保存设备凭证，安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务，Windows 用当前用户登录自启动：`Run` 注册表项加生成的 `~/.otto/otto-daemon.vbs`）。机器策略禁止自启动、或当前会话够不到服务管理器时，可以加 `--foreground`，并保持终端打开。
+配对码只能使用一次，10 分钟后过期。`connect` 会保存设备凭证，安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务，Windows 用当前用户登录自启动：`Run` 注册表项加生成的 `~/.otto/otto-daemon.vbs`；Windows 启动器会以 `otto daemon --supervise` 方式运行守护进程，崩溃后按退避策略重启）。机器策略禁止自启动、或当前会话够不到服务管理器时，可以加 `--foreground`，并保持终端打开。
 
 ### 无法直连部署地址的网络
 
@@ -152,6 +153,7 @@ otto start                  # 启用并启动
 otto restart                # 重启后台服务
 otto upgrade                # 安装最新包并重启
 otto uninstall              # 移除服务，保留本地状态
+otto daemon --supervise     # 在当前终端运行守护进程，崩溃后自动重启
 ```
 
 状态保存在 `~/.otto/`。你可以随时在 Otto 工作台撤销一台电脑。

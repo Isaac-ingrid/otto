@@ -3,10 +3,11 @@
 Status: accepted. Amends decision 10 of [ADR-0001](0001-mvp-implementation-baseline.md) ("background
 service on macOS (launchd) and Linux (systemd user unit); no Windows"). Phase 1 — a foreground
 connector that runs a real pi task on a real Windows machine, read-only and then write — is
-implemented and accepted (see the two acceptance records below); phase 2 (the background lifecycle)
-has landed its first two steps — the one-daemon-per-state-directory lock (decision 10) and the
-per-user logon autostart (decision 11) — while restart-on-failure, the last open question, is step
-3; an installer is explicitly a later phase.
+implemented and accepted (see the two acceptance records below). Phase 2 — the background lifecycle —
+has landed all three of its steps: the one-daemon-per-state-directory lock (decision 10), the per-user
+logon autostart (decision 11) and restart-on-failure (decision 12, `otto daemon --supervise`, which
+the installed launcher now starts). What is left of phase 2 is running decision 6's acceptance list
+on a real logoff/logon and a real reboot; an installer is explicitly a later phase.
 
 Context: the deployment shape this project settled on is a steward running 24/7 on a small cloud
 server with connectors on the machines the owner actually works on — and those include Windows.
@@ -181,12 +182,12 @@ the change exists only under `~/.otto/worktrees/`) and the agent's own report (i
 checkout it wrote into). Deliberately *not* covered by this run: the commit → push → PR path, since
 the task text forbade committing (`ahead 0`, `pushed false`).
 
-## Phase 2 (implementing): the background lifecycle
+## Phase 2 (implemented): the background lifecycle
 
 Decision 6 was phase 1's shape: `getServiceInstaller` returned `null` on win32 and the supported
-shape was `otto connect … --foreground`. Phase 2 is the per-user autostart it deferred. Question 3
-(what starts the daemon) and question 1 (what starts it at logon) are now decided and implemented
-as decisions 10 and 11; question 2 (who supervises it) is the remaining step.
+shape was `otto connect … --foreground`. Phase 2 is the per-user autostart it deferred, and all three
+of its questions are now decided and implemented: what starts the daemon (decision 10), what starts
+it at logon (decision 11), and who supervises it (decision 12).
 
 ### Decision 10 (phase 2, step 1): one daemon per state directory
 
@@ -261,10 +262,11 @@ Consequences carried into the CLI:
   before the single-use pairing code is spent. Whether the registry write itself will be allowed is
   not checked: that cannot be known without writing, and `HKCU` is the user's own hive.
 
-**Not covered: restart-on-failure.** launchd's `KeepAlive` and systemd's `Restart=on-failure` have no
-Run-key counterpart, so a crashed daemon stays down until the next logon. `install` says exactly that
-in its notes instead of leaving a user to discover it; step 3 (`otto daemon --supervise`) is the
-platform-independent answer.
+**Restart-on-failure is not the launcher's job.** launchd's `KeepAlive` and systemd's
+`Restart=on-failure` have no Run-key counterpart: a value in the `Run` key can start a process but
+never restart one, and the Start-menu "restart on failure" checkbox belongs to Task Scheduler (refused
+without elevation). So the launcher starts `otto daemon --supervise` and the process it starts does
+the restarting — decision 12. `install`'s notes say that, and that a *stop* stays stopped.
 
 Accepted on the real machine (Windows 11, build 26100), with a throwaway state directory and entry
 script so no credential or steward was involved: `install` wrote the launcher and the Run value
@@ -281,6 +283,59 @@ key, so it can never overwrite a working installation). Unit tests cover the res
 start-refusal, the kill, the lock cleanup, the path quoting, window style 0, the policy check, the
 launcher check, the env block, the Run write, the lock wait) each fail at least one test.
 
+### Decision 12 (phase 2, step 3): `otto daemon --supervise` owns the lock and restarts the daemon
+
+**`otto daemon --supervise` runs the daemon as a child and restarts it with backoff.** It is not a
+Windows-only command: a container, a dev box with no service manager, or a `docker restart: always`
+that only acts on `exit` all want the same thing. `WindowsService` installs the launcher with
+`--supervise` appended by `daemonArgs()`, so a `ServiceSpec` built anywhere cannot silently install an
+autostart that never comes back from a crash.
+
+Who holds the lock is the load-bearing decision, and it follows from the supervisor outliving every
+daemon it starts: **the supervisor holds `daemon.lock`** (its own pid and start time, decision 10's
+identity discipline) and the supervised child must not take it. The child is authorised by evidence
+rather than by trust, because an environment variable is something anything can set, and two daemons
+over one `~/.otto` is exactly what the lock exists to prevent. Three checks, all fail-closed:
+
+1. the environment says it is supervised (`OTTO_SUPERVISED_BY=<pid>`), and the value is a plausible
+   pid;
+2. that pid is the child's own parent (`process.ppid`);
+3. that parent holds the lock — an unreadable lock owner is *not* a pass (decision 10).
+
+A failure names which of the three is missing and exits, so `otto daemon` under a stale or forged
+`OTTO_SUPERVISED_BY` refuses instead of quietly sharing the state directory, and a supervisor never
+starts a second daemon behind a running one.
+
+Restart policy: **1s → 2s → 5s → 15s → 30s → 60s**, and a run that lasted a minute resets the ladder
+— a daemon that worked and then died is not a crash loop, while one that dies during startup is. A
+stop races every wait, so a pending restart never delays `otto stop`; the child gets SIGTERM and a 5s
+grace, and the force-kill stays `otto stop`'s job (`taskkill /T /F`, which a supervisor cannot do
+better).
+
+The supervisor adds a process layer, so it owes the operator what the daemon used to print:
+
+- `logs/supervisor.log` gets the child's stdout/stderr, which a hidden autostart otherwise loses
+  before the logger exists (decision 11's console problem, one level up).
+- `logs/supervisor.json` records the supervisor pid, the child pid and the restart count, and
+  `otto status` appends `[supervised: child pid N, M restarts]` to its `daemon:` line — but only while
+  the lock's holder really is that supervisor, so a state file left by a previous run cannot decorate
+  the current one.
+- `otto stop` is unchanged and is still the whole stop story: the Run value first, then the lock's
+  holder (`taskkill /T` takes the child with it), then the stale lock a forced kill leaves behind.
+
+Accepted on the real machine (Windows 11, build 26100), against the real state directory and the real
+steward over the SSH tunnel: a stale lock left by a killed daemon was taken over by the supervisor
+(pid 5268, child 76420), and `otto status` read `running pid 5268 … [supervised: child pid 76420]`;
+`taskkill /F` of the child was logged as `exited after 12109ms (code 1, signal none)` plus `restart 1
+in 1000ms`, and the new pid (62980) was up 1.04s later, already reconnected (`connEpoch` 9) with
+`restarts: 1` in `supervisor.json`; `taskkill /T /F` of the supervisor killed the child with it and
+left a stale lock, which `otto stop` cleared — `daemon: not running (no daemon.lock)`, Run key still
+empty. Unit tests cover the loop and the gate with an injected world (`supervisor.test.ts`) and the
+gate through the real CLI with a throwaway state directory (`supervise-cli.test.ts`); ten mutations
+(an uncapped backoff, no health reset, no SIGTERM, a restart that ignores a stop, both gate checks,
+the state-file validation, the launcher's `--supervise`, the status note's holder check, the child
+authorisation) each fail at least one test.
+
 ### Open (phase 2)
 
 1. **What starts the daemon at logon — decided (decision 11).** The Run key plus a generated
@@ -291,18 +346,19 @@ launcher check, the env block, the Run write, the lock wait) each fail at least 
    What this choice does **not** answer is restart-on-failure (below). The remaining fork if a
    managed machine ever needs it: Task Scheduler as an *opt-in* path (`otto install-task`, documented
    as needing elevation or an admin's approval) rather than what `connect` does by default.
-2. **Who supervises the process.** launchd (`KeepAlive`) and systemd (`Restart=on-failure`) restart a
-   crashed daemon; nothing on Windows does. If the chosen mechanism does not, a small
-   platform-independent supervisor mode is the alternative (`otto daemon --supervise`: spawn,
-   restart with backoff, append the child's stdout/stderr under the log dir). The daemon's own log
-   (`~/.otto/logs/connector.log`, rotated) already covers what the process does; what a hidden
-   autostart loses is whatever is printed to the console before the logger exists. A supervisor adds
-   a second process layer, so the lock's holding pid becomes the supervisor's.
+2. **Who supervises the process — decided (decision 12).** `otto daemon --supervise`, spawned by the
+   launcher: 1s → 60s backoff, a healthy run resets it, the lock moves to the supervisor, the child
+   proves its parent holds it, and `logs/supervisor.log` + `logs/supervisor.json` replace the console
+   a hidden autostart never had. The machines that do *not* need it — launchd's `KeepAlive`, systemd's
+   `Restart=on-failure`, a container runtime's restart policy — keep their own mechanism; the Run key
+   is the one that has none. The remaining fork is Task Scheduler as an *opt-in* path
+   (`otto install-task`, needing elevation) whose restart-on-failure would make step 3 redundant on a
+   managed machine: not built, and not blocked by anything here.
 
-The acceptance test decision 6 asked for still applies, and three of its five checks are now
-reachable: after logoff/logon the machine is online in the workspace with no terminal opened (the
-one part that needs a real logoff, still to be run); `otto stop` keeps it down across the next logon
-until `otto start`; a killed daemon comes back **only if** supervision is claimed — with decision 11
-and no supervisor it stays down until the next logon, which is why step 3 exists; `uninstall` leaves
-neither an autostart entry nor an orphan process (verified on the machine); and a second daemon
-refuses to start (decision 10, verified).
+The acceptance test decision 6 asked for still applies, and four of its five checks are now
+reachable: a killed daemon comes back with backoff under the installed launcher (decision 12,
+verified on the machine); `otto stop` keeps it down across the next logon until `otto start`;
+`uninstall` leaves neither an autostart entry nor an orphan process; and a second daemon refuses to
+start (decision 10). What is still to be run is the one check no unit test can stand in for: a real
+logoff/logon (and one real reboot) with the autostart installed, after which the machine must be
+online in the workspace with no terminal opened.
