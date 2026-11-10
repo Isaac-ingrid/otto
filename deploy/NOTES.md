@@ -123,10 +123,42 @@ frames rendered in place of refetching.
 
 ## Access today
 
-Bound to loopback only, so no port is exposed while there is no name and no cert:
+Two ways in. The steward itself stays on loopback in both.
+
+**1. The tunnel** — how the connector on a personal machine reaches the steward:
 
 ```bash
 ssh -N -L 8787:127.0.0.1:8787 root@115.29.164.8   # then http://127.0.0.1:8787
+```
+
+**2. Bare IP on `:8080`** (added 2026-11-10, so a phone can look at the workspace while the domain
+sits in ICP review): `http://115.29.164.8:8080`.
+
+```bash
+# on the box: vhost + port; then one console step — Aliyun security group, inbound TCP 8080/8080
+install -m 644 otto-8080.conf /etc/nginx/sites-available/otto
+ln -sf /etc/nginx/sites-available/otto /etc/nginx/sites-enabled/otto
+nginx -t && systemctl reload nginx && ufw allow 8080/tcp
+```
+
+The vhost is `deploy/nginx-otto.conf` with two changes — `listen 8080` / `listen [::]:8080`, and
+`server_name 115.29.164.8`. It is deliberately **not** on `:80`: this box's `default` server
+answers `:80` *by IP* (`server_name _`) with the tstock build, so a vhost carrying `server_name
+115.29.164.8` on `:80` takes that traffic over. Not theory — the first attempt installed exactly
+that, and `http://115.29.164.8/` served Otto's sign-in page for two minutes before it was rolled
+back (symlink removed, `nginx -t`, reload; `http://115.29.164.8/` then answered the tstock page
+again).
+
+Verified from a client outside the box: `GET /` → `200 Sign in - Otto`; `/app/api/workspace` →
+`401`; a real WebSocket handshake to `/app/ws?view=workspace` reaches the app and comes back with
+its `401` session gate, so the security-group rule, the `upgrade`/`Connection` headers and the
+route are all good; `:80` still returns the tstock page. It is cleartext: the login password and
+every task's content cross the public internet unencrypted, and a passkey cannot be registered or
+used at all without a secure context. Roll back with:
+
+```bash
+rm /etc/nginx/sites-enabled/otto && systemctl reload nginx && ufw delete allow 8080/tcp
+# plus deleting the security-group rule
 ```
 
 `GET /` renders the sign-in page; `POST /api/pairing` with `authorization: Bearer $SERVER_KEY`
@@ -153,13 +185,17 @@ ACME. nginx also ships without a `$connection_upgrade` map, which the script add
 ```
 
 Both modes back up `/etc/nginx` first and abort if the domain does not resolve to this box.
+They also abort with `Permission denied (publickey,password)` when `OTTO_SSH_KEY` in `aliyun.env`
+names a key that is not on this machine — it did (`~/.ssh/aliyun_sig`, since pointed at
+`~/.ssh/id_ed25519_tstock`), and the script cannot tell that apart from a real auth failure.
 Rehearsed on 2026-11 against a throwaway `server_name`: `nginx -t` clean, the `default` vhost
 (tstock) still answered on its own `Host`, and the steward saw
 `Host`/`X-Forwarded-For`/`X-Forwarded-Proto` with a live `upgrade: websocket`.
 
 **Where it stands on the box (audited 2026-11-10, read-only).** Neither mode has been run against
 the real name: `/etc/nginx/conf.d/otto.conf` does not exist (only `websocket-upgrade.conf`), there
-is no `certbot` binary, no `/etc/letsencrypt`, and nothing listens on 443. Everything else the step
+is no `certbot` binary, no `/etc/letsencrypt`, and nothing listens on 443 (8080 is now taken by
+the by-IP vhost above — do not reuse it). Everything else the step
 needs is already in place — `otto.service` enabled with `Restart=always`, the memory/`StartLimit`
 drop-in, `/etc/otto/.dev.vars` (root:otto 640), `otto-backup.timer` taking a daily online `.backup`
 (15 kept, same disk only — an offsite copy is still a gap), and `ufw` allowing 80/443. Probing from a
