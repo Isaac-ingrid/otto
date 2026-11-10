@@ -221,6 +221,26 @@ describe("LaunchdService", () => {
     const status = await installer.status();
     expect(status).toMatchObject({ installed: false, running: false, detail: "not loaded" });
   });
+
+  it("preflight asks about the gui domain install() targets, and refuses without one", async () => {
+    const { calls, exec } = recordingExec((file, args) =>
+      file === "launchctl" && args[0] === "print"
+        ? { code: 113, stdout: "", stderr: "Could not find domain for\n" }
+        : undefined,
+    );
+    const installer = getServiceInstaller(spec(), deps(exec))!;
+
+    await expect(installer.preflight?.()).rejects.toThrow(/gui\/501.*--foreground/s);
+    // The probe is the same domain bootstrap uses, and nothing was written: preflight only reads.
+    expect(calls).toEqual([{ file: "launchctl", args: ["print", "gui/501"] }]);
+    expect(existsSync(join(home, "Library/LaunchAgents", `${OTTO_LABEL}.plist`))).toBe(false);
+  });
+
+  it("preflight passes when the gui domain answers", async () => {
+    const { exec } = recordingExec(() => ({ code: 0, stdout: "domain = gui/501\n", stderr: "" }));
+    const installer = getServiceInstaller(spec(), deps(exec))!;
+    await expect(installer.preflight?.()).resolves.toBeUndefined();
+  });
 });
 
 describe("SystemdService", () => {
@@ -304,5 +324,27 @@ describe("SystemdService", () => {
     }));
     const installer = getServiceInstaller(spec(), deps(exec))!;
     await expect(installer.install()).rejects.toThrow(/logged-in session/);
+  });
+
+  it("preflight surfaces the bus message before any unit file is written", async () => {
+    const { calls, exec } = recordingExec(() => ({
+      code: 1,
+      stdout: "",
+      stderr: "Failed to connect to bus: No medium found",
+    }));
+    const installer = getServiceInstaller(spec(), deps(exec))!;
+
+    const err = await installer.preflight?.().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/systemctl --user show-environment/);
+    expect((err as Error).message).toMatch(/logged-in session/);
+    expect(calls).toEqual([{ file: "systemctl", args: ["--user", "show-environment"] }]);
+    expect(existsSync(join(home, ".config/systemd/user", `${OTTO_LABEL}.service`))).toBe(false);
+  });
+
+  it("preflight refuses a host where systemctl is missing entirely (containers)", async () => {
+    const { exec } = recordingExec(() => ({ code: 127, stdout: "", stderr: "spawn systemctl ENOENT" }));
+    const installer = getServiceInstaller(spec(), deps(exec))!;
+    await expect(installer.preflight?.()).rejects.toThrow(/needs a systemd user session/);
   });
 });

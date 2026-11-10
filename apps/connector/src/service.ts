@@ -74,6 +74,12 @@ export interface ServiceInstaller {
   /** Stops and removes the unit. Does not touch ~/.otto data. */
   uninstall(): Promise<void>;
   status(): Promise<ServiceStatus>;
+  /** Refuses *before* a pairing code is spent when this machine cannot host the service at
+   *  all: `connect` redeems the code once (protocol §5.2), so anything that makes `install()`
+   *  fail costs the owner a fresh code for every retry. Only facts that would fail the install
+   *  outright belong here — an unreachable systemd user bus, an unreachable launchd domain —
+   *  never a preference. Optional so a test double need not answer it. */
+  preflight?(): Promise<void>;
   /** Absolute path of the unit/plist file (for `status` output). */
   readonly unitPath: string;
 }
@@ -173,6 +179,20 @@ ${env}
 </dict>
 </plist>
 `;
+  }
+
+  async preflight(): Promise<void> {
+    // The agent is bootstrapped into gui/<uid>, which needs a GUI session for this uid: over
+    // SSH, or before the first desktop login, that domain does not exist and bootstrap fails.
+    // One `print` settles it, and it is the same domain install() targets.
+    const res = await this.launchctl(["print", this.targetDomain()]);
+    if (res.code !== 0) {
+      throw new Error(
+        `launchctl print ${this.targetDomain()} failed (${res.code}): ${res.stderr.trim()} — ` +
+          `the connector's launchd agent lives in the gui domain, which needs a logged-in ` +
+          `session for this user; run \`otto connect … --foreground\` from the desktop instead`,
+      );
+    }
   }
 
   async install(): Promise<void> {
@@ -329,6 +349,20 @@ RestartSec=10
 [Install]
 WantedBy=default.target
 `;
+  }
+
+  async preflight(): Promise<void> {
+    // A user unit cannot be written or enabled without the session bus, and install() only
+    // finds that out after the unit file is on disk. The same call also fails when systemctl
+    // is missing entirely (containers) — both are `--foreground` cases, refused before pairing.
+    const res = await this.systemctl(["show-environment"]);
+    if (res.code !== 0) {
+      throw new Error(
+        `systemctl --user show-environment failed (${res.code}): ${res.stderr.trim()} — ` +
+          `the connector's user unit needs a systemd user session; run \`otto connect … ` +
+          `--foreground\` instead, or fix the session first`,
+      );
+    }
   }
 
   async install(): Promise<void> {

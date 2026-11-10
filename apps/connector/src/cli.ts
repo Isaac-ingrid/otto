@@ -111,6 +111,16 @@ function takeFlag(argv: string[], flag: string): { present: boolean; value?: str
   return { present: true, value, rest };
 }
 
+/** Fails when this machine cannot run the background service at all, or cannot reach the
+ *  service manager that would run it. Called from `connect` *before* pairing, because the
+ *  pairing code is single-use: `otto connect` used to redeem the code and only then discover
+ *  that install() could not work here (Windows has no installer; a headless Linux session has
+ *  no user bus), so each retry needed a freshly generated code. */
+async function preflightService(): Promise<void> {
+  const installer = requireInstaller();
+  await installer.preflight?.();
+}
+
 function requireInstaller(): ServiceInstaller {
   const spec = serviceSpec(binEntryPath());
   const installer = getServiceInstaller(spec);
@@ -196,7 +206,14 @@ async function connectCommand(argv: string[]): Promise<void> {
   }
   const machineName = process.env.OTTO_MACHINE_NAME ?? hostname();
 
-  // 1. Proxy (issue #68), resolved before pairing so the /pair fetch itself goes through
+  // 1. Refuse before spending the code. Pairing is single-use (protocol §5.2: the first
+  //    successful /pair redeems it), and both shapes below are facts about this machine, not
+  //    preferences — no service manager on this platform (Windows), or one this session
+  //    cannot reach (systemd bus, launchd gui domain). Discovering either *after* pairing
+  //    costs the owner a fresh code for every retry. `--foreground` is the escape hatch.
+  if (!foreground) await preflightService();
+
+  // 2. Proxy (issue #68), resolved before pairing so the /pair fetch itself goes through
   //    it. An explicit --proxy wins; a stored config is kept; otherwise the shell's
   //    HTTPS_PROXY is captured into storage — the background service never depends on an
   //    inherited environment. Git children and pi workers follow via process.env.
@@ -215,7 +232,7 @@ async function connectCommand(argv: string[]): Promise<void> {
     );
   }
 
-  // 2. Pair (protocol §5.2): redeem the code once, persist credentials in the LocalStore.
+  // 3. Pair (protocol §5.2): redeem the code once, persist credentials in the LocalStore.
   let deviceId: string;
   try {
     ({ deviceId } = await connect(url, code, machineName, { store, fetchImpl: proxiedFetch }));
@@ -225,10 +242,10 @@ async function connectCommand(argv: string[]): Promise<void> {
   }
   store.close();
 
-  // 2. Write this version's pi assets so even a foreground run is ready to start workers.
+  // 4. Write this version's pi assets so even a foreground run is ready to start workers.
   installAssets(dir);
 
-  // 3. Install and start the background service. `--foreground` keeps the old behavior:
+  // 5. Install and start the background service. `--foreground` keeps the old behavior:
   //    hold the connection in this terminal (dev boxes, containers, unsupported platforms).
   if (foreground) {
     console.log(`paired as ${deviceId}; running in foreground (Ctrl-C to stop)`);
