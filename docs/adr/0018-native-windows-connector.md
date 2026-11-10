@@ -1,9 +1,10 @@
 # ADR-0018: Native Windows support for the connector
 
 Status: accepted. Amends decision 10 of [ADR-0001](0001-mvp-implementation-baseline.md) ("background
-service on macOS (launchd) and Linux (systemd user unit); no Windows"). Phase 1 (a foreground
-connector that runs a real pi task on a real Windows machine) is implemented; the background
-lifecycle and an installer are explicitly later phases.
+service on macOS (launchd) and Linux (systemd user unit); no Windows"). Phase 1 — a foreground
+connector that runs a real pi task on a real Windows machine, read-only and then write — is
+implemented and accepted (see the two acceptance records below); the background lifecycle
+(phase 2, shape sketched at the end of this file) and an installer are explicitly later phases.
 
 Context: the deployment shape this project settled on is a steward running 24/7 on a small cloud
 server with connectors on the machines the owner actually works on — and those include Windows.
@@ -110,9 +111,9 @@ until a per-user logon autostart exists.
 
 ## Consequences
 
-- The Windows branches are exercised by CI, but the acceptance test for this phase stays a manual
-  one on a real machine: pairing, a read-only pi task, and an append or write task in an isolated
-  worktree, with no WSL in the loop.
+- The Windows branches are exercised by CI, but the acceptance test for this phase is a manual one
+  on a real machine, with no WSL in the loop: pairing, a read-only pi task and a write task in an
+  isolated worktree. Both halves now have a record below.
 - Process introspection on Windows costs a PowerShell process per sweep (~0.4–1.5 s). That is
   affordable at the existing cadences (snapshot loop, watchdog tick at ≥5 s) and is the reason
   decision 5 keeps the sampler to one query per sample rather than two.
@@ -153,3 +154,62 @@ Two operational prerequisites for a Windows connector follow from this run and a
 have usable quota (an agent that silently falls back to a logged-in but exhausted provider reports
 only a provider-side error), and a spaced path in `OTTO_PI_COMMAND` must be inner-quoted — or use
 `node <launcher> …`, which has no space to quote.
+
+## Acceptance record: write task in a worktree (2026-11-10)
+
+The write half of the phase-1 acceptance ran on the same machine against a throwaway Git
+repository — `D:\project\otto-write-lab`, one commit `8355e96`, registered through the workspace's
+*Add directory* — so that the isolation claim is checkable and nothing real is at risk. Task: create
+exactly one file, `NOTES.md`, holding three given lines; no other file, no dependency install, no
+build, and no commit (so the change stays visible in the worktree).
+
+| Step | Observed |
+| --- | --- |
+| Policy | `otto repo-config`: `capability: git`, `isolation: worktree`, `concurrency: parallel` — the default for a Git repository, with no per-repo override |
+| Worker | `w_01M72FJVVAWH14D834892Y2J94`: `mode=write`, `base=main`, `branch=otto/t-01m72fjvv7gmgyt5fmhkadecsw-1` |
+| Worktree | `C:\Users\Administrator\.otto\worktrees\otto-write-lab-8731e22d\t-01m72fjvv7gmgyt5fmhkadecsw-1`, created by the connector's `git worktree add -b` before the agent started |
+| Product | `NOTES.md`, 29 bytes, 3 lines, LF — byte-identical to the requested text (no BOM, no CRLF) |
+| Worktree state | `?? NOTES.md`; `git.head == git.base == 8355e96`, `ahead 0`, `dirty 1`, `pushed false` |
+| **Registered directory** | `git status --porcelain` empty, `HEAD` still `8355e96`, still holding only `.git` and `README.md` |
+| Agent's own account | the report's `changes[0]` names the worktree's absolute path; its `next` hands the commit decision back to the owner |
+| Steward | `lastOutcome = reported:done`, worker `idle`, thread `unread 1`, `lastMachine` unchanged |
+
+Isolation is confirmed from both sides at once: the disk (the registered directory is untouched and
+the change exists only under `~/.otto/worktrees/`) and the agent's own report (it knows which
+checkout it wrote into). Deliberately *not* covered by this run: the commit → push → PR path, since
+the task text forbade committing (`ahead 0`, `pushed false`).
+
+## Phase 2 (planned): the background lifecycle
+
+Decision 6 stands for phase 1: `getServiceInstaller` returns `null` on win32 and the supported shape
+is `otto connect … --foreground`. Phase 2 is the per-user autostart it defers. This section records
+the *shape of the decision*, not a decision — three questions are open, and each has a Windows
+answer that the launchd/systemd path gets for free.
+
+1. **What starts the daemon at logon.** A `HKCU\…\Run` value needs no elevation and is trivial to
+   remove, but gives no restart-on-failure and no control over the window (a console program
+   launched from it gets a console window). A Startup-folder shortcut has the same limits and is
+   visible as a file. Task Scheduler's logon trigger is the structural analogue of
+   launchd/systemd — a unit on disk (`/Query /XML`), enable/disable/start/stop, restart-on-failure,
+   hidden — but creating a task may require elevation, which a managed company machine will not
+   grant. Whichever wins must start the daemon inside the user's own session; session 0 is rejected
+   by decision 6 because the agent it spawns is an interactive, user-profile program.
+2. **Who supervises the process.** launchd (`KeepAlive`) and systemd (`Restart=on-failure`) restart a
+   crashed daemon; nothing on Windows does. If the chosen mechanism does not, a small
+   platform-independent supervisor mode is the alternative (`otto daemon --supervise`: spawn,
+   restart with backoff, append the child's stdout/stderr under the log dir). The daemon's own log
+   (`~/.otto/logs/connector.log`, rotated) already covers what the process does; what a hidden
+   autostart loses is whatever is printed to the console before the logger exists.
+3. **One daemon per machine, enforced.** The steward would not catch two: a duplicate `hello` is
+   resolved by `connEpoch` (the newer connection supersedes the older, `steward.ts`), so the two
+   would take turns superseding each other — while both run reconcile, orphan cleanup and the stall
+   watchdog over one state directory and one set of pi process trees. Startup cleanup kills what the
+   shared store's orphan snapshots name; that guard only rules out pid reuse (alive + start-time
+   match), so it cannot tell another daemon's live worker children from its own. A daemon lock file
+   in the state dir, checked with the same `pid + creation time` discipline as `locks.ts`
+   (unreadable ⇒ held, fail closed), is therefore a prerequisite for any autostart.
+
+The acceptance test decision 6 asked for still applies: after logoff/logon the machine is online in
+the workspace with no terminal opened; `otto stop` keeps it down across the next logon until
+`otto start`; a killed daemon comes back if supervision is claimed; `uninstall` leaves neither an
+autostart entry nor an orphan process; and a second daemon refuses to start.
