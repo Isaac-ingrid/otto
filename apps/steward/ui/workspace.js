@@ -1701,11 +1701,18 @@ function defaultPasskeyLabel() {
   return 'Passkey';
 }
 
+// WebAuthn's RP ID must be a "valid domain string", and an IP literal is not one
+// (w3c/webauthn#1358): over https://<ip> the API exists but every ceremony throws SecurityError.
+// Local to this file because the workspace page loads exactly one script.
+function isIpLiteralHost() {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname) || location.hostname.includes(':');
+}
+
 /** addPasskey(): see candidate-2 design §Usage 1 for the full call sequence. */
 async function addPasskey() {
   const security = securityState();
   if (!security || security.passkeyAdd === 'creating') return;
-  if (!window.PublicKeyCredential) {
+  if (!window.PublicKeyCredential || isIpLiteralHost()) {
     security.passkeyAdd = 'unsupported';
     return bumpDialog();
   }

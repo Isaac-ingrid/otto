@@ -347,7 +347,7 @@ export const STRINGS = {
   passkeyAdding: ['Adding…', '添加中…'],
   passkeyAdded: ['Passkey added.', '通行密钥已添加。'],
   passkeyAddFailed: ['Couldn’t add that passkey. Try again.', '通行密钥没有添加成功，请重试。'],
-  passkeyUnsupported: ['This browser doesn’t support passkeys.', '当前浏览器不支持通行密钥。'],
+  passkeyUnsupported: ['Passkeys aren’t available here — they need a domain name (an IP address can’t be used) and a browser with WebAuthn support.', '此处无法使用通行密钥：需要域名（IP 地址不行），且浏览器需支持 WebAuthn。'],
   passkeyMeta: ['Added {created} · last used {lastUsed}', '添加于 {created} · 上次使用 {lastUsed}'],
   passkeyNeverUsed: ['never', '从未使用'],
   passkeyRemove: ['Remove', '移除'],

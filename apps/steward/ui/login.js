@@ -9,6 +9,7 @@ const STRINGS = {
   failed: ['Couldn’t sign in with that passkey. Try again, or use your password.', '通行密钥登录失败，请重试或使用密码。'],
   cancelled: ['Passkey sign-in was cancelled. Try again, or use your password.', '已取消通行密钥登录，可以重试或使用密码。'],
   unsupported: ['Passkeys aren’t available in this browser. You can sign in with your password.', '当前浏览器无法使用通行密钥，你可以使用密码登录。'],
+  ipNoPasskey: ['Passkeys need a domain name, and this deployment is reached by its IP address. Sign in with your password — passkeys work once Otto answers on a domain.', '通行密钥需要域名，而本次部署是通过 IP 地址访问的。请使用密码登录；等 Otto 通过域名访问时通行密钥即可使用。'],
   invalid: ['Incorrect password. Try again.', '密码错误，请重试。'],
   unavailable: ['Password sign-in is unavailable. Set a new LOGIN_PASSWORD for this deployment (steps below); temporary outages clear on retry.', '密码登录暂不可用。请按下方步骤为本次部署重新设置 LOGIN_PASSWORD；临时故障稍后重试即可。'],
   rejected: ['The deployment password does not meet the password requirements. Set LOGIN_PASSWORD to a new, unique password of at least 15 characters and restart or redeploy Otto. Follow the steps below.', '部署密码未通过 Otto 的规则检查。请把 LOGIN_PASSWORD 改为新的独立密码（至少 15 个字符），然后重启或重新部署 Otto，步骤见下方。'],
@@ -186,7 +187,17 @@ async function signInWithPasskey() {
   }
 }
 
-if (window.PublicKeyCredential && navigator.credentials?.get) {
+// WebAuthn's RP ID must be a "valid domain string", and an IP literal is not one
+// (w3c/webauthn#1358) — so over https://<ip> the API is present but every ceremony throws
+// SecurityError. Say that, rather than offering a button that can only fail, or blaming the
+// browser for a limit of the address.
+function isIpLiteralHost() {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname) || location.hostname.includes(':');
+}
+
+if (isIpLiteralHost()) {
+  showStatus(passkeyStatus, t('ipNoPasskey'));
+} else if (window.PublicKeyCredential && navigator.credentials?.get) {
   passkeyButton.hidden = false;
   document.getElementById('passkey-divider').hidden = false;
   passkeyButton.addEventListener('click', () => { void signInWithPasskey(); });
