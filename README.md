@@ -59,7 +59,7 @@ The code expires after 10 minutes and is single-use; keep it out of chat and log
 otto connect <your-otto-url> <one-time-pairing-code> --foreground
 ```
 
-The connector calls out to Otto, so the computer needs no inbound port. In **Machines**, add only the local directories you want Otto to work in, then try a small read-only pi task. `otto status` prints the agent Otto will actually run (useful on Windows, where `pi` is a `.cmd` shim); `otto logs -n 50` shows why a machine did not come online. It must stay awake and connected while working. For a proxy, a host without a service manager, or a source installation, see the [connector runbook](docs/agent-connect.md).
+The connector calls out to Otto, so the computer needs no inbound port. In **Machines**, add only the local directories you want Otto to work in, then try a small read-only pi task. Otto passes no model flag, so the local agent uses its **own** default provider — make sure that one has usable quota (an exhausted default that falls back to another provider surfaces only as an agent-side error). `otto status` prints the agent Otto will actually run and says `NOT SPAWNABLE` if it resolves to a missing executable (a spaced path in `OTTO_PI_COMMAND` needs inner quotes; `node <launcher> …` avoids the question); `otto logs -n 50` shows why a machine did not come online. It must stay awake and connected while working. For a proxy, a host without a service manager, or a source installation, see the [connector runbook](docs/agent-connect.md).
 
 **Done when:** the machine and its chosen directories appear online and the test task returns a result. Repeat for each computer.
 

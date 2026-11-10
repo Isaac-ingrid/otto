@@ -429,7 +429,8 @@ Workers in the `lost` / `broken` states do not count as running; `broken` produc
 | `progress` | Update `lastEventAt` and latest progress | none | no |
 | `report` done | Record `sh_report`, timeline | **`done` report (deterministic)**, 3-second merge window | yes (normal priority; bookkeeping: summary, notes) |
 | `report` blocked / needs_decision | Record the report, create an `sh_question` | Held at first — enters the **90-second window** for the steward to handle | **yes (high priority)** |
-| `settled` error:auth | Create a question | Push immediately (the user must fix credentials on the machine) | yes |
+| `settled` error:auth | Create a question | Push immediately (the user must fix credentials or quota on the machine) | yes |
+| `settled` error:unknown (and any class without its own row) | Create a question | push (the text carries the agent's own `errorMessage` — otherwise the class is all the user gets) | yes |
 | `settled` error:transient | timeline | none (the connector resumes automatically) | no |
 | `settled` error:context | Create a question suggesting a fresh session | push | yes |
 | `settled` error:stall | Create a question (the connector already auto-restarted once) | push | yes |

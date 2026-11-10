@@ -60,6 +60,11 @@ The owner can run it directly in their terminal, keeping the pairing code out of
 
 `connect` saves the device credentials, installs the background service, and starts it. On a machine without launchd/systemd user services — Windows today, or a container whose service manager is absent — use `otto connect <url> <code> --foreground` in a persistent terminal instead. On Windows the command says plainly that no background service exists there; on a service manager that fails to install, the error tells you to pair again with `--foreground`. If the code expires or has already been used, generate a fresh one in the workspace. If the owner cannot sign in, follow [browser access recovery](deploy.md#recover-browser-access). Never ask for a password or SERVER_KEY in chat.
 
+Before the first task, confirm two things about the local agent — both have silently wasted a dispatch:
+
+- **Its default provider has usable quota.** Otto passes no `--model`, so the agent uses its own default. If that provider is out of quota or lacks an API key, the agent falls back to another logged-in provider or fails, and the run settles as an error whose text may only reach you as a class — check the agent's own settings (for pi, `~/.pi/agent/settings.json` `defaultProvider`/`defaultModel`) and run a one-line prompt with it in a plain terminal first.
+- **The launch Otto resolves is spawnable.** `otto status` / `otto doctor` check this. A spaced path in `OTTO_PI_COMMAND` needs inner quotes; prefer `node <launcher> …`, which has no space to quote.
+
 ## 3 · Register the selected repositories
 
 In the web workspace, open **Machines**, find the connected machine, and choose **Add directory** (中文：**机器 → 添加目录**). Select an existing directory or enter its absolute path, then wait for registration to succeed. Repeat for each directory the owner chose. The connector detects a Git repository automatically; a plain directory registers the same way, with no branch, worktree isolation, or PR support.
@@ -70,7 +75,7 @@ Keep the default `worktree` isolation unless the owner wants a different write p
 
 ## 4 · Verify the full connection
 
-1. Run `otto status`. Confirm the intended deployment, installed/running service (or the live foreground process), the agent command Otto will actually launch, and registered repositories. A saved pairing alone does not prove the WebSocket is connected. On Windows the agent line matters: npm-installed agents are `.cmd` shims, and an unresolvable one is what makes a machine look paired but unable to start work.
+1. Run `otto status`. Confirm the intended deployment, installed/running service (or the live foreground process), the agent command Otto will actually launch, and registered repositories. A saved pairing alone does not prove the WebSocket is connected. On Windows the agent line matters: npm-installed agents are `.cmd` shims, and an unresolvable one is what makes a machine look paired but unable to start work. The line also says `NOT SPAWNABLE: <path>` when the executable it resolves to is missing — that is a broken `OTTO_PI_COMMAND` (a spaced path needs inner quotes: `OTTO_PI_COMMAND='"C:\Program Files\nodejs\node.exe" C:\path\pi-launcher.js'`), not an agent problem. `otto doctor` fails the same check.
 2. Check recent `otto logs -n 50` for a `welcomed` event and confirm the machine is **online** in the workspace's Machines page, with the expected repositories and agents. Fix repeated connection failures before continuing.
 3. Ask Otto in the workspace to run a small read-only task using **pi**, for example: “On this machine, use pi to summarize the README in this repository. Do not modify files.” Verify that the task returns a result and its session record opens. Claude Code's adapter does not support Otto's read-only mode; if only Claude Code is configured, report that the read-only check is pending rather than claiming it passed or silently dispatching a write-capable task.
 

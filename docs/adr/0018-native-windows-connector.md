@@ -77,8 +77,12 @@ until a per-user logon autostart exists.
    connector into session 0 is rejected: the agent it spawns is an interactive, user-profile
    program.
 
-7. **`otto status` prints the resolved agent launch.** One line — source and detail — so "pi works
-   in my shell but otto cannot start it" is diagnosable without reading the log.
+7. **`otto status` prints the resolved agent launch, and checks that it can be spawned.** One
+   line — source, detail, and `NOT SPAWNABLE: …` when the executable it names does not exist — so
+   "pi works in my shell but otto cannot start it" is diagnosable before a task is dispatched
+   rather than after, from a worker's stderr. `otto doctor` fails the same check, and the daemon's
+   `daemon_start` line records the resolved argv. A wrong `OTTO_PI_COMMAND` (a spaced path whose
+   inner quotes were lost) used to reach the user as "the task failed" with no reason.
 
 8. **Testing is platform-parameterized, and Windows is a CI target.** New platform code takes its
    platform, environment and subprocess runners as injectable dependencies, so the Windows
@@ -99,3 +103,34 @@ until a per-user logon autostart exists.
 - The Windows test suite is not yet fully green (POSIX-shaped path assertions and temp-directory
   cleanup are the remaining debt). That debt is tracked with the background phase, not hidden by
   skipping whole files.
+
+## Acceptance record (2026-11-10)
+
+The phase-1 test was run on a real Windows machine (`CXFZB-liwq`, `dev_4f426b79da4b`, Windows 11,
+Node 24) connected to the deployed steward, with no WSL in the loop:
+
+| Step | Observed |
+| --- | --- |
+| Pairing | code redeemed over an SSH tunnel, `connEpoch 1`; steward shows the machine online with `["pi"]` |
+| Launch | `otto status`: `pi: windows-node-entry — C:\Users\Administrator\.pi\agent\bin\pi-launcher.js`, no environment override |
+| Task | steward-dispatched **read-only** "summarize this repository" on `D:/project/tstock` |
+| Worker | `w_01M728HKXJ67NYCYVG9BPYY7Q2`: `started → 5 × progress → report → settled` in 48.5 s |
+| Steward | `sh_worker.lastOutcome = reported:done`, worker `idle`, thread `unread 0` |
+| Report | a `文件:行号`-cited summary (purpose / stack / entry points / layout) delivered as a card |
+| Read-only respected | tools used: `read`, `ls`, `report` — no write, no shell |
+| Repository untouched | HEAD `6456c51b…`; `git status` (31 entries) and `git diff \| sha1sum` byte-identical to the pre-run fingerprint |
+
+The same machine settled three failures before that pass, and they are part of the record because
+they are what decision 7 and the settled-error pass-through ([connector-pi.md §5.2](../design/connector-pi.md))
+exist for:
+
+- two `error:unknown` settles: pi's default provider (`openai-codex`) was out of quota, and the
+  reason stayed in pi's session file — the steward saw only the class;
+- one `startup_failed`: the launch came from an `OTTO_PI_COMMAND` whose spaced path lost its inner
+  quotes, so `argv[0]` was `C:\Program` and spawn returned `ENOENT`.
+
+Two operational prerequisites for a Windows connector follow from this run and are documented in
+[agent-connect.md](../agent-connect.md) and the READMEs: the local agent's *default* provider must
+have usable quota (an agent that silently falls back to a logged-in but exhausted provider reports
+only a provider-side error), and a spaced path in `OTTO_PI_COMMAND` must be inner-quoted — or use
+`node <launcher> …`, which has no space to quote.

@@ -153,10 +153,11 @@ Adjudicate in order:
 
 1. `aborted == true` → `aborted`.
 2. The last assistant message in the window has `stopReason == "error"`, or the last `auto_retry_end.success == false` → `error`, classified as:
-   - `auth` (401/403): no automatic retry; the user must fix the model credentials on the machine.
+   - `auth` (401/403, and quota: usage limit reached, credit balance too low, 402): no automatic retry; the user must fix the model credentials or the provider quota on the machine. A quota stop is not a credential stop but it is the same class on purpose — no retry can succeed and the fix is on that machine.
    - `transient` (429, 5xx, overload, network): one automatic resume is allowed (§9.2).
    - `context`: context overflow; suggest the steward switch to a new session with a handoff brief attached.
    - `unknown`.
+   The agent's own `errorMessage` travels with the settle (see the event table): the class is a routing decision, not a diagnosis, and a message that stays only in the agent's session file leaves the user with `error:unknown` and nothing to act on.
 3. `report` was called within the window → `reported`; take the **last** call, with status `done | blocked | needs_decision`.
 4. Otherwise → `unreported`: the forced re-report already ran and there is still no report; hand the last assistant text to the steward for fallback classification (done / asking a question / uncertain).
 
@@ -365,7 +366,7 @@ This is also the minimal form of future "machine-side observation": no process m
 | `started` | `sessionId, cwd, branch` | Successful start |
 | `progress` | `phase: "thinking"\|"tool", tool?, target?, turn` | `tool_execution_start`, `turn_start`, emitted after throttling |
 | `report` | §7.2 fields merged with GitFacts | Outcome adjudicated as `reported` |
-| `settled` | `outcome: reported\|aborted\|error\|unreported`, `errorClass?`, `lastText?` (only for `unreported`), `usage` | `agent_settled` |
+| `settled` | `outcome: reported\|aborted\|error\|unreported`, `errorClass?`, `errorMessage?` (the agent's own words for an `error`), `lastText?` (only for `unreported`), `usage` | `agent_settled` |
 | `queue_returned` | `texts[]` | Undelivered messages retrieved during `interrupt` |
 | `lost` / `resumed` | reason, count | Reconciliation and resume |
 | `external_activity` | §10 | Pre-launch comparison |
