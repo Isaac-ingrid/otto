@@ -2699,15 +2699,22 @@ function lostResumedText(type: string, event: Record<string, unknown>): string {
 /** The deterministic question text for failure-class settled events (steward.md §5.3). */
 function settledQuestionText(outcome: string, errorClass: string | null, event: Record<string, unknown>): string {
   const lastText = typeof event.lastText === "string" && event.lastText.length > 0 ? event.lastText : "";
-  const detail = lastText ? `（${lastText.slice(0, 160)}）` : "";
+  // The agent's own sentence outranks the connector's fallback text: for an `error` settle the
+  // class (`unknown`) says nothing, and this is the only place the user can see the real cause
+  // (2026-11-10: a quota failure reached them as `error:unknown`).
+  const errorMessage =
+    typeof event.errorMessage === "string" && event.errorMessage.length > 0 ? event.errorMessage : "";
+  const detail = errorMessage || lastText ? `（${(errorMessage || lastText).slice(0, 160)}）` : "";
   if (outcome === "unreported") {
     return `worker 结束时没有产出汇报。${lastText ? `最后说：${lastText.slice(0, 300)}` : ""}`;
   }
   switch (errorClass) {
     case "auth":
       // §9.2: auth never auto-resumes — the detail says what the connector saw (e.g. a
-      // failed resume), the base says what the user must do.
-      return `机器上的模型凭据失效（401/403），需要你在那台机器上修复后重新派发。${detail}`;
+      // failed resume), the base says what the user must do. Quota failures classify as auth
+      // too (the fix is the same: repair credentials/quota on that machine, or pick a model
+      // that has budget), so the sentence names both causes.
+      return `机器上的模型凭据或额度不可用（401/403 或额度用尽），需要你在那台机器上修复后重新派发。${detail}`;
     case "context":
       return "上下文超长，这个会话装不下了；建议开一个新会话，带上交接简报继续。";
     case "stall":

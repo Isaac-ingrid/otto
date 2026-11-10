@@ -40,7 +40,7 @@ import {
   type ProxyConfig,
 } from "./proxy.ts";
 import { getServiceInstaller, OTTO_LABEL, type ServiceInstaller, type ServiceSpec } from "./service.ts";
-import { piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
+import { checkLaunchSpawnable, PI_COMMAND_ENV, piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
 import { LocalStore } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
 import { runUpgrade } from "./upgrade.ts";
@@ -334,6 +334,18 @@ async function doctorCommand(): Promise<void> {
   console.log(`node ≥ 22.18:        ${nodeOk ? "ok" : "FAIL — upgrade Node"}`);
   if (!nodeOk) healthy = false;
 
+  // The agent launch, checked for spawnability: a wrong OTTO_PI_COMMAND (unquoted path with a
+  // space) used to fail only inside a worker's stderr log, after a task was already dispatched.
+  const pi = resolveExecutableLaunch(piCommandFromEnv() ?? ["pi"]);
+  const piCheck = checkLaunchSpawnable(pi.argv);
+  console.log(
+    `pi:                 ${pi.source}${pi.detail ? ` — ${pi.detail}` : ""}${piCheck.ok ? "" : ` — FAIL: ${piCheck.detail}`}`,
+  );
+  if (!piCheck.ok) {
+    healthy = false;
+    console.log(`                    ${PI_COMMAND_ENV} paths with a space need inner quotes: "C:\\Program Files\\nodejs\\node.exe" <launcher.js> …`);
+  }
+
   const dbPath = join(stateDir(), "connector.sqlite");
   let serverUrl: string | null = null;
   let config: ProxyConfig | null = null;
@@ -442,7 +454,13 @@ async function statusCommand(): Promise<void> {
   // `pi` name: the `pi.cmd` shim is resolved to its real JS entry (pi-launch.ts), and seeing
   // that here is how a "pi works in my shell but not from otto" report gets diagnosed.
   const pi = resolveExecutableLaunch(piCommandFromEnv() ?? ["pi"]);
-  console.log(`pi:       ${pi.source}${pi.detail ? ` — ${pi.detail}` : ""}`);
+  const piCheck = checkLaunchSpawnable(pi.argv);
+  console.log(
+    `pi:       ${pi.source}${pi.detail ? ` — ${pi.detail}` : ""}${piCheck.ok ? "" : ` — NOT SPAWNABLE: ${piCheck.detail}`}`,
+  );
+  if (!piCheck.ok) {
+    console.log(`          ${PI_COMMAND_ENV} paths that contain a space need quotes around them: "C:\\Program Files\\nodejs\\node.exe" <launcher.js> …`);
+  }
 
   const dbPath = join(dir, "connector.sqlite");
   if (!existsSync(dbPath)) {

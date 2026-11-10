@@ -2086,6 +2086,7 @@ export class WorkerManager {
         await this.emitEvent(event.workerId, "settled", {
           outcome: event.outcome,
           errorClass: event.errorClass,
+          errorMessage: event.errorMessage,
           lastText: event.lastText,
           usage: event.usage,
         });

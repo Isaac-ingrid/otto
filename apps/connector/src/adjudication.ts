@@ -28,6 +28,13 @@ export interface Adjudication {
   outcome: SettledOutcome;
   errorClass?: ErrorClass;
   report?: ReportPayload;
+  /**
+   * Only for `error`: what the agent actually said, verbatim and unbounded-by-classification.
+   * The class alone ("unknown") told the user nothing — a real "Codex error: The usage limit
+   * has been reached" (2026-11-10) reached them as `error:unknown` while the sentence stayed
+   * behind in pi's session file. The steward renders this next to the class.
+   */
+  errorMessage?: string;
   /** Only for `unreported`: handed to the steward for fallback classification. */
   lastText?: string;
 }
@@ -42,7 +49,11 @@ export function adjudicate(window: RunWindow): Adjudication {
   const errored = window.lastAssistant?.stopReason === "error" || window.lastRetry?.success === false;
   if (errored) {
     const message = window.lastAssistant?.errorMessage ?? window.lastRetry?.finalError ?? "";
-    return { outcome: "error", errorClass: classifyError(message) };
+    return {
+      outcome: "error",
+      errorClass: classifyError(message),
+      ...(message ? { errorMessage: message.slice(0, 4000) } : {}),
+    };
   }
 
   // 3. `report` was called within the window → reported; take the LAST call.
@@ -58,6 +69,16 @@ export function classifyError(message: string): ErrorClass {
   const msg = message.toLowerCase();
   // auth (401/403): no automatic retry; the user must fix the model credentials.
   if (/\b401\b|\b403\b|unauthorized|forbidden|invalid api key|api key/.test(msg)) return "auth";
+  // Quota (usage limit / credits gone): no retry can succeed, and the fix is the same one auth
+  // asks for — on that machine, repair the provider's credentials or its quota. Checked before
+  // context so "usage limit" is not read as a token-window problem. 402 is "payment required".
+  if (
+    /usage limit|quota|insufficient (?:quota|balance|credits?)|out of credits|credit balance|exceeded your current|billing|payment required|\b402\b/.test(
+      msg,
+    )
+  ) {
+    return "auth";
+  }
   // context: context overflow; suggest a new session with a handoff brief.
   if (/context|token limit|maximum context|context_length|too many tokens|overflow/.test(msg)) return "context";
   // transient (429, 5xx, overload, network): one automatic resume allowed.

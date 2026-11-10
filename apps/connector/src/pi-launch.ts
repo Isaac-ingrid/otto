@@ -157,3 +157,31 @@ export function resolveExecutableLaunch(command: string[], deps: LaunchDeps = {}
   }
   return { argv: command, source: "as-is" };
 }
+
+export interface LaunchCheck {
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Whether a resolved launch can actually be spawned on this machine. Windows needs this because
+ * `spawn` there does no shell quoting of its own: a split-on-space mistake in OTTO_PI_COMMAND
+ * ("C:\Program Files\...\node.exe" written without the inner quotes) leaves argv[0] as
+ * `C:\Program` and the failure surfaces only as `spawn C:\Program ENOENT` inside a worker's
+ * stderr log (2026-11-10). `otto status` / `otto doctor` call this to say so up front.
+ * On POSIX the kernel resolves a bare name through PATH, so there is nothing to check here.
+ */
+export function checkLaunchSpawnable(argv: string[], deps: LaunchDeps = {}): LaunchCheck {
+  const head = argv[0];
+  if (!head) return { ok: false, detail: "empty argv" };
+  const exists = deps.fileExists ?? existsSync;
+  // A path (absolute or relative) is checked directly — this is the truncated-path case.
+  if (/[\\/]/.test(head)) {
+    return exists(head) ? { ok: true, detail: head } : { ok: false, detail: `no such file: ${head}` };
+  }
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return { ok: true, detail: `${head} (PATH)` };
+  const found = whichWindows(head, deps);
+  if (found.length === 0) return { ok: false, detail: `not on PATH: ${head}` };
+  return { ok: true, detail: found[0]! };
+}

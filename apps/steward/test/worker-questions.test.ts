@@ -722,6 +722,27 @@ describe("settled outcomes and broken follow the rules table (steward.md §5.3, 
     fake.close();
   }, 30_000);
 
+  it("error:unknown shows the agent's own words beside the class (2026-11-10 quota case)", async () => {
+    const { fake, workerId } = await runningWorker("模型额度用尽");
+    await fake.emit("settled", workerId, {
+      type: "settled",
+      outcome: "error",
+      errorClass: "unknown",
+      errorMessage: "Codex error: The usage limit has been reached",
+    });
+    const snap = await waitFor(
+      () => ownerStub().debugSnapshot(),
+      (s) => s.questions.some((x) => x.workerId === workerId),
+      "unknown-class failure question",
+    );
+    const q = snap.questions.find((x) => x.workerId === workerId)!;
+    expect(q).toMatchObject({ status: "open", kind: "failure" });
+    // The class alone ("unknown") was all the user used to get; the sentence is the diagnosis.
+    expect(q.text).toContain("Codex error: The usage limit has been reached");
+    expect(snap.threads[0]!.workers[0]!.state).toBe("broken");
+    fake.close();
+  }, 30_000);
+
   it("error:context pushes and suggests a fresh session; error:transient stays completely silent", async () => {
     const { fake, workerId } = await runningWorker("大重构");
     // transient: the connector auto-resumes — nothing is sent, nothing asked, no wake.

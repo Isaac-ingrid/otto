@@ -145,6 +145,8 @@ export type RawAdapterEvent =
       workerId: string;
       outcome: SettledOutcome;
       errorClass?: ErrorClass;
+      /** The agent's own words for an `error` settle — the class alone is not diagnosable. */
+      errorMessage?: string;
       /** Only set for `unreported`: fallback classification input for the steward. */
       lastText?: string;
       report?: ReportPayload;

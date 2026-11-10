@@ -28,7 +28,25 @@ describe("adjudicate (connector-pi.md §5.2 order)", () => {
 
   it("2b. last auto_retry_end success=false → error, classified from finalError", () => {
     const result = adjudicate({ aborted: false, lastRetry: { success: false, finalError: "529 overloaded" } });
-    expect(result).toEqual({ outcome: "error", errorClass: "transient" });
+    expect(result).toEqual({ outcome: "error", errorClass: "transient", errorMessage: "529 overloaded" });
+  });
+
+  it("2c. the agent's own error text rides the settled event (the class alone is undiagnosable)", () => {
+    const result = adjudicate({
+      aborted: false,
+      lastAssistant: {
+        stopReason: "error",
+        errorMessage: "Codex error: The usage limit has been reached",
+        text: "",
+      },
+    });
+    expect(result.outcome).toBe("error");
+    expect(result.errorMessage).toBe("Codex error: The usage limit has been reached");
+    // No message at all (a silent stop) must not invent one.
+    expect(adjudicate({ aborted: false, lastAssistant: { stopReason: "error", text: "" } })).toEqual({
+      outcome: "error",
+      errorClass: "unknown",
+    });
   });
 
   it("3. report called in the window → reported", () => {
@@ -56,6 +74,12 @@ describe("classifyError (§5.2 item 2)", () => {
     ["request timed out", "transient"],
     ["context length exceeded", "context"],
     ["maximum context length is 128000 tokens", "context"],
+    // Quota is an auth-class stop: no retry can succeed, the fix is on that machine.
+    ["Codex error: The usage limit has been reached", "auth"],
+    ["You exceeded your current quota, please check your plan and billing details", "auth"],
+    ["Your credit balance is too low to access the API", "auth"],
+    ["insufficient quota", "auth"],
+    ["402 payment required", "auth"],
     ["something odd happened", "unknown"],
   ])("%s → %s", (message, expected) => {
     expect(classifyError(message)).toBe(expected);

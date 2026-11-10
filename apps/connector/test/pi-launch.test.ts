@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   PI_COMMAND_ENV,
+  checkLaunchSpawnable,
   jsEntryFromShim,
   piCommandFromEnv,
   resolveExecutableLaunch,
@@ -125,5 +126,31 @@ describe("whichWindows", () => {
       fileExists: (path) => path === join("C:\\Program Files\\nodejs", "pi.cmd"),
     };
     expect(whichWindows("pi", deps)).toEqual([join("C:\\Program Files\\nodejs", "pi.cmd")]);
+  });
+});
+
+// `otto status` / `otto doctor` ask this before a task is dispatched: a launch that cannot be
+// spawned is the difference between "unknown error inside a worker" and "your env var is wrong".
+describe("checkLaunchSpawnable", () => {
+  it("accepts an existing path and reports a truncated one", () => {
+    const deps = fsDeps({ [NODE]: "" });
+    expect(checkLaunchSpawnable([NODE, "C:\bin\pi-launcher.js"], deps)).toMatchObject({ ok: true, detail: NODE });
+    // The 2026-11-10 shape: OTTO_PI_COMMAND split at the space, so argv[0] is "C:\Program".
+    const broken = checkLaunchSpawnable(["C:\Program", "Files\nodejs\node.exe"], deps);
+    expect(broken.ok).toBe(false);
+    expect(broken.detail).toContain("C:\Program");
+  });
+
+  it("resolves a bare name through PATH on Windows and skips the check on POSIX", () => {
+    const deps: LaunchDeps = {
+      platform: "win32",
+      env: { PATH: "C:\tools", PATHEXT: ".EXE" },
+      fileExists: (path) => path === join("C:\tools", "node.exe"),
+    };
+    expect(checkLaunchSpawnable(["node", "x.js"], deps)).toMatchObject({ ok: true });
+    expect(checkLaunchSpawnable(["nope"], deps)).toMatchObject({ ok: false, detail: "not on PATH: nope" });
+    // POSIX: the kernel resolves the bare name; there is nothing to check here.
+    expect(checkLaunchSpawnable(["pi"], { platform: "linux" })).toMatchObject({ ok: true });
+    expect(checkLaunchSpawnable([], { platform: "linux" })).toMatchObject({ ok: false, detail: "empty argv" });
   });
 });

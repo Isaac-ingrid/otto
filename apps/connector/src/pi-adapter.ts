@@ -475,6 +475,7 @@ export class PiAdapter implements AgentAdapter {
       workerId: runtime.workerId,
       outcome: adjudicated.outcome,
       errorClass: adjudicated.errorClass,
+      errorMessage: adjudicated.errorMessage,
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
       usage,
