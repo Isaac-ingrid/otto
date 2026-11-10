@@ -161,6 +161,26 @@ rm /etc/nginx/sites-enabled/otto && systemctl reload nginx && ufw delete allow 8
 # plus deleting the security-group rule
 ```
 
+**The port in the `Host` header is load-bearing.** The first phone sign-in failed with
+`无法连接 Otto，请检查网络后重试`, and the access log said `POST /auth/password 403`.
+`sameOrigin()` (`src/index.ts`) compares the browser's `Origin` header against the origin the app
+builds from `Host` + `X-Forwarded-Proto` (`node-host/server.ts`), and nginx's `$host` **drops the
+port** — so the app saw `http://115.29.164.8` while the phone sent `http://115.29.164.8:8080`, and
+every auth POST was `403 {"error":"forbidden"}` even though the page itself loaded fine. The fix is
+`proxy_set_header Host $http_host;` in the vhost (and in `deploy/nginx-otto.conf`), after which the
+same probe from outside returns `401 {"error":"invalid_password"}` — i.e. sameOrigin passes and the
+password is actually compared. Two things to remember from it: a vhost on a non-default port must
+forward `$http_host`, and a deployment behind a proxy is where the app's own error text is the only
+reliable signal.
+
+The login page also still carried Cloudflare-era copy — `Forgot your password?` told a self-hosted
+owner to open *your Worker* in the Cloudflare dashboard — and it reported any non-401 answer as a
+network failure, which is what sent the diagnosis after a network fault that did not exist. Both are
+fixed in `apps/steward/ui/login.js` and `apps/steward/src/login-page.ts`: the recovery steps are now
+split self-hosted vs Cloudflare, and a refused sign-in reports the HTTP status it got. The UI ships
+with `--copy` and needs no restart; the static copy inside the bundle only changes on the next code
+deploy.
+
 `GET /` renders the sign-in page; `POST /api/pairing` with `authorization: Bearer $SERVER_KEY`
 returns the `npx @isaac2ingrid/otto connect …` line.
 
