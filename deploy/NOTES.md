@@ -173,7 +173,12 @@ certificate from `/etc/letsencrypt/live/otto-ip/`, still proxying to `127.0.0.1:
 deliberately **not** on `:80`: this box's `default` server answers `:80` *by IP* (`server_name _`)
 with the tstock build, so a vhost carrying `server_name 115.29.164.8` on `:80` takes that traffic
 over. Not theory — an earlier attempt installed exactly that, and `http://115.29.164.8/` served
-Otto's sign-in page for two minutes before it was rolled back.
+Otto's sign-in page for two minutes before it was rolled back. Because `:80` is not ours, a plain
+HTTP request can never be redirected from there, and typing `115.29.164.8:443` without a scheme
+(which browsers read as `http://`) lands on the TLS port and gets nginx's
+`400 The plain HTTP request was sent to HTTPS port`. The vhost answers that case with
+`error_page 497 =301 https://<ip>$request_uri` — host hardcoded, so a crafted `Host` header cannot
+turn it into an open redirect.
 
 Verified from a client outside the box: `https://115.29.164.8/` → `200 Sign in - Otto` with the
 chain validating against the public trust store and `subjectAltName = IP Address:115.29.164.8`;
