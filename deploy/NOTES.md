@@ -267,6 +267,23 @@ not something the scripts can do. So the resume order is exactly: ICP review →
 (As of 2026-11-10 that security-group rule exists and `https://115.29.164.8` serves a trusted
 certificate, so the by-IP path is already the working way in; the domain path stays unrun.)
 
+**2026-11-11: the name resolves, and Aliyun intercepts it.** `ottocloud.cn` and `www.ottocloud.cn`
+both point at this box, and nginx still sees nothing for them: `:80` answers
+`403 Non-compliance ICP Filing` with `Server: Beaver` and a link to
+`aliyun.com/beian/beian-block?id=…`. That answer comes from Aliyun's edge, not this machine — the
+access log has zero requests for the name. So the filing is not effective for it (either not yet
+granted, or granted through a different 接入商 that was never 接入备案 here). `:443` is *not*
+intercepted: `openssl s_client -connect ottocloud.cn:443 -servername ottocloud.cn` completes a
+handshake and gets this box's by-IP certificate back, because no vhost answers that SNI yet.
+
+The consequence for this script: `--live` is `certbot --nginx`, i.e. HTTP-01 on `:80`, so it
+cannot run until the block lifts. A certificate for the name is obtainable meanwhile by DNS-01 (the
+zone is on Aliyun DNS, `dns7/dns8.hichina.com`), at the cost of a DNS-scoped AccessKey on the box
+and an `:80` that still shows the block page to anyone who types the bare name. Diagnostic trap
+worth remembering: a `Host: <name>` probe against the raw IP returned tstock's `200` *before* the A
+record existed, which reads like a pass — Aliyun's check follows DNS, so only
+`curl http://<name>/` after the record exists answers the question.
+
 Two headers are load-bearing, not decoration: `node-host/server.ts` builds the request origin
 from `Host` + `X-Forwarded-Proto`, and the app stores it in `sh_deploy.origin` to mint absolute
 login links. Verified: a pairing call through the vhost returned
