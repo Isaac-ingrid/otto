@@ -230,6 +230,10 @@ through `127.0.0.1:8787` cannot come back online after a logoff or reboot until 
 again — the connector retries and reconnects within a minute once it does (observed: `connection_closed
 1006` until the tunnel returned, then `welcomed`), but nothing restarts the tunnel itself.
 
+*Superseded 2026-11-11: the connector now points at `https://115.29.164.8` and the tunnel is
+retired, so a reboot no longer needs it. The paragraph stays as the reason the tunnel existed, and
+as the note to read before pairing a machine through a local forward.*
+
 **Re-pointing a paired connector needs no pairing code (2026-11-11).** `serverUrl` in
 `~/.otto/connector.sqlite` is local bookkeeping: the steward identifies a machine by `deviceId` +
 `token`, so with the daemon stopped a single `UPDATE credentials SET serverUrl = ?` moved this

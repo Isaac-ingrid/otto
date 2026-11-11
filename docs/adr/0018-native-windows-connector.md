@@ -460,4 +460,34 @@ took over `daemon.lock`, which is everything the Run key does except the Run key
 untested is therefore only whether Windows runs it at logon. Keep that check opportunistic: after the
 next ordinary reboot, `otto status` must show a `service:`/`daemon:` pair whose pids and start time
 are newer than the logon, and `supervisor.log` must gain a `supervising … as pid N` line. The "online
-with no terminal" half is separate and still blocked on replacing the tunnel (phase 3).
+with no terminal" half is separate and still blocked on replacing the tunnel (phase 3) — **closed
+below the next day.**
+
+## Acceptance record: logon with no terminal (2026-11-11)
+
+The deferred check above had a structural blocker: the connector was paired through
+`http://127.0.0.1:8787`, a local SSH forward that dies with the session, so "online with no terminal"
+could not pass by construction. Re-pointing it at the public address needed no pairing code — the
+steward knows a machine by `deviceId` + `token`, and `serverUrl` is local bookkeeping, so one
+`UPDATE credentials SET serverUrl` (daemon stopped) plus a start was enough; the record of that is in
+`deploy/NOTES.md`. Then the owner rebooted and logged in. **No terminal was opened, no tunnel was
+re-created, nothing was clicked.**
+
+| # | check | before the reboot | after the reboot |
+|---|-------|-------------------|------------------|
+| 1 | `otto status` service / daemon | pid 78516, child 89624 | **pid 32496, child 7532, since 09:56:16** |
+| 2 | `daemon.lock` / `supervisor.json` | pid 78516, `restarts: 0` | **pid 32496, `restarts: 0`** |
+| 3 | `logs/supervisor.log` | `supervising … as pid 78516` | **`supervising C:\Users\Administrator\.otto as pid 32496`** |
+| 4 | steward `sh_machine` | `online=1`, `bootId 20da15bb-…` | **`online=1`, `bootId d040529b-1b97-4daf-a4da-fdd6c99f0022`, `lastSeen 2026-11-11 09:56:16`** |
+| 5 | `logs/connector.log` | `welcomed serverUrl=https://115.29.164.8` | **`daemon_start pid 7532` + `welcomed serverUrl=https://115.29.164.8`** |
+| 6 | `connection_closed` | none since 2026-11-10 | **none** |
+
+Windows confirms the reboot itself (`LastBootUpTime` 2026-11-06 11:43:33 → 2026-11-11 09:55:10), and
+the steward's `bootId` changing is what makes this a reboot rather than a restarted process. So the
+whole shape decision 11 chose is now observed end to end on the machine it was chosen for: the Run
+key fires at logon, the generated `.vbs` starts the supervisor with no console, the supervisor takes
+`daemon.lock`, and the child reaches the steward over TLS on the public IP with nobody watching.
+
+What this still does **not** cover: a machine that is not logged in at all. The Run key is per-user
+by decision 6, so an unattended Windows box needs the Task Scheduler path this ADR leaves opt-in; and
+`otto stop` surviving the next logon is still asserted by unit tests only.
