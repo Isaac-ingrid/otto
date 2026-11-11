@@ -230,6 +230,15 @@ through `127.0.0.1:8787` cannot come back online after a logoff or reboot until 
 again — the connector retries and reconnects within a minute once it does (observed: `connection_closed
 1006` until the tunnel returned, then `welcomed`), but nothing restarts the tunnel itself.
 
+**Re-pointing a paired connector needs no pairing code (2026-11-11).** `serverUrl` in
+`~/.otto/connector.sqlite` is local bookkeeping: the steward identifies a machine by `deviceId` +
+`token`, so with the daemon stopped a single `UPDATE credentials SET serverUrl = ?` moved this
+machine from `http://127.0.0.1:8787` (the tunnel) to `https://115.29.164.8`, and the next start came
+back `welcomed` on the first try. `sh_deploy.origin` followed on its own — it is one row rewritten
+by whichever request last reached the app. The tunnel is retired. `lastSeen` is written only on
+connect, so "still online" is read from there being no `connection_closed` across several 25 s
+heartbeats, not from a moving timestamp.
+
 ## Going public: `deploy/enable-tls.sh`
 
 The vhost lives in git as `deploy/nginx-otto.conf`, rendered by `deploy/enable-tls.sh`. It is not
