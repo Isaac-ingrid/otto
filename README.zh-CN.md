@@ -8,13 +8,48 @@
 
 <p align="center"><a href="README.md">English</a> · 简体中文</p>
 
-Otto 是一个**自行托管的个人智能体**：**总管部署在你自己的云服务器（VPS）上，7×24 小时在线**，作为 Node.js 进程运行，状态保存在 SQLite；各台电脑上的 connector（连接器）在你选择的目录中运行本地 coding agent。你可以在网页工作台和 Otto 对话、交代任务，之后从别的设备接着聊。
+**Otto 是一个持续在线、协调你各台电脑上 coding agent 的个人智能体。** 你只需在一个网页工作台里对话；它记住持续进行的事项，把任务交给本机 agent，并把进展与待你决定的问题带回同一处。云端负责协调，本机 agent 才在你选定的仓库里执行代码工作。
 
 - **云端总管，始终在线。** 即使电脑休眠，总管仍在云服务器上保留对话、记忆和定时回看；本地编码任务等连接器上线后才能执行。
 - **多台机器，一处对话。** 任务、待决事项、后续安排和进展集中在一起。
 - **代码留在自己的电脑上。** 连接器在本地运行 pi（或已安装的 Claude Code）；coding agent 的完整会话记录也留在本机。
 - **有边界的记忆。** 偏好和项目约定与聊天记录分开保存，记录来源及确认状态；过时事实被取代和仅为腾空间而归档是两回事。
 - **随时由你掌控。** 工作台显示正在进行的任务和需要你决定的事项；正在生成的回复可以停下。
+
+## 架构
+
+```text
+网页工作台 / 可选的 Owner API
+             │ HTTPS / WebSocket
+             ▼
+你的云服务器：Otto steward（Node.js + SQLite）
+  ├─ 确定性核心：事件、期限、通知、持久队列
+  ├─ 模型协调层：路由、判断、摘要、工具调用
+  └─ 事项账本：Threads、待决事项、记忆、worker 状态
+             ▲ connector 主动建立 WebSocket 连接
+             │
+macOS / Linux / Windows 上的 connector
+  └─ pi 或 Claude Code → 你选定的本地仓库
+```
+
+云端状态保存在一个持久化 SQLite 数据库里；连接器主动连出，本机无需开放入站端口。仓库内容和 coding agent 的完整会话记录留在本机；云端与本地 agent 各用各的模型配置。**同一套协调逻辑**也可以部署在 [Cloudflare Workers + SQLite Durable Object](docs/design/node-host.md) 上；VPS 运行的是 Node 适配层，不是另一套产品。
+
+## 技术设计与独特之处
+
+- **用账本维持连续性，而不是无限加长提示词。** 事项（Thread）、worker 汇报和带来源的记忆独立于模型对话保存。每轮注入最新、限长的态势简报；对话压缩不会取代事项的事实记录。
+- **确定的事交给代码，判断交给模型。** 状态流转、期限与常规完成通知无需模型调用；含糊的路由、问题处理和摘要才交给模型。模型不可用或超预算时，确定性兜底仍会把待决问题交给你。
+- **行动有持久化边界。** 用户轮次先落库再执行，串行且可停止；已派发的 worker 不因此中断。幂等键和持久队列支持重试、重启恢复；事件触发的派发还要校验真实授权来源。
+- **记忆可追溯、可控制。** 区分用户确认的事实、worker 汇报和推断，也区分「旧事实被取代」与「仅为腾空间归档」。详见[架构设计](docs/design/steward.md)和[轮次设计](docs/adr/0017-turns-are-serial-and-cancellable.md)。
+
+### 从 Super Agent 对照中吸收与取舍
+
+Otto 不是照搬 DeepSeek Super Agent；项目对照过三种思路，并记录了[实际落地与拒绝的部分](docs/plan/self-hosted.md#p4--product-follow-ups-from-the-super-agent-comparison)：
+
+- **卡住任务的复审：** 可选的一次模型判断能重新规划 worker 任务或向你提问；`WATCHDOG_LLM` **默认关闭**，确定性的超时判定不会被模型推迟。
+- **实时跟进事项：** 工作台通过 WebSocket 订阅 Thread 的事件和状态，用时间线游标续接，而不只是定时轮询。
+- **不做推测式并行回答：** 前一轮未结束就启动下一轮，可能丢失上下文或重复派发同一意图。Otto 选择持久化、串行、可停止的轮次。
+
+Otto 目前没有云端浏览器、网页搜索或实时天气查询工具；需要本地执行的任务必须等连接器在线，但电脑休眠时云端仍能对话、记忆和安排回看。
 
 ## 开始使用
 
@@ -31,7 +66,7 @@ mkdir -p apps/steward/dist/ui
 cp -R apps/steward/ui/. apps/steward/dist/ui/
 ```
 
-接着按[云服务器自托管操作手册](docs/self-hosted.md)，把 **`apps/steward/dist/node/steward-node.mjs`、`dist/ui/` 和运行时依赖 `ws`** 安装到服务器。把至少 15 个字符的独立 `LOGIN_PASSWORD` 写入受保护的 `.dev.vars`，明确设置 `OTTO_CONFIG_DIR`、`OTTO_DB_PATH`；由 systemd 管理进程并在故障后重启，进程只监听本机，前面用支持 WebSocket 转发的 HTTPS 反向代理。让云服务器及其持久磁盘 **7×24 小时运行**；在线备份 SQLite 请用 `.backup`，不要在 WAL 工作时直接拷贝数据库文件。不要提交密钥或把它发进聊天。
+接着按[云服务器自托管操作手册](docs/self-hosted.md)，把 **`apps/steward/dist/node/steward-node.mjs`、`dist/ui/` 和运行时依赖 `ws`** 安装到服务器。把至少 15 个字符的独立 `LOGIN_PASSWORD` 和 `OTTO_PUBLIC_ORIGIN=https://<你的访问地址>` 写入受保护的 `.dev.vars`，明确设置 `OTTO_CONFIG_DIR`、`OTTO_DB_PATH`；由 systemd 管理进程并在故障后重启，进程只监听本机，前面用支持 WebSocket 转发的 HTTPS 反向代理。让云服务器及其持久磁盘 **7×24 小时运行**；在线备份 SQLite 请用 `.backup`，不要在 WAL 工作时直接拷贝数据库文件。不要提交密钥或把它发进聊天。
 
 打开**你的云服务器的 HTTPS 地址**登录，在工作台的**设置**中填写总管的模型 API key。服务器必须能被要连接的电脑访问；通过 SSH 隧道访问仅绑定本机的地址适合私人使用，但不是给其他电脑连接器使用的公网地址。
 
@@ -69,12 +104,6 @@ otto status
 > 「接着上次的任务做，这次用 pnpm。」
 
 工作台把消息、任务线程、待决事项、已连接的机器和会话记录放在一起。回复边写边出现；中途发的消息排在当前回复之后。
-
-## 它如何工作
-
-**你 → 自己云服务器上持续在线的 Otto（Node.js + SQLite）← 各台电脑连接器主动建立的 WebSocket → pi / Claude Code**
-
-云端总管全天可处理对话、记忆和定时安排；连接器主动连向它，只有本地电脑在线时才启动 coding agent。总管状态保存在**你的云服务器**的 SQLite 中，需要你自行运维和备份；仓库内容及完整的本地 agent 会话留在运行连接器的电脑上。总管与本地 agent 分别使用各自配置的模型服务。
 
 ## 进一步了解
 
