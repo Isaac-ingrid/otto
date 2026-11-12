@@ -22,6 +22,7 @@ interface Env {
   LOGIN_RATE_LIMITER?: RateLimit;
   SERVER_KEY_PREVIOUS?: string;
   MODEL_KEY?: string;
+  BRAVE_SEARCH_API_KEY?: string;
   STEWARD_MODEL?: string | { provider?: unknown; modelId?: unknown; baseUrl?: unknown };
   // Issue #28 (steward.md §12): USD per UTC day for the daily budget soft cap. Unset →
   // budget.ts DEFAULT_DAILY_BUDGET_USD; 0 disables automatic model wakes entirely.
@@ -45,6 +46,7 @@ declare namespace Cloudflare {
     LOGIN_RATE_LIMITER?: RateLimit;
     SERVER_KEY_PREVIOUS?: string;
     MODEL_KEY?: string;
+    BRAVE_SEARCH_API_KEY?: string;
     STEWARD_MODEL?: string | { provider?: unknown; modelId?: unknown; baseUrl?: unknown };
     DAILY_BUDGET_USD?: string | number;
   // Issue #3 (steward.md §8.4): let the model look at a stalled run once per silent stretch

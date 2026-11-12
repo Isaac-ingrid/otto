@@ -340,9 +340,12 @@ One idempotent script, run once on the box (it restarts `otto` and journald):
 
 Verified after the first run: service `active`, limits in `systemctl show`, a real backup
 written and `PRAGMA integrity_check` = `ok` (3 threads, 14 outbound rows inside). Off-box copy is
-deferred on purpose (2026-11-09): the backup protects against mistakes, not against losing the
-disk, and a restore without `/etc/otto/.dev.vars` re-pairs every machine anyway. `RCLONE_REMOTE`
-plus a `rclone copy` step in the unit is the path if that trade ever changes.
+still pending an operator-owned storage target: local copies protect against mistakes, not losing
+the disk. `deploy/offsite-backup.sh` and `deploy/install-offsite-backup.sh` now provide an opt-in
+rclone-crypt-only upload plus isolated weekly download/integrity check, pairing each SQLite
+snapshot with `/etc/otto/.dev.vars`. They are **not installed on this box** until an encrypted
+remote, credentials and a separately safeguarded crypt config are provided. See
+[the offsite backup runbook](../docs/self-hosted.md#backups).
 
 `unattended-upgrades` was already installed and enabled (security pockets only, the distro
 default), so the script only reports its state. A disk-usage alarm has to be created in the

@@ -49,7 +49,7 @@ Rather than copying a product wholesale, Otto [tested three ideas](docs/plan/sel
 - **Live Thread following:** the workspace subscribes to Thread events and state over WebSocket, with a timeline cursor for resuming, instead of relying solely on polling.
 - **No speculative parallel turns:** starting a second answer before the first settles risks missing conversation context or dispatching the same intent twice. Otto instead keeps turns serial, durable and stoppable.
 
-Otto is not a general-purpose cloud browser: it currently has no built-in web search or live weather lookup. Coding work needs an online connector; the cloud steward can still converse, remember and schedule while your computers are asleep.
+Otto is not a general-purpose cloud browser. Optional read-only web search (Brave Search API) is off until the owner configures a separate key; it returns bounded snippets and source URLs, not verified full pages or a live weather tool. Coding work needs an online connector; the cloud steward can still converse, remember and schedule while your computers are asleep.
 
 ## Get started
 
@@ -68,7 +68,7 @@ cp -R apps/steward/ui/. apps/steward/dist/ui/
 
 Then follow the [cloud-server runbook](docs/self-hosted.md) to install **`apps/steward/dist/node/steward-node.mjs`, `dist/ui/` and the `ws` runtime dependency** on the server. Set a unique `LOGIN_PASSWORD` of at least 15 characters and `OTTO_PUBLIC_ORIGIN=https://<your-address>` in its protected `.dev.vars`; set `OTTO_CONFIG_DIR` and `OTTO_DB_PATH` explicitly. Run the process under systemd (automatic restart), bind it to loopback, and put an HTTPS reverse proxy with WebSocket forwarding in front. Keep the VPS and its persistent disk running **24/7**; back up the live SQLite database with SQLite's online backup, not a plain copy while WAL is active. Do not commit secrets or send them through chat.
 
-Open **your server's HTTPS address**, sign in and enter the steward's model API key in **Settings**. The server must be reachable from every computer you want to connect; an SSH tunnel to a loopback-only address is useful for private access, but not a public connector endpoint.
+Open **your server's HTTPS address**, sign in and enter the steward's model API key in **Settings**. Optionally configure `BRAVE_SEARCH_API_KEY` in the protected server environment for read-only, owner-turn web search; it is separate from the model key and disabled when unset. The server must be reachable from every computer you want to connect; an SSH tunnel to a loopback-only address is useful for private access, but not a public connector endpoint.
 
 **Done when:** the workspace is reachable at its intended address and Otto replies to a message. You can chat before adding any machines.
 

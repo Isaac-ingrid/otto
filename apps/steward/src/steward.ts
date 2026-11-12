@@ -79,6 +79,7 @@ import {
 import { Dispatcher, parseOwnerCommand } from "./dispatch.ts";
 import { buildSituationBrief } from "./llm/brief.ts";
 import { buildStewardExtension, type StewardExtensionContext } from "./llm/extension.ts";
+import { searchBrave } from "./llm/web-search.ts";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { testModelConnection } from "./llm/connection-test.ts";
 import {
@@ -842,6 +843,9 @@ export class Steward extends Agent<Env> {
     return {
       ledger: this.ledger,
       buildBrief: () => buildSituationBrief(this.ledger),
+      webSearch: this.env.BRAVE_SEARCH_API_KEY
+        ? (query) => searchBrave(query, this.env.BRAVE_SEARCH_API_KEY!)
+        : undefined,
       currentRun: () => this.currentRunBinding(),
       checkProvenanceRef: async (ref) => {
         // §7.2 (review #4 + #47-5): a provenance reference is valid only if this deployment

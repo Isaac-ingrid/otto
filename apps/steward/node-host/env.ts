@@ -41,6 +41,7 @@ export async function loadVars(options: { cwd: string; devVarsPath?: string }): 
     "SERVER_KEY_PREVIOUS",
     "LOGIN_PASSWORD",
     "MODEL_KEY",
+    "BRAVE_SEARCH_API_KEY",
     "STEWARD_MODEL",
     "DAILY_BUDGET_USD",
     "WATCHDOG_LLM",

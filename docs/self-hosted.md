@@ -56,6 +56,7 @@ a deployment that only uses the browser never needs to set it.
 | `SERVER_KEY` | Bearer token for the owner API, `/api/pairing`, `/api/login-link`. Optional. |
 | `SERVER_KEY_PREVIOUS` | Accepted alongside `SERVER_KEY` during a rotation window. See below. |
 | `MODEL_KEY` | Model provider key. The workspace **Settings** page writes the same thing at runtime. |
+| `BRAVE_SEARCH_API_KEY` | Optional Brave Search API key for owner-initiated read-only web snippets. Disabled when unset; never a model key. |
 | `STEWARD_MODEL` | JSON: `{"provider","modelId","baseUrl","thinkingLevel"}` for an OpenAI-compatible gateway. |
 | `DAILY_BUDGET_USD` | Cap on model spend per day. |
 | `WATCHDOG_LLM` | `1` lets the model take one look at a run that has gone quiet, before the deterministic verdict. Off unless set. |
@@ -174,6 +175,16 @@ the bundle does not carry it.
 Schema changes ship inside the bundle and run at startup, so **back up before an upgrade** if the
 release notes mention migrations.
 
+## Optional web search
+
+Optional web search uses Brave's fixed HTTPS search endpoint. Only user-initiated turns can query
+it, at most once per turn, using text from the user's message; the steward cannot fetch arbitrary
+URLs or treat snippets as authorization to dispatch work or change memory in that turn. Results
+include source links and a retrieval time but are **not** verified full-page research. Keep the
+Brave key only in the protected `.dev.vars` file, restart `otto` after setting it, and remember
+that search queries go to the chosen provider. Cloudflare deployments can set the same value as a
+Worker secret instead. Do not send keys through chat.
+
 ## Backups
 
 The database is one file. With WAL live, copy it with SQLite's own online backup:
@@ -183,13 +194,34 @@ sudo -u otto sqlite3 /var/lib/otto/steward.sqlite ".backup /var/lib/otto/backups
 ```
 
 `deploy/harden.sh` installs exactly that as a daily systemd timer keeping 14 copies. That covers a
-bad upgrade or an accidental delete; it does **not** survive losing the disk. Before calling the
-deployment recoverable, schedule a copy of these SQLite snapshots to storage **outside the ECS**
-(`rclone`, `scp` or ECS snapshots), and separately safeguard `/etc/otto/.dev.vars` (0600,
-encrypted at rest and in transit). The database alone cannot recover sealed model keys or device
-tokens on an explicit-`SERVER_KEY` deployment without that key. Do not commit or paste that file. Verify restore on an isolated host:
-SQLite `PRAGMA integrity_check` = `ok`, the saved key opens model settings, and the connector can
-reconnect. Leave remote credentials and the backup destination operator-owned; this repo has none.
+bad upgrade or an accidental delete; it does **not** survive losing the disk. The optional
+`deploy/install-offsite-backup.sh` adds an `OnSuccess` job after the local snapshot and a weekly
+isolated download/integrity check. It uploads the snapshot, `/etc/otto/.dev.vars`, and a checksum
+manifest to a **configured rclone crypt remote only**; it refuses ordinary plaintext remotes.
+It does not configure storage or credentials for you.
+
+To enable it, choose off-host storage and install `rclone` on the server. As root, configure a
+storage remote plus an **rclone crypt** overlay in `/etc/otto/rclone.conf` (mode `0600`), and
+place `deploy/offsite.env.example` at `/etc/otto/offsite.env` (root-owned, mode `0600`), editing
+`OTTO_RCLONE_DEST` to name the crypt remote and `RCLONE_CONFIG` to point to that config. Do not
+put secrets in the repository or chat. Copy `deploy/offsite-backup.sh` and
+`deploy/install-offsite-backup.sh` to the same directory on the server, then run as root:
+
+```sh
+bash ./install-offsite-backup.sh
+systemctl start otto-backup.service         # local backup triggers encrypted offsite upload
+systemctl start otto-offsite-backup.service # wait for (or retry) upload before verifying
+systemctl start otto-offsite-verify.service # private temp download; does not restore production
+systemctl status otto-offsite-backup.service otto-offsite-verify.service --no-pager
+```
+
+Inspect failures with `journalctl -u otto-offsite-backup -u otto-offsite-verify`. The remote keeps
+snapshots until you define a retention policy with your storage provider; the local timer keeps
+14. **Save the crypt configuration and its decryption passwords somewhere else** (for example,
+your password manager): a copy inside the crypt remote cannot unlock itself after losing this
+server. Verify a complete restore on an isolated host too: SQLite integrity check, the saved key
+opening sealed model settings, and a connector reconnect. Checksums alone do not prove those
+application-level steps. This repository contains no storage destination or credentials.
 
 ## Cost and the model
 
@@ -210,6 +242,13 @@ the "Today" panel shows the derived cost per reply. Two behaviours surprise peop
 memory ceiling so a Node heap blow takes only the steward, and installs the backup timer above.
 
 ## Troubleshooting
+
+Run the read-only `deploy/doctor.sh` on the server to check `otto`/nginx, the IP certificate's
+48-hour validity, recent local SQLite integrity, disk use, and the last encrypted offsite
+verification. It exits nonzero until offsite storage is configured and verified; it does not
+send alerts by itself. From a checkout, run `./deploy/remote.sh 'bash -s' < deploy/doctor.sh`.
+An external monitor may alert on that exit status. This script checks the current IP-vhost
+layout, not an arbitrary domain deployment.
 
 | Symptom | Cause |
 | --- | --- |
