@@ -78,6 +78,34 @@ describe("opt-in Web Push", () => {
     expect(sends).toHaveBeenCalledTimes(1);
   });
 
+  it("relays only FCM ciphertext; never sends VAPID private key or arbitrary endpoints to the relay", async () => {
+    const { config, subscription } = await keys();
+    const fcm = "https://fcm.googleapis.com/fcm/send/test-token";
+    const relayUrl = "https://otto-relay.pages.dev/push";
+    const relayToken = b64(crypto.getRandomValues(new Uint8Array(32)));
+    const sends = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 201 }));
+    await runInDurableObject(ownerStub(), async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance) as SqlExecutor;
+      const service = new PushService(sql, { ...config, relayUrl, relayToken }, async () => {}, sends as typeof fetch);
+      expect(service.subscribe({ ...subscription, endpoint: fcm }, "UTC", false)).toBe(true);
+      service.queueTest(fcm);
+      await service.drain();
+      expect(service.subscribe(subscription, "UTC", false)).toBe(true);
+      service.queueTest(endpoint);
+      await service.drain();
+    });
+    expect(sends).toHaveBeenCalledTimes(2);
+    const [url, options] = sends.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe(relayUrl);
+    expect(options.headers).toMatchObject({ "x-otto-push-relay-token": relayToken });
+    const request = JSON.parse(options.body as string) as { endpoint: string; body: string; headers: Record<string, string> };
+    expect(request.endpoint).toBe(fcm);
+    expect(request.body.length).toBeGreaterThan(5000);
+    expect(JSON.stringify(request)).not.toContain(config.privateKey!);
+    expect(Object.keys(request.headers).sort()).toEqual(["authorization", "ttl", "content-encoding", "content-type"].sort());
+    expect(sends.mock.calls[1]![0]).toBe(endpoint);
+  });
+
   it("recovers a settled report after a crash without replaying a delivered alert", async () => {
     const { config, subscription } = await keys();
     const sends = vi.fn(async () => new Response(null, { status: 201 }));

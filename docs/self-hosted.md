@@ -224,6 +224,33 @@ on the phone's network reaching its platform push service; test from the real ph
 before relying on it. Signing out on a device removes its subscription; use the in-app pending
 list as the fallback. No Telegram token or third-party message content is involved.
 
+### FCM egress relay for restricted Node hosts (optional)
+
+Android Chrome uses `fcm.googleapis.com` for Web Push. If the **server** cannot reach
+that host over TCP 443, queued test notifications cannot be delivered. A host with a
+working egress route needs no relay. On restricted networks, an optional Cloudflare
+**Pages** project (not `workers.dev`, which may also be blocked) can forward only
+signed, already-encrypted FCM Web Push requests. The Node server remains the steward;
+the VAPID private key, task text and session cookies never go to Pages. Cloudflare
+**does** see the browser's FCM subscription endpoint and encrypted notification, so
+use this only if that trade-off is acceptable. The phone must independently reach
+its own push service; a server relay cannot fix a phone with blocked FCM access.
+
+Create a Pages project, store a random 32-byte base64url `RELAY_TOKEN` as a **Pages
+secret**, then deploy `deploy/push-relay/` (it contains `_worker.js`). Configure the
+**same** token and the production Pages URL ending in `/push` in a root-owned `0600`
+`/etc/otto/push-relay.env` file as `OTTO_PUSH_RELAY_TOKEN` and `OTTO_PUSH_RELAY_URL`.
+Add `EnvironmentFile=/etc/otto/push-relay.env` to an `otto.service.d` drop-in, then
+`systemctl daemon-reload && systemctl restart otto`. Never put the token in Git,
+URLs, browser settings, or chat. The relay rejects all unauthenticated requests and
+all destinations except FCM Web Push paths; it does not follow upstream redirects
+or return upstream response bodies. A direct 403 from `/push` without the token and
+400 for an authenticated invalid request confirm access control, **not** phone
+notification delivery. Back up this extra environment file separately or recreate
+and rotate the token if the host is lost. Disable the relay by removing its systemd
+drop-in and restarting Otto; direct Web Push remains available for other supported
+browsers and network routes. Delete the unused Pages project after disabling it.
+
 ## Backups
 
 The database is one file. With WAL live, copy it with SQLite's own online backup:

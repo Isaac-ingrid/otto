@@ -7,7 +7,11 @@ const MAX_DEVICES = 8;
 const MAX_AGE_MS = 24 * 60 * 60_000;
 const HOSTS = new Set(["fcm.googleapis.com", "updates.push.services.mozilla.com", "web.push.apple.com"]);
 
-export interface PushConfig { publicKey?: string; privateKey?: string; subject?: string }
+export interface PushConfig {
+  publicKey?: string; privateKey?: string; subject?: string;
+  /** Optional server-only Pages egress for FCM; never sent to the browser. */
+  relayUrl?: string; relayToken?: string;
+}
 export interface PushSettings { available: boolean; publicKey: string | null }
 export interface SubscriptionInput { endpoint: string; expirationTime: number | null; keys: { p256dh: string; auth: string } }
 
@@ -40,6 +44,28 @@ export class PushService {
   constructor(private readonly sql: SqlExecutor, private readonly config: PushConfig,
     private readonly schedule: (seconds: number) => Promise<unknown>,
     private readonly send: typeof fetch = fetch) {}
+
+  private async deliver(endpoint: string, payload: Awaited<ReturnType<typeof buildPushPayload>>): Promise<Response> {
+    const { relayUrl, relayToken } = this.config;
+    if (new URL(endpoint).hostname !== "fcm.googleapis.com" || (!relayUrl && !relayToken))
+      return this.send(endpoint, { ...payload, redirect: "error", signal: AbortSignal.timeout(10_000) });
+    // A partial or malformed relay configuration must never leak the bearer token
+    // or quietly send to an unexpected origin.
+    if (!relayUrl || !relayToken || !/^[A-Za-z0-9_-]{43}$/.test(relayToken)) throw new Error("push relay not configured");
+    const url = new URL(relayUrl);
+    if (url.protocol !== "https:" || url.port || url.username || url.password || url.hash || url.search || url.pathname !== "/push")
+      throw new Error("invalid push relay URL");
+    const bytes = new Uint8Array(payload.body);
+    const body = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return this.send(relayUrl, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(11_000),
+      headers: { "content-type": "application/json", "x-otto-push-relay-token": relayToken },
+      body: JSON.stringify({ endpoint, body, headers: {
+        authorization: payload.headers.authorization, ttl: payload.headers.ttl,
+        "content-encoding": payload.headers["content-encoding"], "content-type": payload.headers["content-type"],
+      } }),
+    });
+  }
 
   settings(): PushSettings {
     const { publicKey, privateKey, subject } = this.config;
@@ -136,7 +162,7 @@ export class PushService {
         const payload = await buildPushPayload({ data: JSON.stringify({ kind: job.kind, tag }), options: { ttl: 3600 } }, subscription, {
           subject: this.config.subject, publicKey: this.config.publicKey, privateKey: this.config.privateKey,
         });
-        const response = await this.send(job.endpoint, { ...payload, redirect: "error", signal: AbortSignal.timeout(10_000) });
+        const response = await this.deliver(job.endpoint, payload);
         if (response.ok || response.status === 404 || response.status === 410) {
           if (!response.ok) this.unsubscribe(job.endpoint);
           if (response.ok) this.sql`UPDATE sh_push_job SET sentAt = ${Date.now()} WHERE outboundId = ${job.outboundId} AND endpoint = ${job.endpoint}`;

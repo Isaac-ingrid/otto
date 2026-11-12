@@ -45,6 +45,8 @@ export async function loadVars(options: { cwd: string; devVarsPath?: string }): 
     "VAPID_PUBLIC_KEY",
     "VAPID_PRIVATE_KEY",
     "VAPID_SUBJECT",
+    "OTTO_PUSH_RELAY_URL",
+    "OTTO_PUSH_RELAY_TOKEN",
     "STEWARD_MODEL",
     "DAILY_BUDGET_USD",
     "WATCHDOG_LLM",

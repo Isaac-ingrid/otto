@@ -26,6 +26,8 @@ interface Env {
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;
+  OTTO_PUSH_RELAY_URL?: string;
+  OTTO_PUSH_RELAY_TOKEN?: string;
   STEWARD_MODEL?: string | { provider?: unknown; modelId?: unknown; baseUrl?: unknown };
   // Issue #28 (steward.md §12): USD per UTC day for the daily budget soft cap. Unset →
   // budget.ts DEFAULT_DAILY_BUDGET_USD; 0 disables automatic model wakes entirely.
@@ -53,6 +55,8 @@ declare namespace Cloudflare {
     VAPID_PUBLIC_KEY?: string;
     VAPID_PRIVATE_KEY?: string;
     VAPID_SUBJECT?: string;
+    OTTO_PUSH_RELAY_URL?: string;
+    OTTO_PUSH_RELAY_TOKEN?: string;
     STEWARD_MODEL?: string | { provider?: unknown; modelId?: unknown; baseUrl?: unknown };
     DAILY_BUDGET_USD?: string | number;
   // Issue #3 (steward.md §8.4): let the model look at a stalled run once per silent stretch

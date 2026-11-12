@@ -778,6 +778,7 @@ export class Steward extends Agent<Env> {
   private get push(): PushService {
     return (this.push_ ??= new PushService(this.sql.bind(this) as unknown as import("./schema.ts").SqlExecutor, {
       publicKey: this.env.VAPID_PUBLIC_KEY, privateKey: this.env.VAPID_PRIVATE_KEY, subject: this.env.VAPID_SUBJECT,
+      relayUrl: this.env.OTTO_PUSH_RELAY_URL, relayToken: this.env.OTTO_PUSH_RELAY_TOKEN,
     }, (seconds) => this.schedule(seconds, "drainPush")));
   }
 
