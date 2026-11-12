@@ -1522,12 +1522,13 @@ async function signOut() {
   // Find the browser's subscription even when Settings was never opened in this session.
   let subscription = state.pushSubscription;
   if (!subscription && 'serviceWorker' in navigator) {
-    try { subscription = await (await navigator.serviceWorker.getRegistration('/app/'))?.pushManager?.getSubscription(); }
+    try { subscription = await withPushTimeout((await withPushTimeout(navigator.serviceWorker.getRegistration('/app/')))?.pushManager?.getSubscription()); }
     catch { /* sign-out must still work */ }
   }
   if (subscription) {
-    try { await request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint }); } catch { /* local unsubscribe still revokes the endpoint */ }
-    try { await subscription.unsubscribe(); } catch { /* push service eventually returns 410 */ }
+    try { localStorage.setItem('otto.push.disabled', 'true'); } catch { /* private mode */ }
+    try { await withPushTimeout(request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint })); } catch { /* local unsubscribe still revokes the endpoint */ }
+    try { await withPushTimeout(subscription.unsubscribe()); } catch { /* sign-out must not wait forever for the push service */ }
   }
   state.fatal = 'logged_out'; // set first: the logout response must not read as an expired session
   try {
@@ -1557,20 +1558,38 @@ function pushKeyMatches(subscription, publicKey) {
   return actual.length === expected.length && actual.every((byte, index) => byte === expected[index]);
 }
 
+function pushDisabledLocally() {
+  try { return localStorage.getItem('otto.push.disabled') === 'true'; } catch { return false; }
+}
+
+function withPushTimeout(promise, ms = 10000) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('push_timeout')), ms);
+  })]).finally(() => clearTimeout(timer));
+}
+
 async function refreshPushSubscription() {
   if (!state.settings?.push?.available || !('serviceWorker' in navigator)) return;
   try {
-    const registration = await navigator.serviceWorker.getRegistration('/app/');
-    let subscription = await registration?.pushManager?.getSubscription();
-    if (subscription && !pushKeyMatches(subscription, state.settings.push.publicKey)) {
-      await request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint });
-      await subscription.unsubscribe();
-      subscription = null;
+    const registration = await withPushTimeout(navigator.serviceWorker.getRegistration('/app/'));
+    let subscription = await withPushTimeout(registration?.pushManager?.getSubscription());
+    if (pushDisabledLocally()) {
+      // Chrome may leave unsubscribe() pending when FCM is unreachable. Never silently
+      // re-register a device the owner explicitly turned off on the next page load.
+      state.pushSubscription = null;
+      if (subscription) void subscription.unsubscribe().catch(() => {});
+    } else {
+      if (subscription && !pushKeyMatches(subscription, state.settings.push.publicKey)) {
+        await withPushTimeout(request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint }));
+        await withPushTimeout(subscription.unsubscribe());
+        subscription = null;
+      }
+      state.pushSubscription = subscription ?? null;
+      if (subscription) await withPushTimeout(request('/app/api/push/subscribe', {
+        subscription: subscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet: state.pushQuiet,
+      }));
     }
-    state.pushSubscription = subscription ?? null;
-    if (subscription) await request('/app/api/push/subscribe', {
-      subscription: subscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet: state.pushQuiet,
-    });
   } catch { /* In-app inbox remains available without push. */ }
   if (state.dialog?.type === 'account') bumpDialog();
 }
@@ -1581,25 +1600,26 @@ async function enablePush() {
   bumpDialog();
   try {
     // iOS requires permission in the direct tap gesture, before any async registration.
-    if (await Notification.requestPermission() !== 'granted') throw new Error('permission');
-    const registration = await navigator.serviceWorker.register('/app/push-sw.js', { scope: '/app/' });
-    let subscription = await registration.pushManager.getSubscription();
+    if (await withPushTimeout(Notification.requestPermission(), 30000) !== 'granted') throw new Error('permission');
+    const registration = await withPushTimeout(navigator.serviceWorker.register('/app/push-sw.js', { scope: '/app/' }));
+    let subscription = await withPushTimeout(registration.pushManager.getSubscription());
     if (subscription && !pushKeyMatches(subscription, state.settings.push.publicKey)) {
-      await request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint });
-      await subscription.unsubscribe();
+      await withPushTimeout(request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint }));
+      await withPushTimeout(subscription.unsubscribe());
       subscription = null;
     }
-    subscription ??= await registration.pushManager.subscribe({
+    subscription ??= await withPushTimeout(registration.pushManager.subscribe({
       userVisibleOnly: true, applicationServerKey: pushKeyBytes(state.settings.push.publicKey),
-    });
-    const { status } = await request('/app/api/push/subscribe', {
+    }));
+    const { status } = await withPushTimeout(request('/app/api/push/subscribe', {
       subscription: subscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet: state.pushQuiet,
-    });
+    }));
     if (status !== 200) {
-      await subscription.unsubscribe();
+      void subscription.unsubscribe().catch(() => {});
       throw new Error('subscribe');
     }
     state.pushSubscription = subscription;
+    try { localStorage.removeItem('otto.push.disabled'); } catch { /* private mode */ }
     toast(t('pushReady'));
   } catch {
     const copy = Notification.permission === 'denied' ? 'pushDenied' : 'pushFailed';
@@ -1613,10 +1633,14 @@ async function disablePush() {
   state.pushBusy = true;
   bumpDialog();
   try {
-    const { status } = await request('/app/api/push/unsubscribe', { endpoint: state.pushSubscription.endpoint });
+    const subscription = state.pushSubscription;
+    const { status } = await withPushTimeout(request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint }));
     if (status !== 200) throw new Error('unsubscribe');
-    await state.pushSubscription.unsubscribe();
+    try { localStorage.setItem('otto.push.disabled', 'true'); } catch { /* private mode */ }
     state.pushSubscription = null;
+    // The server has revoked this endpoint. Do not hold the buttons disabled while
+    // Android Chrome waits indefinitely for its own push service to unsubscribe.
+    void subscription.unsubscribe().catch(() => {});
     toast(t('pushOff'));
   } catch { toast(t('pushFailed')); }
   finally { state.pushBusy = false; bumpDialog(); }
@@ -1627,7 +1651,7 @@ async function testPush() {
   state.pushBusy = true;
   bumpDialog();
   try {
-    const { status } = await request('/app/api/push/test', { endpoint: state.pushSubscription.endpoint });
+    const { status } = await withPushTimeout(request('/app/api/push/test', { endpoint: state.pushSubscription.endpoint }));
     toast(t(status === 200 ? 'pushTestSent' : 'pushFailed'));
   } catch { toast(t('pushFailed')); }
   finally { state.pushBusy = false; bumpDialog(); }
@@ -1638,9 +1662,9 @@ async function setPushQuiet(quiet) {
   state.pushBusy = true;
   bumpDialog();
   try {
-    const { status } = await request('/app/api/push/subscribe', {
+    const { status } = await withPushTimeout(request('/app/api/push/subscribe', {
       subscription: state.pushSubscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet,
-    });
+    }));
     if (status !== 200) throw new Error('quiet');
     state.pushQuiet = quiet;
     try { localStorage.setItem('otto.push.quiet', String(quiet)); } catch { /* private mode */ }
