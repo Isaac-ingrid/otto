@@ -48,7 +48,7 @@ async function toRequest(request: IncomingMessage): Promise<Request> {
   // derived or every client shares one `unknown` bucket (see client-ip.ts).
   headers.set(
     "cf-connecting-ip",
-    clientIp({ remoteAddress: request.socket.remoteAddress, forwardedFor: request.headers["x-forwarded-for"], existing: request.headers["cf-connecting-ip"] }),
+    clientIp({ remoteAddress: request.socket.remoteAddress, forwardedFor: request.headers["x-forwarded-for"] }),
   );
   const body = method === "GET" || method === "HEAD" ? undefined : await readBody(request);
   return new Request(`${baseUrl(request)}${request.url ?? "/"}`, {

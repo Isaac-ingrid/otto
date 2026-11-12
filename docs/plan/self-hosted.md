@@ -288,8 +288,13 @@ steward stays on loopback and testing uses a tunnel. Everything else is already 
 - `deploy/nginx-otto.conf` + `deploy/enable-tls.sh` (`--stage` then `--live`), rehearsed on the box.
 - `deploy/aliyun.env` has empty `OTTO_DOMAIN` / `OTTO_EMAIL` fields waiting for a name.
 
-When 备案 clears: DNS A record → `./deploy/enable-tls.sh --stage` → `--live`, then re-pair any
-machine that was paired against the tunnel URL (the URL is part of the pairing).
+Before shipping the updated Node bundle, set `OTTO_PUBLIC_ORIGIN=https://115.29.164.8` in the
+server's `.dev.vars` and the untracked `deploy/aliyun.env` used by `apply-env.sh`; production
+startup now refuses a missing value. When 备案 clears: check that the provider's HTTP interception
+is gone → DNS A record → `./deploy/enable-tls.sh --stage` (routing probe **only**, no HTTP login or
+pairing) → `--live` → verify HTTPS + WebSockets → change `OTTO_PUBLIC_ORIGIN` to the HTTPS domain,
+restart and verify the generated link/command. Re-point existing connectors without a new pairing
+code where possible (see `deploy/NOTES.md`); keep IP HTTPS as a fallback.
 
 ## P4 · Product follow-ups from the Super-agent comparison
 

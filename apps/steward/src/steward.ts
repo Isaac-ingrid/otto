@@ -776,6 +776,7 @@ export class Steward extends Agent<Env> {
       sql: this.sql.bind(this) as unknown as import("./schema.ts").SqlExecutor,
       secrets: this.deploymentKeySecrets(),
       loginLinkPolicy: loginLinkPolicyFromEnv(this.env.LOGIN_LINK_TTL_MS, this.env.LOGIN_LINK_REUSABLE),
+      publicOrigin: this.env.OTTO_PUBLIC_ORIGIN,
       ledger: this.ledger,
       listDevices: () =>
         this.sql<{ deviceId: string; name: string | null; revoked: number }>`
@@ -1201,8 +1202,8 @@ export class Steward extends Agent<Env> {
   // rechecked here because this method also owns the generated-key surface the Worker cannot see.
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    // Every request the DO serves reveals the deployment's public origin — the source for the
-    // pairing command's URL and the absolute one-time card links (web.ts owns the value).
+    // Cloudflare learns the public origin from requests; the Node host pins it to
+    // OTTO_PUBLIC_ORIGIN so an anonymous caller cannot change login links with a forged Host.
     if (url.protocol === "https:" || url.protocol === "http:") this.web.recordOrigin(url.origin);
     if (url.pathname.startsWith("/api/")) {
       if (!ownerAuthorized(request, this.env)) return new Response("unauthorized", { status: 401 });

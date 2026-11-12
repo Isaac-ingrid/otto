@@ -34,6 +34,8 @@ interface Env {
   // production policy: 15 minutes and one use.
   LOGIN_LINK_TTL_MS?: string | number;
   LOGIN_LINK_REUSABLE?: string | boolean;
+  // Node host only: canonical HTTPS address for absolute login links and pairing commands.
+  OTTO_PUBLIC_ORIGIN?: string;
 }
 
 declare namespace Cloudflare {
@@ -51,5 +53,6 @@ declare namespace Cloudflare {
   WATCHDOG_LLM?: string | boolean;
     LOGIN_LINK_TTL_MS?: string | number;
     LOGIN_LINK_REUSABLE?: string | boolean;
+    OTTO_PUBLIC_ORIGIN?: string;
   }
 }

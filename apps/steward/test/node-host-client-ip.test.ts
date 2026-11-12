@@ -5,12 +5,13 @@ import { describe, expect, it } from "vitest";
 import { clientIp, isLoopback } from "../node-host/client-ip.ts";
 
 describe("the client address the auth throttle buckets on", () => {
-  it("prefers an existing CF-Connecting-IP, so a Cloudflare deployment and the test harnesses keep their address", () => {
-    expect(clientIp({ remoteAddress: "127.0.0.1", forwardedFor: "198.51.100.9", existing: "203.0.113.7" })).toBe("203.0.113.7");
+  it("does not take an untrusted CF-Connecting-IP from the caller", () => {
+    // The Node server ignores the incoming header before synthesising its own (even through nginx).
+    expect(clientIp({ remoteAddress: "198.51.100.9", forwardedFor: "203.0.113.7" })).toBe("198.51.100.9");
   });
 
   it("takes the first X-Forwarded-For hop when the peer is the proxy on this box", () => {
-    expect(clientIp({ remoteAddress: "127.0.0.1", forwardedFor: "198.51.100.9, 10.0.0.2" })).toBe("198.51.100.9");
+    expect(clientIp({ remoteAddress: "127.0.0.1", forwardedFor: "198.51.100.9" })).toBe("198.51.100.9");
     expect(clientIp({ remoteAddress: "::1", forwardedFor: ["198.51.100.9"] })).toBe("198.51.100.9");
     expect(clientIp({ remoteAddress: "::ffff:127.0.0.1", forwardedFor: "198.51.100.9" })).toBe("198.51.100.9");
   });
@@ -24,6 +25,11 @@ describe("the client address the auth throttle buckets on", () => {
     expect(clientIp({})).toBe("unknown");
     // A proxy peer with no forwarded header is the proxy itself, not the client it forgot to name.
     expect(clientIp({ remoteAddress: "127.0.0.1" })).toBe("127.0.0.1");
+  });
+
+  it("requires nginx to replace, not append, the client-provided X-Forwarded-For", () => {
+    // A loopback peer is trusted; the nginx vhosts must set X-Forwarded-For to $remote_addr.
+    expect(clientIp({ remoteAddress: "127.0.0.1", forwardedFor: "203.0.113.7, 198.51.100.9" })).toBe("203.0.113.7");
   });
 
   it("rejects junk rather than bucketing on it", () => {

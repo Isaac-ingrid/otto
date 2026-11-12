@@ -25,7 +25,8 @@ import path from "node:path";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const testDir = path.join(root, "test");
-const vitestBin = path.join(root, "node_modules", ".bin", "vitest");
+// Spawn the JS entry with Node: Windows cannot exec pnpm's extensionless .bin shim.
+const vitestBin = path.join(root, "node_modules", "vitest", "vitest.mjs");
 
 // Per-file wall seconds (test time + per-file workerd import overhead), from a
 // `vitest run --reporter=json` pass. Refresh when the mix changes materially.
@@ -83,7 +84,7 @@ const generatedAuthConfig = runtime === "node" ? "vitest.node.config.ts" : "vite
 function runVitest(args, tag, env = {}) {
   const started = Date.now();
   const extra = args.includes("--config") ? [] : configArgs;
-  const child = spawn(vitestBin, [...args, ...extra], { cwd: root, env: { ...process.env, CI: "1", ...env } });
+  const child = spawn(process.execPath, [vitestBin, ...args, ...extra], { cwd: root, env: { ...process.env, CI: "1", ...env } });
   if (tag) {
     pipe(tag, child.stdout, process.stdout);
     pipe(tag, child.stderr, process.stderr);

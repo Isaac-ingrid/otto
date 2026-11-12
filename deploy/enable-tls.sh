@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put the steward behind nginx with a real certificate.
 #
-#   deploy/enable-tls.sh --stage   # vhost on :80 now (no cert, no redirect) — safe before 备案
+#   deploy/enable-tls.sh --stage   # TEMPORARY :80 routing check AFTER 备案; no login/pairing
 #   deploy/enable-tls.sh --live    # + certbot, 443, and the http→https redirect
 #   ... --domain name              # use a name other than OTTO_DOMAIN (for a rehearsal)
 #
@@ -63,6 +63,9 @@ ln -sf /etc/nginx/sites-available/otto /etc/nginx/sites-enabled/otto
 nginx -t
 systemctl reload nginx
 echo "   enabled (backup: $backup)"
+if [ "$OTTO_MODE" = "--stage" ]; then
+  echo '   WARNING: HTTP is temporarily public. Do not sign in, mint links or pair machines until HTTPS is live.' >&2
+fi
 curl -s -o /dev/null -w "   http://$OTTO_DOMAIN/ -> %{http_code}\n" -H "Host: $OTTO_DOMAIN" http://127.0.0.1/ || true
 
 if [ "$OTTO_MODE" = "--live" ]; then

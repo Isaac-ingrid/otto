@@ -52,6 +52,7 @@ a deployment that only uses the browser never needs to set it.
 | Name | Purpose |
 | --- | --- |
 | `LOGIN_PASSWORD` | Browser login. Required in practice. |
+| `OTTO_PUBLIC_ORIGIN` | **Required in production on the Node host.** Canonical HTTPS origin (`https://<IP>` now, `https://<domain>` after 备案); protects absolute login links and pairing commands from forged Host headers. Only local loopback may use HTTP. |
 | `SERVER_KEY` | Bearer token for the owner API, `/api/pairing`, `/api/login-link`. Optional. |
 | `SERVER_KEY_PREVIOUS` | Accepted alongside `SERVER_KEY` during a rotation window. See below. |
 | `MODEL_KEY` | Model provider key. The workspace **Settings** page writes the same thing at runtime. |
@@ -71,7 +72,11 @@ sudoedit /etc/otto/.dev.vars          # KEY=value, one per line
 
 `OTTO_CONFIG_DIR` is the directory the process looks in for `.dev.vars`. Its default is derived
 from the bundle's location (two levels up), which in this layout is the wrong place — set it
-explicitly in the unit.
+explicitly in the unit. **Before upgrading an existing Node deployment**, add
+`OTTO_PUBLIC_ORIGIN=https://<current-working-IP-or-domain>` to `.dev.vars` (and to the local
+untracked `deploy/aliyun.env` if using `apply-env.sh`). The production process now refuses to
+start without it. It overrides any old `sh_deploy.origin` value immediately and replaces that
+row on the next request; do not delete the database or re-pair machines just to set it.
 
 ## 2. The service
 
@@ -107,10 +112,13 @@ journalctl -u otto -n 20 --no-pager     # "[otto] steward listening on http://12
 
 ## 3. nginx and TLS
 
-`deploy/nginx-otto.conf` is the vhost, and two headers are not optional:
-`node-host/server.ts` builds the request origin from `Host` + `X-Forwarded-Proto`, and the app
-stores it (`sh_deploy.origin`) to mint absolute login links. Drop either and the links you get back
-point at `http://127.0.0.1:8787`. It also keeps `Upgrade`/`Connection` for both WebSocket paths
+`deploy/nginx-otto.conf` is the vhost. `Host` + `X-Forwarded-Proto` are needed for the request
+origin (browser same-origin checks and WebAuthn); `OTTO_PUBLIC_ORIGIN` is the independent,
+trusted address for absolute login links. The vhost rejects unknown Host names, **replaces**
+`X-Forwarded-For` with `$remote_addr`, and strips client-supplied `CF-Connecting-IP`. Do not
+switch back to `$proxy_add_x_forwarded_for`: the Node host uses the resulting address for
+login rate limits. If adding an external trusted proxy, configure nginx real-IP with an explicit
+proxy allowlist first. It also keeps `Upgrade`/`Connection` for both WebSocket paths
 (the connector relay and the workspace stream), disables buffering, and raises
 `client_max_body_size`.
 
@@ -121,7 +129,10 @@ sudo nginx -t && sudo systemctl reload nginx
 ```
 
 `deploy/enable-tls.sh` renders that vhost, runs `certbot --nginx`, and switches the redirect to
-live in two stages (`--stage` first, then `--live`) so a failed challenge cannot lock you out.
+live in two stages. **Only after ICP is effective**, use `--stage` briefly to verify routing;
+it exposes HTTP without a redirect, so do not sign in, issue login links or pair machines on it.
+Run `--live` immediately, then confirm HTTPS login and WebSocket before setting
+`OTTO_PUBLIC_ORIGIN` to the domain. Keep the existing IP HTTPS vhost as a rollback path.
 
 > On a mainland-China host, an A record alone is not enough: the provider will not serve 80/443 for
 > a domain without ICP 备案. Until that is done, reach the box over an SSH tunnel
@@ -173,9 +184,13 @@ sudo -u otto sqlite3 /var/lib/otto/steward.sqlite ".backup /var/lib/otto/backups
 ```
 
 `deploy/harden.sh` installs exactly that as a daily systemd timer keeping 14 copies. That covers a
-bad upgrade or an accidental delete; it does **not** survive losing the disk. For that, copy the
-dumps off the box (`rclone`, `scp`, whatever you already run) — deliberately left as your call
-here, because it needs credentials of yours.
+bad upgrade or an accidental delete; it does **not** survive losing the disk. Before calling the
+deployment recoverable, schedule a copy of these SQLite snapshots to storage **outside the ECS**
+(`rclone`, `scp` or ECS snapshots), and separately safeguard `/etc/otto/.dev.vars` (0600,
+encrypted at rest and in transit). The database alone cannot recover sealed model keys or device
+tokens on an explicit-`SERVER_KEY` deployment without that key. Do not commit or paste that file. Verify restore on an isolated host:
+SQLite `PRAGMA integrity_check` = `ok`, the saved key opens model settings, and the connector can
+reconnect. Leave remote credentials and the backup destination operator-owned; this repo has none.
 
 ## Cost and the model
 

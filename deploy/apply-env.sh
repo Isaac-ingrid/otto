@@ -17,7 +17,7 @@ python3 - <<'PY' > /tmp/otto-dev-vars.$$
 import re
 WANTED = ["SERVER_KEY", "SERVER_KEY_PREVIOUS", "LOGIN_PASSWORD", "MODEL_KEY",
           "STEWARD_MODEL", "DAILY_BUDGET_USD", "WATCHDOG_LLM", "LOGIN_LINK_TTL_MS",
-          "LOGIN_LINK_REUSABLE"]
+          "LOGIN_LINK_REUSABLE", "OTTO_PUBLIC_ORIGIN"]
 values = {}
 for line in open("deploy/aliyun.env"):
     match = re.match(r"^([A-Z_]+)=(.*)$", line.rstrip("\n"))
@@ -35,6 +35,10 @@ for name in WANTED:
 PY
 trap 'rm -f /tmp/otto-dev-vars.$$' EXIT
 chmod 600 /tmp/otto-dev-vars.$$
+if ! grep -q '^OTTO_PUBLIC_ORIGIN=' /tmp/otto-dev-vars.$$; then
+  echo 'Set OTTO_PUBLIC_ORIGIN=https://<IP-or-domain> in deploy/aliyun.env before updating the Node service' >&2
+  exit 1
+fi
 
 awk -F= '{ printf "  %-22s %d chars\n", $1, length($0) - length($1) - 1 }' /tmp/otto-dev-vars.$$
 

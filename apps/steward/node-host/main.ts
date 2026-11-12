@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { installGlobals } from "./globals.ts";
-import { createAssets, createRateLimiter, loadVars } from "./env.ts";
+import { createAssets, createRateLimiter, loadVars, parsePublicOrigin } from "./env.ts";
 import { createNamespace } from "./namespace.ts";
 import { HostRuntime } from "./runtime.ts";
 import { startServer } from "./server.ts";
@@ -44,6 +44,10 @@ const storage = new NodeDurableObjectStorage(db);
 const state = new NodeDurableObjectState(new NodeDurableObjectId("owner"), storage);
 
 const vars = await loadVars({ cwd });
+if (!vars.OTTO_PUBLIC_ORIGIN && process.env.NODE_ENV === "production") {
+  throw new Error("Set OTTO_PUBLIC_ORIGIN to the canonical HTTPS address before starting the public Node host");
+}
+if (vars.OTTO_PUBLIC_ORIGIN) vars.OTTO_PUBLIC_ORIGIN = parsePublicOrigin(vars.OTTO_PUBLIC_ORIGIN);
 
 // Dynamically imported so `installGlobals()` runs before the Agents SDK module graph loads.
 const { default: worker } = await import("../src/index.ts");

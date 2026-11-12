@@ -169,7 +169,16 @@ Encrypt's duplicate-certificate rate limit. The renewal config therefore carries
 ```
 
 The vhost is `deploy/nginx-otto-ip.conf` — `listen 443 ssl`, `server_name 115.29.164.8`,
-certificate from `/etc/letsencrypt/live/otto-ip/`, still proxying to `127.0.0.1:8787`. It is
+certificate from `/etc/letsencrypt/live/otto-ip/`, still proxying to `127.0.0.1:8787`. For updates, copy `deploy/nginx-otto-ip.conf` and `deploy/apply-nginx-ip.sh` into
+`/tmp/otto-nginx/`, then run `bash /tmp/otto-nginx/apply-nginx-ip.sh` through `deploy/remote.sh`.
+The script renders the IP, checks `nginx -t`, reloads, waits for the new workers to accept
+connections, probes normal/forged Host and restores
+`/etc/nginx/sites-available/otto.pre-hardening` automatically if a check fails. **2026-11-11:**
+three attempts rolled back while tightening the probe (the first had SSH quoting trouble; the
+later ones tested in the very same second as `systemctl reload nginx` and reached old workers).
+With a 3-second settle after reload, the live config passed: `nginx -t`, both units active,
+loopback and outside-client `https://115.29.164.8/` returned 200, and the same requests with
+`Host: attacker.example` returned 421. No domain vhost was installed. It is
 deliberately **not** on `:80`: this box's `default` server answers `:80` *by IP* (`server_name _`)
 with the tstock build, so a vhost carrying `server_name 115.29.164.8` on `:80` takes that traffic
 over. Not theory — an earlier attempt installed exactly that, and `http://115.29.164.8/` served
@@ -201,17 +210,18 @@ is present in the page but every ceremony throws `SecurityError`. The login page
 dialog now detect an IP-literal host and say so, instead of offering a button that can only fail —
 and once the domain is live, passkeys start working on their own.
 
-**The port in the `Host` header is load-bearing.** The first phone sign-in failed with
+**Historical 8080 incident (not the current 80/443 config).** The port in the `Host` header
+was load-bearing. The first phone sign-in failed with
 `无法连接 Otto，请检查网络后重试`, and the access log said `POST /auth/password 403`.
 `sameOrigin()` (`src/index.ts`) compares the browser's `Origin` header against the origin the app
 builds from `Host` + `X-Forwarded-Proto` (`node-host/server.ts`), and nginx's `$host` **drops the
 port** — so the app saw `http://115.29.164.8` while the phone sent `http://115.29.164.8:8080`, and
-every auth POST was `403 {"error":"forbidden"}` even though the page itself loaded fine. The fix is
-`proxy_set_header Host $http_host;` in the vhost (and in `deploy/nginx-otto.conf`), after which the
-same probe from outside returns `401 {"error":"invalid_password"}` — i.e. sameOrigin passes and the
-password is actually compared. Two things to remember from it: a vhost on a non-default port must
-forward `$http_host`, and a deployment behind a proxy is where the app's own error text is the only
-reliable signal.
+every auth POST was `403 {"error":"forbidden"}` even though the page itself loaded fine. The then-fix was
+`proxy_set_header Host $http_host;` in the 8080 vhost, after which the same probe returned
+`401 {"error":"invalid_password"}` — sameOrigin passed. Today both vhosts use default ports and
+pin the forwarded Host to their own literal name/IP; this also blocks raw Host-header injection.
+If a non-default port is used again, forward its explicitly validated canonical host:port (not an
+unchecked `$http_host`). The app's own error text was the reliable signal in this incident.
 
 The login page also still carried Cloudflare-era copy — `Forgot your password?` told a self-hosted
 owner to open *your Worker* in the Cloudflare dashboard — and it reported any non-401 answer as a
@@ -251,10 +261,13 @@ ACME. nginx also ships without a `$connection_upgrade` map, which the script add
 `/etc/nginx/conf.d/websocket-upgrade.conf`.
 
 ```bash
-# 1. ICP 备案 must be done first — a Hangzhou ECS cannot serve 80/443 to a domain without it.
-# 2. DNS A record -> 115.29.164.8, and set OTTO_DOMAIN (+ optionally OTTO_EMAIL) in aliyun.env.
-./deploy/enable-tls.sh --stage   # vhost on :80, no cert: enough to check proxying
+# 1. Before shipping the new Node bundle, set OTTO_PUBLIC_ORIGIN=https://115.29.164.8
+#    in untracked aliyun.env, run apply-env.sh, and verify the IP HTTPS login still works.
+# 2. ICP 备案 must be EFFECTIVE on Aliyun first: test http://ottocloud.cn/ for the block page.
+# 3. DNS A record -> 115.29.164.8, set OTTO_DOMAIN (+ optionally OTTO_EMAIL) in aliyun.env.
+./deploy/enable-tls.sh --stage   # brief :80 routing probe ONLY, no HTTP login/pairing
 ./deploy/enable-tls.sh --live    # certbot --nginx: 443 + http->https redirect
+# Verify HTTPS login and WSS, then update OTTO_PUBLIC_ORIGIN=https://ottocloud.cn and restart.
 ```
 
 Both modes back up `/etc/nginx` first and abort if the domain does not resolve to this box.
@@ -275,8 +288,9 @@ drop-in, `/etc/otto/.dev.vars` (root:otto 640), `otto-backup.timer` taking a dai
 (15 kept, same disk only — an offsite copy is still a gap), and `ufw` allowing 80/443. Probing from a
 client: `:80` answers `200` (the tstock site) but `:443` and `:8443` both **time out** rather than
 refuse, which points at the Aliyun security group having no rule for them — that is a console step,
-not something the scripts can do. So the resume order is exactly: ICP review → security group 443 →
-`--stage` → pair on `http://<name>` → `--live` → re-pair on `https://<name>` and retire the tunnel.
+not something the scripts can do. So the resume order is: ICP review effective → security group 443 → short `--stage` probe
+(**never** pair or log in on HTTP) → `--live` → verify HTTPS/WSS → update
+`OTTO_PUBLIC_ORIGIN` and re-point the connector URL (no new pairing code needed).
 (As of 2026-11-10 that security-group rule exists and `https://115.29.164.8` serves a trusted
 certificate, so the by-IP path is already the working way in; the domain path stays unrun.)
 
@@ -297,11 +311,15 @@ worth remembering: a `Host: <name>` probe against the raw IP returned tstock's `
 record existed, which reads like a pass — Aliyun's check follows DNS, so only
 `curl http://<name>/` after the record exists answers the question.
 
-Two headers are load-bearing, not decoration: `node-host/server.ts` builds the request origin
-from `Host` + `X-Forwarded-Proto`, and the app stores it in `sh_deploy.origin` to mint absolute
-login links. Verified: a pairing call through the vhost returned
-`npx … connect http://otto.test.invalid CODE`, i.e. the forwarded host, not `127.0.0.1:8787`.
-The service itself stays on loopback; only nginx is exposed.
+`Host` + `X-Forwarded-Proto` still determine the request origin for browser same-origin checks.
+Historically they also determined absolute links: a rehearsal pairing call through the vhost
+returned `npx … connect http://otto.test.invalid CODE`. That behaviour is superseded by
+`OTTO_PUBLIC_ORIGIN` on the Node host: the configured HTTPS origin now wins for links and commands.
+The service itself stays on loopback; only nginx is exposed. The new Node bundle uses
+`OTTO_PUBLIC_ORIGIN` for absolute links and refuses production startup without it. Both vhosts
+reject unknown Host headers and replace client-supplied IP headers before forwarding. Test the
+rendered config with `nginx -t` and verify a forged Host returns 421. The box's nginx
+has only one `:443` vhost; a raw `Host: attacker.example` must not reach Otto.
 
 ## Ops hardening: `deploy/harden.sh`
 

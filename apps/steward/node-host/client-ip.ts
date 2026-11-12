@@ -6,15 +6,11 @@
  * bucket: the per-IP throttle degenerated into the global one and a single stranger could use up
  * the owner's five password attempts per minute.
  *
- * Precedence, and why:
- *   1. An existing `CF-Connecting-IP` wins — that is Cloudflare's (or a test harness's) claim to
- *      know the client, and it is also what keeps the workerd suite's fixed test IPs meaningful
- *      when the same tests run against this host.
- *   2. Only a loopback peer may speak for the client through `X-Forwarded-For`: there the proxy
- *      is on this box (nginx → 127.0.0.1:8787), so the header cannot have come from the internet.
- *      A direct remote connection ignoring its own `X-Forwarded-For` is exactly the spoof that
- *      would dodge the per-IP bucket.
- *   3. Otherwise the socket's own address.
+ * Trust only the socket peer, or X-Forwarded-For from a loopback peer (the local nginx).
+ * nginx MUST overwrite X-Forwarded-For with $remote_addr, not append to a client-supplied
+ * value. Never trust an incoming CF-Connecting-IP here: nginx forwards it unchanged unless
+ * explicitly stripped, letting any remote client choose its own throttle bucket. Cloudflare's
+ * Worker runtime supplies that header itself; this Node-host helper never runs there.
  *
  * Kept dependency-free so it can be unit-tested under either runtime (no `node:net` here).
  */
@@ -36,13 +32,9 @@ export interface ClientIpInput {
   remoteAddress?: string | undefined;
   /** The raw `x-forwarded-for` header. */
   forwardedFor?: string | string[] | undefined;
-  /** The raw `cf-connecting-ip` header, if the peer already sent one. */
-  existing?: string | string[] | undefined;
 }
 
 export function clientIp(input: ClientIpInput): string {
-  const claimed = firstHeaderValue(input.existing);
-  if (claimed) return claimed;
   if (isLoopback(input.remoteAddress)) {
     const forwarded = firstHeaderValue(input.forwardedFor);
     if (forwarded) return forwarded;

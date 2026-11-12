@@ -250,6 +250,8 @@ export interface WebDeps {
    * verifying during a SERVER_KEY rotation window (issue #27, auth.ts). */
   secrets: readonly string[];
   ledger: Ledger;
+  /** Self-hosted canonical address; never derive absolute links from a caller's Host. */
+  publicOrigin?: string;
   /** Protocol-layer `device` rows (steward.ts owns that table): deviceId, name, epoch, revoked. */
   listDevices(): Array<{ deviceId: string; name: string | null; revoked: boolean }>;
   /** Revocation bumps the epoch and closes the connection with 4403 (protocol §5.1). */
@@ -316,14 +318,19 @@ export class WebApp {
   // ---- deployment origin (absolute links need it; the DO learns it from its requests) ----
 
   recordOrigin(origin: string): void {
+    // Cloudflare deployments still learn their origin from the platform request. The Node
+    // host uses its configured canonical address even for anonymous or alternate-host requests.
+    const trusted = this.#deps.publicOrigin ?? origin;
     this.#sql`
-      INSERT INTO sh_deploy (id, origin, updatedAt) VALUES (1, ${origin}, ${this.#now()})
+      INSERT INTO sh_deploy (id, origin, updatedAt) VALUES (1, ${trusted}, ${this.#now()})
       ON CONFLICT (id) DO UPDATE SET origin = excluded.origin, updatedAt = excluded.updatedAt
     `;
   }
 
   origin(): string | null {
-    return (this.#sql<{ origin: string }>`SELECT origin FROM sh_deploy WHERE id = 1`[0]?.origin ?? null);
+    // Prefer the configured address even before the first request, or after a previously
+    // poisoned sh_deploy row. The next request overwrites that row with the trusted value.
+    return this.#deps.publicOrigin ?? (this.#sql<{ origin: string }>`SELECT origin FROM sh_deploy WHERE id = 1`[0]?.origin ?? null);
   }
 
   /** Absolute login URL for a message card's 查看详情 button, or null before any origin is known. */

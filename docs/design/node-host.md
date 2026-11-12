@@ -5,9 +5,8 @@ The steward is a Worker (`apps/steward/src/index.ts`) plus one Durable Object
 runs **that same code, unmodified**, on a plain Node process — for a self-hosted VPS,
 a home server, or a laptop.
 
-The Cloudflare deployment stays the default: `wrangler.jsonc`, `pnpm deploy` and the
-workerd test suite are untouched. The Node host is a second runtime for the same
-program, not a fork.
+The VPS/Node deployment is the primary self-hosted path; Cloudflare remains an optional
+runtime (`wrangler.jsonc`, `pnpm deploy`). Both use the same steward logic, not a fork.
 
 ## Why an adapter and not a port
 
@@ -23,7 +22,7 @@ program, not a fork.
 Everything else — routing, the session gate, protocol, ledger, notes, dispatch, the pi
 harness — is ordinary TypeScript. `cloudflare:workers` is imported by the Agents SDK for
 exactly four names (`DurableObject`, `RpcTarget`, `exports`, `WorkflowEntrypoint`), and
-`node-host/scripts/build-node.mjs` rewrites that one specifier to `node-host/cloudflare-workers.ts`
+`apps/steward/scripts/build-node.mjs` rewrites that one specifier to `node-host/cloudflare-workers.ts`
 at bundle time. No `if (isNode)` branches, no duplicated business logic.
 
 ## What is shimmed
@@ -41,7 +40,7 @@ at bundle time. No `if (isNode)` branches, no duplicated business logic.
 | DO namespace binding (`env.Steward`) | `node-host/namespace.ts` | one live instance behind a `Proxy`, so `getAgentByName()` and `stub.pair(...)` RPC both work |
 | `env.ASSETS` | `node-host/env.ts` | serves `apps/steward/ui` from disk: a deployment copies it next to the bundle as `dist/ui`, or `/workspace` and `/brand/*` return 404 |
 | `LOGIN_RATE_LIMITER` | same file | 10 requests / 60 s per key, in memory |
-| `CF-Connecting-IP` | `node-host/client-ip.ts` | workerd fills it in, nginx sets only `X-Forwarded-For`; without it every client shared one `unknown` throttle bucket (see `docs/plan/self-hosted.md` Finding 4) |
+| `CF-Connecting-IP` | `node-host/client-ip.ts` | Node ignores the incoming value and derives it from the socket or local nginx's **overwritten** `X-Forwarded-For`; never trust a caller-supplied IP header |
 
 ## What behaves differently
 
@@ -56,7 +55,7 @@ at bundle time. No `if (isNode)` branches, no duplicated business logic.
   The steward already assumes early or late alarms (`alarm.test.ts` pins that behaviour), and
   `resendUnacked` re-checks the row it is about to send, so polling is safe.
 - **Same suite, second runtime.** `pnpm test` (workerd) stays the semantic baseline;
-  `pnpm test:node` runs the *same* 44 test files after swapping `cloudflare:test` and
+  `pnpm test:node` runs the *same* steward test files after swapping `cloudflare:test` and
   `cloudflare:workers` for `node-host/testing/` (see "Tests" below). One assertion diverges —
   an ordering that depends on workerd's async interleaving.
 
@@ -77,6 +76,7 @@ Environment:
 | `PORT` | `8787` | listen port |
 | `HOST` | `0.0.0.0` | bind address |
 | `OTTO_CONFIG_DIR` | repo root | where `.dev.vars` is read from |
+| `OTTO_PUBLIC_ORIGIN` | required in production | canonical HTTPS origin for links and pairing commands; never inferred from anonymous Host headers |
 
 `.dev.vars` supplies the same values `wrangler dev` would: `LOGIN_PASSWORD`, `SERVER_KEY`,
 `STEWARD_MODEL` (JSON), `DAILY_BUDGET_USD`, `MODEL_KEY`. As in production, the model API key
@@ -88,8 +88,8 @@ fronts a vendor under its own snapshot name works without patching the catalog: 
 vendor's request dialect survives). `https://ai.ctaigw.cn/v1/chat/completions` is therefore
 `"baseUrl":"https://ai.ctaigw.cn/v1"`, and the id in the wire body is the gateway's own.
 
-The process refuses nothing that a Worker would refuse: the session gate, pairing lockout,
-budget cap and push policy are all the same code.
+The Node production entry point additionally requires `OTTO_PUBLIC_ORIGIN`; the session gate,
+pairing lockout, budget cap and push policy remain the same code as on Cloudflare.
 
 ## Smoke check
 
@@ -151,37 +151,15 @@ now" does not race the assertion; nothing in `src/` changes.
 activity is written *after* the second dispatch — workerd's interleaving happens to do that; the
 Node host writes both inside their own calls, so the newer Thread sorts first. The behaviour
 under test (each Task carries its own mode, `write` default) is identical; only the row order
-differs. 666 of 667 tests pass.
+differs. The counts here change with the suite; see CI for current results.
 
 ## Deploying on a VPS
 
-1. **Host.** 2 vCPU / 2 GB, Ubuntu 24.04, Node ≥ 22.18 (the repo's `engines` floor).
-2. **TLS.** Caddy in front of `127.0.0.1:8787` (the app binds loopback in that case:
-   `HOST=127.0.0.1`). Do not expose the port directly.
-3. **Process.** systemd, `Restart=always`, `EnvironmentFile=/etc/otto/env`:
-
-   ```ini
-   [Service]
-   WorkingDirectory=/opt/otto/apps/steward
-   EnvironmentFile=/etc/otto/env
-   ExecStart=/usr/bin/node dist/node/steward-node.mjs
-   Restart=always
-   RestartSec=2
-   ```
-
-4. **Backups.** WAL mode tolerates being copied with `sqlite3 ... ".backup"` while running:
-
-   ```bash
-   sqlite3 "$OTTO_DB_PATH" ".backup '/var/backups/otto-$(date +%F).sqlite'"
-   ```
-
-   Keep seven days, ship them off the box (rclone to object storage). This file *is* the
-   steward: ledger, notes, pi sessions, device tokens, sealed model key.
-5. **Health.** Any `/` GET returning 200 means the process is up; the alarm and socket paths
-   only run when there is work. Pair an external heartbeat with the systemd unit — a wedged
-   process that still answers HTTP is the failure mode worth alerting on.
-6. **Network region.** The model provider must be reachable from the host; behind the GFW
-   that means `STEWARD_MODEL` pointing at an endpoint you can actually reach.
+Use the maintained [self-hosted runbook](../self-hosted.md) for Node 24, the systemd unit,
+`/etc/otto/.dev.vars`, nginx + TLS, upgrades and SQLite online backups. The deployment-specific
+record is [deploy/NOTES.md](../../deploy/NOTES.md). Keep the steward on loopback and configure
+`OTTO_PUBLIC_ORIGIN` before starting the production Node process. The database and explicit
+`SERVER_KEY` must be backed up separately for full recovery.
 
 ## When to prefer Cloudflare
 

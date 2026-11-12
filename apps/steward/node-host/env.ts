@@ -12,7 +12,7 @@
  * to the file. `src/env.d.ts` is the list of record.
  */
 import { readFile, stat } from "node:fs/promises";
-import { extname, join, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type Vars = Record<string, string>;
 
@@ -46,6 +46,7 @@ export async function loadVars(options: { cwd: string; devVarsPath?: string }): 
     "WATCHDOG_LLM",
     "LOGIN_LINK_TTL_MS",
     "LOGIN_LINK_REUSABLE",
+    "OTTO_PUBLIC_ORIGIN",
   ];
   for (const name of names) {
     const value = process.env[name];
@@ -59,6 +60,18 @@ export async function loadVars(options: { cwd: string; devVarsPath?: string }): 
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return vars;
+}
+
+// A Node deployment must not learn its public origin from an anonymous Host header.
+export function parsePublicOrigin(value: string): string {
+  const url = new URL(value);
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) ||
+      url.username || url.password || url.pathname !== "/" || url.search || url.hash ||
+      value !== url.origin && value !== `${url.origin}/`) {
+    throw new Error("OTTO_PUBLIC_ORIGIN must be a bare HTTPS origin (HTTP only for loopback)");
+  }
+  return url.origin;
 }
 
 const MIME: Record<string, string> = {
@@ -98,7 +111,8 @@ export function createAssets(rootDir: string): { fetch(input: Request | string |
       const candidates = [resolve(join(root, pathname))];
       if (!extname(pathname)) candidates.push(`${candidates[0]}.html`);
       for (const candidate of candidates) {
-        if (candidate !== root && !candidate.startsWith(root + "/")) return new Response("not found", { status: 404 });
+        const rel = relative(root, candidate);
+        if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return new Response("not found", { status: 404 });
       }
       for (const full of candidates) {
       try {
