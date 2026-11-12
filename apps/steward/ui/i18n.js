@@ -249,6 +249,7 @@ export const STRINGS = {
   pushHelp: ['Only generic alerts for decisions and finished tasks. Details stay in Otto. Quiet hours use this device’s time zone.', '只推送待决事项与任务完成的通用提醒；详情仍在 Otto。静默时段使用此设备所在时区。'],
   pushEnable: ['Enable on this device', '在此设备开启'],
   pushDisable: ['Turn off on this device', '在此设备关闭'],
+  pushWorking: ['Waiting for browser push service…', '正在等待浏览器推送服务…'],
   pushTest: ['Send a test notification', '发送测试通知'],
   pushTestSent: ['Test notification queued for this device.', '已为此设备排队发送测试通知。'],
   pushQuiet: ['Quiet 22:00–08:00', '22:00–08:00 静默'],

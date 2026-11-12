@@ -875,7 +875,7 @@ function pushSection() {
       !supported ? h('p', { class: 'dialog-hint' }, t('pushNoSupport')) : [
         Notification.permission === 'denied' ? h('p', { class: 'dialog-hint' }, t('pushDenied')) : null,
         h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy || Notification.permission === 'denied',
-          dataset: { action: enabled ? 'push-disable' : 'push-enable' } }, t(enabled ? 'pushDisable' : 'pushEnable')),
+          dataset: { action: enabled ? 'push-disable' : 'push-enable' } }, t(state.pushBusy ? 'pushWorking' : enabled ? 'pushDisable' : 'pushEnable')),
         enabled ? [
           h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
             dataset: { action: 'push-test' } }, t('pushTest')),
@@ -1575,10 +1575,10 @@ async function refreshPushSubscription() {
     const registration = await withPushTimeout(navigator.serviceWorker.getRegistration('/app/'));
     let subscription = await withPushTimeout(registration?.pushManager?.getSubscription());
     if (pushDisabledLocally()) {
-      // Chrome may leave unsubscribe() pending when FCM is unreachable. Never silently
-      // re-register a device the owner explicitly turned off on the next page load.
+      // A server-revoked endpoint is inert. Keep the browser subscription so a later
+      // explicit opt-in can reuse it without waiting for FCM to unsubscribe first.
+      // Never silently re-register a device the owner explicitly turned off.
       state.pushSubscription = null;
-      if (subscription) void subscription.unsubscribe().catch(() => {});
     } else {
       if (subscription && !pushKeyMatches(subscription, state.settings.push.publicKey)) {
         await withPushTimeout(request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint }));
@@ -1638,9 +1638,9 @@ async function disablePush() {
     if (status !== 200) throw new Error('unsubscribe');
     try { localStorage.setItem('otto.push.disabled', 'true'); } catch { /* private mode */ }
     state.pushSubscription = null;
-    // The server has revoked this endpoint. Do not hold the buttons disabled while
-    // Android Chrome waits indefinitely for its own push service to unsubscribe.
-    void subscription.unsubscribe().catch(() => {});
+    // The server has revoked this endpoint and local opt-out blocks auto-renewal.
+    // Chrome can stall indefinitely on unsubscribe(); do not start it at all.
+    // Re-enabling can reuse the browser subscription without contacting FCM.
     toast(t('pushOff'));
   } catch { toast(t('pushFailed')); }
   finally { state.pushBusy = false; bumpDialog(); }
