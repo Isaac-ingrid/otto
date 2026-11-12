@@ -251,6 +251,17 @@ and rotate the token if the host is lost. Disable the relay by removing its syst
 drop-in and restarting Otto; direct Web Push remains available for other supported
 browsers and network routes. Delete the unused Pages project after disabling it.
 
+### When outbound calls time out from a slow-egress host
+
+`connect ETIMEDOUT` for *every* address is not proof that a destination is blocked. Node races
+the resolved addresses and aborts each attempt after 250 ms; a mainland-China host measured
+250–370 ms to Cloudflare, so `fetch` failed ~85% of the time while `curl` and a plain
+`net.connect` to the same address succeeded. The Node host raises that budget to one second
+(`OTTO_TCP_HAPPY_EYEBALLS_MS`, `0` disables the race). Confirm a suspicious destination with
+`curl -4 --max-time 10 https://HOST/` before blaming the route, and read the
+`[otto] push failed reason=…` line in `journalctl -u otto`: it names the failure without
+logging the endpoint, the keys or the payload.
+
 ## Backups
 
 The database is one file. With WAL live, copy it with SQLite's own online backup:

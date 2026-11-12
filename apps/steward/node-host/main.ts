@@ -22,8 +22,12 @@ import { HostRuntime } from "./runtime.ts";
 import { startServer } from "./server.ts";
 import { NodeDurableObjectId, NodeDurableObjectState } from "./state.ts";
 import { NodeDurableObjectStorage } from "./storage.ts";
+import { configureTcpEgress } from "./tcp.ts";
 
 installGlobals();
+// Before any outbound request: the default 250 ms per-address budget is shorter than the
+// connect to Cloudflare from a mainland-China host, which turns working calls into ETIMEDOUT.
+configureTcpEgress();
 
 const appDir = resolve(import.meta.dirname, "..");
 const cwd = process.env.OTTO_CONFIG_DIR ?? resolve(appDir, "../..");

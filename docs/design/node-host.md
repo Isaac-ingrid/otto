@@ -77,6 +77,7 @@ Environment:
 | `HOST` | `0.0.0.0` | bind address |
 | `OTTO_CONFIG_DIR` | repo root | where `.dev.vars` is read from |
 | `OTTO_PUBLIC_ORIGIN` | required in production | canonical HTTPS origin for links and pairing commands; never inferred from anonymous Host headers |
+| `OTTO_TCP_HAPPY_EYEBALLS_MS` | `1000` | per-address TCP connect budget for the dual-stack race; `0` disables the race |
 
 `.dev.vars` supplies the same values `wrangler dev` would: `LOGIN_PASSWORD`, `SERVER_KEY`,
 `STEWARD_MODEL` (JSON), `DAILY_BUDGET_USD`, `MODEL_KEY`. As in production, the model API key
