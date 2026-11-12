@@ -250,6 +250,8 @@ export const STRINGS = {
   pushEnable: ['Enable on this device', '在此设备开启'],
   pushDisable: ['Turn off on this device', '在此设备关闭'],
   pushWorking: ['Waiting for browser push service…', '正在等待浏览器推送服务…'],
+  pushTesting: ['Sending a test notification…', '正在发送测试通知…'],
+  pushQuietSaved: ['Quiet hours updated on this device.', '已更新此设备的静默时段。'],
   pushTest: ['Send a test notification', '发送测试通知'],
   pushTestSent: ['Test notification queued for this device.', '已为此设备排队发送测试通知。'],
   pushQuiet: ['Quiet 22:00–08:00', '22:00–08:00 静默'],

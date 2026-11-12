@@ -1,6 +1,6 @@
 import { SELF, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PushService, quietNow, validEndpoint, validSubscription } from "../src/push.ts";
+import { PushService, quietNow, retryDelayMs, validEndpoint, validSubscription } from "../src/push.ts";
 import type { SqlExecutor } from "../src/schema.ts";
 import type { Steward } from "../src/steward.ts";
 import { configureAndBind, ownerStub, resetLedgerState, webLogin } from "./helpers.ts";
@@ -152,5 +152,43 @@ describe("opt-in Web Push", () => {
     });
     expect(result).toEqual({ valid: true, afterSuccess: 0, remaining: 0 });
     expect(sends).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a blocked push service in seconds and says why without logging the subscription", async () => {
+    const { config, subscription } = await keys();
+    expect(retryDelayMs(1)).toBe(5_000);
+    expect(retryDelayMs(6)).toBe(300_000);
+    expect(retryDelayMs(9)).toBe(300_000);
+    const logged: unknown[][] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { logged.push(args); });
+    const blocked = Object.assign(new TypeError("fetch failed"), { cause: { code: "ETIMEDOUT" } });
+    try {
+      const delays = await runInDurableObject(ownerStub(), async (instance: Steward) => {
+        const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance) as SqlExecutor;
+        const service = new PushService(sql, config, async () => {}, (async () => { throw blocked; }) as unknown as typeof fetch);
+        expect(service.subscribe(subscription, "UTC", false)).toBe(true);
+        service.queue("notify:report:blocked", "done");
+        const measured: number[] = [];
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          sql`UPDATE sh_push_job SET dueAt = ${Date.now()} WHERE sentAt IS NULL`;
+          await service.drain();
+          measured.push(sql<{ delay: number }>`SELECT dueAt - ${Date.now()} AS delay FROM sh_push_job WHERE sentAt IS NULL`[0]!.delay);
+        }
+        return measured;
+      });
+      // Each retry is seconds away, not the minutes an exponential backoff would spend.
+      expect(delays[0]).toBeGreaterThan(3_000);
+      expect(delays[0]).toBeLessThan(6_000);
+      expect(delays[1]).toBeGreaterThan(13_000);
+      expect(delays[1]).toBeLessThan(16_000);
+      expect(delays[2]).toBeGreaterThan(43_000);
+    } finally { errors.mockRestore(); }
+    expect(logged).toHaveLength(3);
+    expect(String(logged[0]![0])).toContain("reason=ETIMEDOUT");
+    expect(String(logged[0]![0])).toContain("kind=done");
+    const written = JSON.stringify(logged);
+    expect(written).not.toContain(subscription.keys.auth);
+    expect(written).not.toContain(subscription.keys.p256dh);
+    expect(written).not.toContain(subscription.endpoint);
   });
 });

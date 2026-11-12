@@ -6,6 +6,23 @@ import type { SqlExecutor } from "./schema.ts";
 const MAX_DEVICES = 8;
 const MAX_AGE_MS = 24 * 60 * 60_000;
 const HOSTS = new Set(["fcm.googleapis.com", "updates.push.services.mozilla.com", "web.push.apple.com"]);
+/** Six attempts at most in 24h. The first ones are seconds apart because a single blocked
+ *  attempt (an unreachable FCM, a flaky egress) should cost seconds, not the minutes an
+ *  exponential backoff spends before it tries again. A re-sent wake-up coalesces in the same
+ *  notification, since the payload carries one stable tag per outbound id. */
+const RETRY_DELAYS_MS = [5_000, 15_000, 45_000, 120_000, 300_000];
+
+export function retryDelayMs(attempts: number): number {
+  const index = Math.min(Math.max(attempts, 1), RETRY_DELAYS_MS.length) - 1;
+  return RETRY_DELAYS_MS[index]!;
+}
+
+/** A failure reason for the server log: never the endpoint, keys or payload. */
+function failureReason(error: unknown): string {
+  const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+  if (typeof cause?.code === "string") return cause.code;
+  return error instanceof Error ? error.name : "unknown";
+}
 
 export interface PushConfig {
   publicKey?: string; privateKey?: string; subject?: string;
@@ -168,9 +185,13 @@ export class PushService {
           if (response.ok) this.sql`UPDATE sh_push_job SET sentAt = ${Date.now()} WHERE outboundId = ${job.outboundId} AND endpoint = ${job.endpoint}`;
           continue;
         }
-      } catch { /* Network/crypto failure: keep the in-app card and retry, never log tokens. */ }
+        console.error(`[otto] push rejected kind=${job.kind} status=${response.status} attempt=${job.attempts + 1}`);
+      } catch (error) {
+        // Network/crypto failure: keep the in-app card and retry, never log tokens or payload.
+        console.error(`[otto] push failed kind=${job.kind} reason=${failureReason(error)} attempt=${job.attempts + 1}`);
+      }
       const attempts = job.attempts + 1;
-      this.sql`UPDATE sh_push_job SET attempts = ${attempts}, dueAt = ${Date.now() + Math.min(60 * 60_000, 30_000 * 2 ** attempts)}
+      this.sql`UPDATE sh_push_job SET attempts = ${attempts}, dueAt = ${Date.now() + retryDelayMs(attempts)}
         WHERE outboundId = ${job.outboundId} AND endpoint = ${job.endpoint}`;
     }
     const next = this.sql<{ at: number | null }>`SELECT MIN(dueAt) AS at FROM sh_push_job WHERE sentAt IS NULL`[0]?.at;

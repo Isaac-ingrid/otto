@@ -49,6 +49,8 @@ const state = {
   settingsError: false,
   pushSubscription: null,
   pushBusy: false,
+  pushAction: null, // the data-action of the control that is waiting, so its label can say so
+  pushNotice: null, // i18n key of the last push result, shown inside the dialog the toast cannot reach
   pushQuiet: true,
   changingModel: false,
   stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
@@ -868,6 +870,10 @@ function pushSection() {
   const available = state.settings.push?.available;
   const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && isSecureContext;
   const enabled = !!state.pushSubscription;
+  // Labels are read here so the i18n scan in ui-modules.test.ts sees keys, not action names.
+  const toggleAction = enabled ? 'push-disable' : 'push-enable';
+  const toggleLabel = state.pushAction === toggleAction ? 'pushWorking' : enabled ? 'pushDisable' : 'pushEnable';
+  const testLabel = state.pushAction === 'push-test' ? 'pushTesting' : 'pushTest';
   return h('section', { class: 'settings-section' },
     h('div', { class: 'section-heading' }, icon('bell'),
       h('div', null, h('h3', null, t('pushTitle')), h('p', { class: 'dialog-copy' }, t('pushHelp')))),
@@ -875,14 +881,16 @@ function pushSection() {
       !supported ? h('p', { class: 'dialog-hint' }, t('pushNoSupport')) : [
         Notification.permission === 'denied' ? h('p', { class: 'dialog-hint' }, t('pushDenied')) : null,
         h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy || Notification.permission === 'denied',
-          dataset: { action: enabled ? 'push-disable' : 'push-enable' } }, t(state.pushBusy ? 'pushWorking' : enabled ? 'pushDisable' : 'pushEnable')),
+          dataset: { action: toggleAction } }, t(toggleLabel)),
         enabled ? [
           h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
-            dataset: { action: 'push-test' } }, t('pushTest')),
+            dataset: { action: 'push-test' } }, t(testLabel)),
           h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
             dataset: { action: 'push-quiet' }, 'aria-pressed': String(state.pushQuiet) },
           `${state.pushQuiet ? '✓ ' : ''}${t('pushQuiet')}`),
         ] : null,
+        // A toast paints under a modal dialog's backdrop, so the result belongs here too.
+        state.pushNotice ? h('p', { class: 'dialog-hint', role: 'status' }, t(state.pushNotice)) : null,
       ]);
 }
 
@@ -1122,6 +1130,7 @@ function bumpDialog() {
 
 function openDialog(type) {
   state.dialog = { type, rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+  state.pushNotice = null; // a fresh visit shows the current state, not the last attempt's result
   drawn.delete('dialog');
   if (type === 'account') void loadSettings();
   renderDialog();
@@ -1594,9 +1603,17 @@ async function refreshPushSubscription() {
   if (state.dialog?.type === 'account') bumpDialog();
 }
 
+/** The result goes into the dialog (a toast paints under a modal backdrop) and out to the toast. */
+function pushResult(key) {
+  state.pushNotice = key;
+  toast(t(key));
+}
+
 async function enablePush() {
   if (state.pushBusy || !state.settings?.push?.available || !isSecureContext) return;
   state.pushBusy = true;
+  state.pushAction = 'push-enable';
+  state.pushNotice = null;
   bumpDialog();
   try {
     // iOS requires permission in the direct tap gesture, before any async registration.
@@ -1620,17 +1637,18 @@ async function enablePush() {
     }
     state.pushSubscription = subscription;
     try { localStorage.removeItem('otto.push.disabled'); } catch { /* private mode */ }
-    toast(t('pushReady'));
+    pushResult('pushReady');
   } catch {
-    const copy = Notification.permission === 'denied' ? 'pushDenied' : 'pushFailed';
-    toast(t(copy));
+    pushResult(Notification.permission === 'denied' ? 'pushDenied' : 'pushFailed');
   }
-  finally { state.pushBusy = false; bumpDialog(); }
+  finally { state.pushBusy = false; state.pushAction = null; bumpDialog(); }
 }
 
 async function disablePush() {
   if (state.pushBusy || !state.pushSubscription) return;
   state.pushBusy = true;
+  state.pushAction = 'push-disable';
+  state.pushNotice = null;
   bumpDialog();
   try {
     const subscription = state.pushSubscription;
@@ -1641,25 +1659,32 @@ async function disablePush() {
     // The server has revoked this endpoint and local opt-out blocks auto-renewal.
     // Chrome can stall indefinitely on unsubscribe(); do not start it at all.
     // Re-enabling can reuse the browser subscription without contacting FCM.
-    toast(t('pushOff'));
-  } catch { toast(t('pushFailed')); }
-  finally { state.pushBusy = false; bumpDialog(); }
+    pushResult('pushOff');
+  } catch { pushResult('pushFailed'); }
+  finally { state.pushBusy = false; state.pushAction = null; bumpDialog(); }
 }
 
 async function testPush() {
   if (state.pushBusy || !state.pushSubscription) return;
   state.pushBusy = true;
+  state.pushAction = 'push-test';
+  state.pushNotice = null;
   bumpDialog();
   try {
-    const { status } = await withPushTimeout(request('/app/api/push/test', { endpoint: state.pushSubscription.endpoint }));
-    toast(t(status === 200 ? 'pushTestSent' : 'pushFailed'));
-  } catch { toast(t('pushFailed')); }
-  finally { state.pushBusy = false; bumpDialog(); }
+    const subscription = state.pushSubscription;
+    const { status } = await withPushTimeout(request('/app/api/push/test', { endpoint: subscription.endpoint }));
+    // "Queued" is all the server can promise: the phone shows it only once its own push
+    // service hands the notification over, which may take a retry.
+    pushResult(status === 200 ? 'pushTestSent' : 'pushFailed');
+  } catch { pushResult('pushFailed'); }
+  finally { state.pushBusy = false; state.pushAction = null; bumpDialog(); }
 }
 
 async function setPushQuiet(quiet) {
   if (state.pushBusy || !state.pushSubscription) return;
   state.pushBusy = true;
+  state.pushAction = 'push-quiet';
+  state.pushNotice = null;
   bumpDialog();
   try {
     const { status } = await withPushTimeout(request('/app/api/push/subscribe', {
@@ -1668,8 +1693,9 @@ async function setPushQuiet(quiet) {
     if (status !== 200) throw new Error('quiet');
     state.pushQuiet = quiet;
     try { localStorage.setItem('otto.push.quiet', String(quiet)); } catch { /* private mode */ }
-  } catch { toast(t('pushFailed')); }
-  finally { state.pushBusy = false; bumpDialog(); }
+    pushResult('pushQuietSaved');
+  } catch { pushResult('pushFailed'); }
+  finally { state.pushBusy = false; state.pushAction = null; bumpDialog(); }
 }
 
 try { state.pushQuiet = localStorage.getItem('otto.push.quiet') !== 'false'; } catch { /* private mode */ }
