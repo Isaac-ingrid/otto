@@ -51,6 +51,8 @@ Otto 不是照搬 DeepSeek Super Agent；项目对照过三种思路，并记录
 
 Otto 不是通用云端浏览器。可选的只读网页搜索（Brave Search API）默认关闭，需单独配置密钥；它只返回限量摘要和来源链接，不能核验网页全文，也不是实时天气工具。需要本地执行的任务必须等连接器在线，但电脑休眠时云端仍能对话、记忆和安排回看。
 
+可选的 **Web Push 手机提醒**也默认关闭：配置 VAPID 密钥后，在手机的「设置 → 手机通知」手动订阅；只推送待决事项和任务完成的通用提示，不包含任务内容。默认按手机时区在 22:00–08:00 静默，应用内待办始终是可靠的兜底。iPhone 需先将 Otto 添加到主屏幕并从图标打开；详见[自托管手册](docs/self-hosted.md#web-push-optional)。
+
 ## 开始使用
 
 你需要一台**长期在线的云服务器**运行总管（Linux、Node.js 24、服务管理器、持久磁盘和各台电脑可访问的 HTTPS 地址）。构建时使用 [`package.json`](package.json) 锁定的 pnpm 版本（若没有 `corepack` 命令，请先安装 Corepack）；登录后在工作台填写总管的模型 API key。连接器所在电脑需要 **Node.js 22.18+**（macOS、Linux 或 Windows），以及另行安装并完成登录／模型配置的本地 coding agent。总管的模型密钥不会替本地 agent 配置模型。

@@ -52,4 +52,5 @@ if [ "${1:-}" = "--copy" ]; then
   exit 0
 fi
 
-exec ssh "${ssh_args[@]}" "$target" "$@"
+# Do not exec: the EXIT trap must remove a temporary inline-key file after ssh exits.
+ssh "${ssh_args[@]}" "$target" "$@"

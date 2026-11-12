@@ -277,6 +277,8 @@ export interface WebDeps {
     | "webauthnRegisterOptions"
     | "webauthnRegisterVerify"
     | "webauthnRemove"
+    | "pushSubscribe"
+    | "pushUnsubscribe"
   >;
   sessionEnded?(sid: string): void;
   loginLinkPolicy?: LoginLinkPolicy;
@@ -570,8 +572,9 @@ export class WebApp {
     const thread = /^\/app\/threads\/([\w-]+)$/.exec(url.pathname);
     const rawProcess = /^\/app\/threads\/([\w-]+)\/workers\/([A-Za-z0-9._-]+)$/.exec(url.pathname);
     const api = url.pathname.startsWith("/app/api/");
-    const asset = url.pathname.startsWith("/app/assets/");
-    const assetName = asset ? url.pathname.slice("/app/assets/".length) : "";
+    const asset = url.pathname.startsWith("/app/assets/") || url.pathname === "/app/push-sw.js" || url.pathname === "/app/manifest.webmanifest";
+    const assetName = url.pathname.startsWith("/app/assets/") ? url.pathname.slice("/app/assets/".length) :
+      url.pathname === "/app/push-sw.js" ? "push-sw.js" : "manifest.webmanifest";
     if (asset && (request.method !== "GET" || !/^[A-Za-z0-9][\w.-]*$/.test(assetName))) {
       return new Response("not found", { status: 404 });
     }

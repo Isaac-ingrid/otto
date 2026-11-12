@@ -185,6 +185,43 @@ Brave key only in the protected `.dev.vars` file, restart `otto` after setting i
 that search queries go to the chosen provider. Cloudflare deployments can set the same value as a
 Worker secret instead. Do not send keys through chat.
 
+## Web Push (optional)
+
+Push is **off until a VAPID signing keypair is configured**. Otto only sends generic,
+content-free alerts for owner decisions and worker reports; the signed-in workspace remains
+where details and actions live. Each browser opts in separately under **Settings → Phone
+notifications**, with a per-device 22:00–08:00 quiet period (device time zone, on by default).
+Failed delivery is retried for up to 24 hours; the in-app inbox does not depend on push.
+
+Generate a keypair **outside this repository** on the Linux host (Node 22+), with the stable
+HTTPS origin or a contact email as VAPID subject. Copy `deploy/generate-vapid.mjs` to the host,
+then as root:
+
+```sh
+node ./generate-vapid.mjs /etc/otto/vapid.env https://YOUR-CANONICAL-ORIGIN
+install -d -m 0755 /etc/systemd/system/otto.service.d
+printf '[Service]\nEnvironmentFile=/etc/otto/vapid.env\n' > /etc/systemd/system/otto.service.d/web-push.conf
+systemctl daemon-reload && systemctl restart otto
+```
+
+The generator creates a root-owned `0600` file and prints only its path. Node reads these
+variables from the systemd environment. Keep the private key separately in your password
+manager for disaster recovery: the SQLite timer backs up the **database only**, and the
+optional offsite backup currently includes `.dev.vars` but not this extra file. **Never commit
+keys or paste them in chat.** Alternatively set all three keys in the protected `.dev.vars`
+(and in the local untracked `deploy/aliyun.env` if using `deploy/apply-env.sh`, which replaces
+that file in full). Cloudflare deployments can set the three names as Worker secrets; neither
+host is required for the other. Do not rotate the keypair casually: existing browser
+subscriptions need to opt in again after rotation.
+
+The browser requires trusted HTTPS and permission from a direct tap. On iPhone/iPad (iOS 16.4+),
+first add the Otto site to the Home Screen and open it from that icon; a Safari tab cannot
+subscribe. The current IP HTTPS origin and any future domain are **different push origins**:
+after switching to the domain, install/enable notifications again there. Delivery also depends
+on the phone's network reaching its platform push service; test from the real phone/network
+before relying on it. Signing out on a device removes its subscription; use the in-app pending
+list as the fallback. No Telegram token or third-party message content is involved.
+
 ## Backups
 
 The database is one file. With WAL live, copy it with SQLite's own online backup:

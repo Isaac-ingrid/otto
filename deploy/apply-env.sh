@@ -17,7 +17,8 @@ python3 - <<'PY' > /tmp/otto-dev-vars.$$
 import re
 WANTED = ["SERVER_KEY", "SERVER_KEY_PREVIOUS", "LOGIN_PASSWORD", "MODEL_KEY",
           "STEWARD_MODEL", "DAILY_BUDGET_USD", "WATCHDOG_LLM", "LOGIN_LINK_TTL_MS",
-          "LOGIN_LINK_REUSABLE", "OTTO_PUBLIC_ORIGIN"]
+          "LOGIN_LINK_REUSABLE", "OTTO_PUBLIC_ORIGIN", "BRAVE_SEARCH_API_KEY",
+          "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"]
 values = {}
 for line in open("deploy/aliyun.env"):
     match = re.match(r"^([A-Z_]+)=(.*)$", line.rstrip("\n"))

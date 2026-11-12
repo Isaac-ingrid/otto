@@ -64,6 +64,8 @@ If the login page reports that password checking is temporarily unavailable, wai
 
 Open the root URL or `/app`. Sign in with the password set during deployment, or choose **Use a passkey**. An authenticated browser opens the workspace directly. A second device uses the same URL and either authentication method without requiring the first device to be online.
 
+Optional Web Push requires three separately configured Worker secrets: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` (see [Web Push setup](self-hosted.md#web-push-optional) for key generation and browser requirements). Leave all three unset to keep push off. Each device opts in from Settings; nothing is sent to a phone just because secrets are configured.
+
 The browser session lasts seven days. On first use, the workspace guides you through connecting a model and offers passkey registration. You can skip the passkey step and add one later in **Settings → Security**. Authentication changes require a recent sign-in.
 
 Existing explicit-key deployments can still generate single-use links for compatibility:

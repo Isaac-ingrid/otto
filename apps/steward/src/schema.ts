@@ -981,4 +981,19 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`UPDATE sh_note_pressure SET supersedes = replaces WHERE supersedes IS NULL AND replaces IS NOT NULL`;
     },
   },
+  {
+    id: "028_web_push",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_push_sub (
+        endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+        timeZone TEXT NOT NULL, quiet INTEGER NOT NULL, createdAt INTEGER NOT NULL
+      )`;
+      sql`CREATE TABLE IF NOT EXISTS sh_push_job (
+        outboundId TEXT NOT NULL, endpoint TEXT NOT NULL REFERENCES sh_push_sub(endpoint) ON DELETE CASCADE,
+        kind TEXT NOT NULL, createdAt INTEGER NOT NULL, dueAt INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+        sentAt INTEGER, PRIMARY KEY (outboundId, endpoint)
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_push_due ON sh_push_job (dueAt)`;
+    },
+  },
 ];

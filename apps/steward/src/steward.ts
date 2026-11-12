@@ -128,6 +128,7 @@ import {
 } from "./report-template.ts";
 import { MIGRATIONS, runMigrations } from "./schema.ts";
 import { openSecret, sealSecret } from "./secretbox.ts";
+import { PushService } from "./push.ts";
 import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText, wakeOwnerNotified, watchdogWakeText } from "./wake-text.ts";
 import { WorkspaceError, cardOpen, cardView, type WorkspaceActionInput, type WorkspaceInput } from "./workspace.ts";
 import type { MachineDirectoryBrowseInput, MachineDirectoryInput, MachineDirectoryResult } from "./workspace-api.ts";
@@ -412,6 +413,8 @@ export class Steward extends Agent<Env> {
     // Issue #11: a quiet row waiting out its merge window (or a backoff between retries)
     // must not depend on the enqueue-time pass having survived — re-arm from storage.
     void this.deliverOutbound();
+    this.push.reconcile(); // Recover a settled card whose push job was not yet persisted.
+    void this.drainPush(); // Re-arm durable retry jobs after isolate eviction.
     // A DO restart clears the in-memory arm-dedupe while storage alarms keep their own
     // clock: re-arm maintenance so a restart never strands active workers unwatched. One
     // chain, ever — resetWorkerSweepChain drops the rows the last isolate left behind first,
@@ -771,6 +774,15 @@ export class Steward extends Agent<Env> {
 
   // The browser web app (issue #22, ADR-0010): password/passkey and legacy-link sessions,
   // Thread timeline, machine management. Same lazy-bind pattern as the ledger.
+  private push_?: PushService;
+  private get push(): PushService {
+    return (this.push_ ??= new PushService(this.sql.bind(this) as unknown as import("./schema.ts").SqlExecutor, {
+      publicKey: this.env.VAPID_PUBLIC_KEY, privateKey: this.env.VAPID_PRIVATE_KEY, subject: this.env.VAPID_SUBJECT,
+    }, (seconds) => this.schedule(seconds, "drainPush")));
+  }
+
+  drainPush(): Promise<void> { return this.push.drain(); }
+
   private web_?: WebApp;
   private get web(): WebApp {
     return (this.web_ ??= new WebApp({
@@ -794,6 +806,7 @@ export class Steward extends Agent<Env> {
         settings: async () => ({
           model: await this.llmSelection(),
           passkeys: this.web.listPasskeys(),
+          push: this.push.settings(),
           providers: providerCatalog(),
           keyedProviders: await this.keyedProviders(),
         }),
@@ -817,6 +830,12 @@ export class Steward extends Agent<Env> {
         webauthnRegisterVerify: (sid: string, rpId: string, origin: string, label: string, attestation: unknown) =>
           this.web.webauthnRegisterVerify(sid, rpId, origin, label, attestation),
         webauthnRemove: (credentialId: string) => this.web.removePasskey(credentialId),
+        pushSubscribe: async (subscription, timeZone, quiet) => {
+          if (!this.push.subscribe(subscription, timeZone, quiet)) return false;
+          await this.schedule(1, "drainPush");
+          return true;
+        },
+        pushUnsubscribe: (endpoint) => this.push.unsubscribe(endpoint),
       },
       sessionEnded: (sid) => this.closeWebSession({ sid }),
     }));
@@ -4797,7 +4816,10 @@ export class Steward extends Agent<Env> {
     }
     mergeQuietOutbound(sections); // validates the budget path; the read side re-renders it
     const providerMsgId = mergedSendUuid(claimed.map(({ row }) => row.id));
-    for (const { row } of claimed) this.ledger.outbound.settleSent(row.id, row.claim, providerMsgId, Date.now());
+    for (const { row } of claimed) {
+      this.ledger.outbound.settleSent(row.id, row.claim, providerMsgId, Date.now());
+      await this.queuePushForOutbound(row);
+    }
   }
 
   private async deliverOneOutbound(id: string): Promise<void> {
@@ -4813,6 +4835,16 @@ export class Steward extends Agent<Env> {
   private async deliverClaimed(row: OutboundDeliveryRow): Promise<void> {
     JSON.parse(row.payload);
     this.ledger.outbound.settleSent(row.id, row.claim, row.id, Date.now());
+    await this.queuePushForOutbound(row);
+  }
+
+  private async queuePushForOutbound(row: OutboundDeliveryRow): Promise<void> {
+    // Only durable cards needing the owner's input and worker reports; not LLM replies,
+    // machine presence, routine chatter or private card text. No message content leaves here.
+    if (!this.push.settings().available || row.kind !== "card" ||
+        (row.questionId === null && !row.id.startsWith("notify:report:"))) return;
+    this.push.queue(row.id, row.questionId ? "attention" : "done");
+    await this.schedule(1, "drainPush");
   }
 
     private rearmDeliveryAlarm(): void {

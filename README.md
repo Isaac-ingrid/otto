@@ -51,6 +51,8 @@ Rather than copying a product wholesale, Otto [tested three ideas](docs/plan/sel
 
 Otto is not a general-purpose cloud browser. Optional read-only web search (Brave Search API) is off until the owner configures a separate key; it returns bounded snippets and source URLs, not verified full pages or a live weather tool. Coding work needs an online connector; the cloud steward can still converse, remember and schedule while your computers are asleep.
 
+Optional **Web Push** is also off until VAPID keys are configured and each phone opts in under Settings. It sends generic alerts for decisions and completed work, never task text, with 22:00–08:00 local quiet hours by default. The in-app pending list remains the fallback; iPhones require installation to the Home Screen first. See the [self-hosted guide](docs/self-hosted.md#web-push-optional).
+
 ## Get started
 
 You need an **always-on cloud server** for the steward (Linux with Node.js 24, a service manager, persistent storage and an HTTPS address that your computers can reach). Build with the pnpm version pinned in [`package.json`](package.json) (install Corepack if `corepack` is unavailable); enter the steward's model-provider API key in the workspace after sign-in. Each connector computer needs **Node.js 22.18+** — macOS, Linux or Windows — and a separately installed and authenticated coding agent. Otto's model key does not configure the local agent.

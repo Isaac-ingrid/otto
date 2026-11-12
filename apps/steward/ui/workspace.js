@@ -47,6 +47,9 @@ const state = {
   setupChecked: false,
   initialDialog: null,
   settingsError: false,
+  pushSubscription: null,
+  pushBusy: false,
+  pushQuiet: true,
   changingModel: false,
   stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
@@ -861,10 +864,28 @@ function modelSection() {
     providerGrid());
 }
 
+function pushSection() {
+  const available = state.settings.push?.available;
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && isSecureContext;
+  const enabled = !!state.pushSubscription;
+  return h('section', { class: 'settings-section' },
+    h('div', { class: 'section-heading' }, icon('bell'),
+      h('div', null, h('h3', null, t('pushTitle')), h('p', { class: 'dialog-copy' }, t('pushHelp')))),
+    !available ? h('p', { class: 'dialog-hint' }, t('pushUnavailable')) :
+      !supported ? h('p', { class: 'dialog-hint' }, t('pushNoSupport')) : [
+        Notification.permission === 'denied' ? h('p', { class: 'dialog-hint' }, t('pushDenied')) : null,
+        h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy || Notification.permission === 'denied',
+          dataset: { action: enabled ? 'push-disable' : 'push-enable' } }, t(enabled ? 'pushDisable' : 'pushEnable')),
+        enabled ? h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
+          dataset: { action: 'push-quiet' }, 'aria-pressed': String(state.pushQuiet) },
+        `${state.pushQuiet ? '✓ ' : ''}${t('pushQuiet')}`) : null,
+      ]);
+}
+
 function accountSection() {
   if (!state.settings) return [h('p', { class: 'dialog-copy' }, t(state.settingsError ? 'settingsLoadFailed' : 'settingsLoading')),
     state.settingsError ? h('button', { class: 'button', dataset: { action: 'retry-settings' } }, t('settingsRetry')) : null];
-  return [modelSection(), securitySection(),
+  return [modelSection(), securitySection(), pushSection(),
     h('div', { class: 'settings-footer' }, h('p', { class: 'dialog-hint' }, t('accountBody')),
       h('button', { type: 'button', class: 'button quiet', dataset: { action: 'sign-out' } }, t('signOut')))];
 }
@@ -1494,6 +1515,16 @@ async function act(cardId, action) {
 }
 
 async function signOut() {
+  // Find the browser's subscription even when Settings was never opened in this session.
+  let subscription = state.pushSubscription;
+  if (!subscription && 'serviceWorker' in navigator) {
+    try { subscription = await (await navigator.serviceWorker.getRegistration('/app/'))?.pushManager?.getSubscription(); }
+    catch { /* sign-out must still work */ }
+  }
+  if (subscription) {
+    try { await request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint }); } catch { /* local unsubscribe still revokes the endpoint */ }
+    try { await subscription.unsubscribe(); } catch { /* push service eventually returns 410 */ }
+  }
   state.fatal = 'logged_out'; // set first: the logout response must not read as an expired session
   try {
     await request('/app/api/logout', {});
@@ -1508,6 +1539,101 @@ async function signOut() {
 }
 
 // ---- settings, pairing, revoking ---------------------------------------------------------------------------
+
+function pushKeyBytes(value) {
+  const raw = atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4));
+  return Uint8Array.from(raw, (char) => char.charCodeAt(0));
+}
+
+function pushKeyMatches(subscription, publicKey) {
+  const existing = subscription.options?.applicationServerKey;
+  if (!existing) return true; // older browsers do not expose subscription options
+  const expected = pushKeyBytes(publicKey);
+  const actual = new Uint8Array(existing);
+  return actual.length === expected.length && actual.every((byte, index) => byte === expected[index]);
+}
+
+async function refreshPushSubscription() {
+  if (!state.settings?.push?.available || !('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration('/app/');
+    let subscription = await registration?.pushManager?.getSubscription();
+    if (subscription && !pushKeyMatches(subscription, state.settings.push.publicKey)) {
+      await request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint });
+      await subscription.unsubscribe();
+      subscription = null;
+    }
+    state.pushSubscription = subscription ?? null;
+    if (subscription) await request('/app/api/push/subscribe', {
+      subscription: subscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet: state.pushQuiet,
+    });
+  } catch { /* In-app inbox remains available without push. */ }
+  if (state.dialog?.type === 'account') bumpDialog();
+}
+
+async function enablePush() {
+  if (state.pushBusy || !state.settings?.push?.available || !isSecureContext) return;
+  state.pushBusy = true;
+  bumpDialog();
+  try {
+    // iOS requires permission in the direct tap gesture, before any async registration.
+    if (await Notification.requestPermission() !== 'granted') throw new Error('permission');
+    const registration = await navigator.serviceWorker.register('/app/push-sw.js', { scope: '/app/' });
+    let subscription = await registration.pushManager.getSubscription();
+    if (subscription && !pushKeyMatches(subscription, state.settings.push.publicKey)) {
+      await request('/app/api/push/unsubscribe', { endpoint: subscription.endpoint });
+      await subscription.unsubscribe();
+      subscription = null;
+    }
+    subscription ??= await registration.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: pushKeyBytes(state.settings.push.publicKey),
+    });
+    const { status } = await request('/app/api/push/subscribe', {
+      subscription: subscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet: state.pushQuiet,
+    });
+    if (status !== 200) {
+      await subscription.unsubscribe();
+      throw new Error('subscribe');
+    }
+    state.pushSubscription = subscription;
+    toast(t('pushReady'));
+  } catch {
+    const copy = Notification.permission === 'denied' ? 'pushDenied' : 'pushFailed';
+    toast(t(copy));
+  }
+  finally { state.pushBusy = false; bumpDialog(); }
+}
+
+async function disablePush() {
+  if (state.pushBusy || !state.pushSubscription) return;
+  state.pushBusy = true;
+  bumpDialog();
+  try {
+    const { status } = await request('/app/api/push/unsubscribe', { endpoint: state.pushSubscription.endpoint });
+    if (status !== 200) throw new Error('unsubscribe');
+    await state.pushSubscription.unsubscribe();
+    state.pushSubscription = null;
+    toast(t('pushOff'));
+  } catch { toast(t('pushFailed')); }
+  finally { state.pushBusy = false; bumpDialog(); }
+}
+
+async function setPushQuiet(quiet) {
+  if (state.pushBusy || !state.pushSubscription) return;
+  state.pushBusy = true;
+  bumpDialog();
+  try {
+    const { status } = await request('/app/api/push/subscribe', {
+      subscription: state.pushSubscription.toJSON(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', quiet,
+    });
+    if (status !== 200) throw new Error('quiet');
+    state.pushQuiet = quiet;
+    try { localStorage.setItem('otto.push.quiet', String(quiet)); } catch { /* private mode */ }
+  } catch { toast(t('pushFailed')); }
+  finally { state.pushBusy = false; bumpDialog(); }
+}
+
+try { state.pushQuiet = localStorage.getItem('otto.push.quiet') !== 'false'; } catch { /* private mode */ }
 
 async function loadSettings(initial = false) {
   try {
@@ -1530,7 +1656,10 @@ async function loadSettings(initial = false) {
       }
     }
     renderSetup();
-    if (state.dialog?.type === 'account') bumpDialog();
+    if (state.dialog?.type === 'account') {
+      bumpDialog();
+      void refreshPushSubscription();
+    }
     return true;
   } catch {
     state.settingsError = true;
@@ -2067,6 +2196,9 @@ document.addEventListener('click', (event) => {
       state.replyTo = null;
       return renderComposer();
     case 'sign-out': return void signOut();
+    case 'push-enable': return void enablePush();
+    case 'push-disable': return void disablePush();
+    case 'push-quiet': return void setPushQuiet(!state.pushQuiet);
     case 'create-pairing': return void createPairing();
     case 'copy-pairing': return void copyPairing();
     case 'directory-open': return openDirectoryPicker(dataset.machine);

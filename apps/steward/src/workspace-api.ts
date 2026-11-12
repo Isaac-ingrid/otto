@@ -67,6 +67,8 @@ export interface WorkspaceApiDeps {
   }>;
   webauthnRegisterVerify?(sid: string, rpId: string, origin: string, label: string, attestation: unknown): Promise<void>;
   webauthnRemove?(credentialId: string): void;
+  pushSubscribe?(subscription: unknown, timeZone: string, quiet: boolean): boolean | Promise<boolean>;
+  pushUnsubscribe?(endpoint: string): void;
 }
 
 export interface ApiSession {
@@ -169,7 +171,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
   if (request.method !== "POST") return json({ error: "not_found" }, 404);
 
   const origin = request.headers.get("origin");
-  const requireOrigin = deps.requireOrigin || url.pathname.startsWith("/app/api/machines/directories");
+  const requireOrigin = deps.requireOrigin || url.pathname.startsWith("/app/api/machines/directories") || url.pathname.startsWith("/app/api/push/");
   if (!sameSecret(request.headers.get("x-csrf-token") ?? "", session.csrf) || (requireOrigin ? origin !== url.origin : origin !== null && origin !== url.origin)) {
     return json({ error: "forbidden" }, 403);
   }
@@ -180,6 +182,19 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
          url.pathname === "/app/api/settings/webauthn/register/verify" ||
          url.pathname === "/app/api/settings/webauthn/remove") && !session.recent) {
       return json({ error: "reauth_required" }, 403);
+    }
+    if (url.pathname === "/app/api/push/subscribe" && deps.pushSubscribe) {
+      const { subscription, timeZone, quiet } = await readJson(request);
+      if (typeof timeZone !== "string" || typeof quiet !== "boolean" || !(await deps.pushSubscribe(subscription, timeZone, quiet))) {
+        return json({ error: "bad_subscription" }, 400);
+      }
+      return json({ ok: true });
+    }
+    if (url.pathname === "/app/api/push/unsubscribe" && deps.pushUnsubscribe) {
+      const { endpoint } = await readJson(request);
+      if (typeof endpoint !== "string" || endpoint.length > 2048) return json({ error: "bad_request" }, 400);
+      deps.pushUnsubscribe(endpoint);
+      return json({ ok: true });
     }
     if (url.pathname === "/app/api/pairing" && deps.pairing) {
       const { id } = await readJson(request);

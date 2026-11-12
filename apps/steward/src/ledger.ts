@@ -469,6 +469,7 @@ export interface OutboundDeliveryRow {
   attempts: number;
   payload: string;
   threadId: string | null;
+  questionId: string | null;
   claim: string;
 }
 
@@ -1822,7 +1823,7 @@ export function createLedger(deps: LedgerDeps) {
         WHERE id = ${id} AND (status = 'queued' OR (status = 'sending' AND claimExpiresAt <= ${nowMs}))
       `;
       const row = sql<Omit<OutboundDeliveryRow, "claim">>`
-        SELECT id, kind, channel, receiveId, attempts, payload, threadId
+        SELECT id, kind, channel, receiveId, attempts, payload, threadId, questionId
         FROM sh_outbound WHERE id = ${id} AND claimToken = ${claim}
       `[0];
       return row ? { ...row, claim } : null;

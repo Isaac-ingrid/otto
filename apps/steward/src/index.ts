@@ -56,6 +56,7 @@ async function workspaceShell(env: Env, url: URL): Promise<Response> {
         "script-src 'self'",
         "style-src 'self'",
         "img-src 'self' data:",
+        "manifest-src 'self'",
         `connect-src 'self' ${socket}`,
         "base-uri 'none'",
         "form-action 'self'",
@@ -68,12 +69,19 @@ async function workspaceShell(env: Env, url: URL): Promise<Response> {
 }
 
 async function serveAppAsset(env: Env, request: Request, url: URL): Promise<Response> {
-  const name = url.pathname.slice("/app/assets/".length);
+  const name = url.pathname === "/app/push-sw.js" ? "push-sw.js" :
+    url.pathname === "/app/manifest.webmanifest" ? "manifest.webmanifest" :
+      url.pathname.slice("/app/assets/".length);
   if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) return new Response("not found", { status: 404 });
   const asset = await env.ASSETS.fetch(new Request(new URL(`/${name}`, url.origin), request));
   const headers = new Headers(asset.headers);
-  headers.set("cache-control", "private, max-age=0, must-revalidate");
+  headers.set("cache-control", name === "push-sw.js" ? "no-store" : "private, max-age=0, must-revalidate");
   headers.set("x-content-type-options", "nosniff");
+  if (name === "push-sw.js") {
+    headers.set("content-type", "text/javascript; charset=utf-8");
+    headers.set("service-worker-allowed", "/app/");
+  }
+  if (name === "manifest.webmanifest") headers.set("content-type", "application/manifest+json");
   return new Response(asset.body, { status: asset.status, headers });
 }
 

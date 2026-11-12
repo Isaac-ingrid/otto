@@ -6,3 +6,7 @@
 # whatever sits after the equals sign; a non-empty example would ship every button
 # deployment with a login password that is public knowledge in this repository.
 LOGIN_PASSWORD=
+# Optional Web Push (all three required; create once, keep private key outside git).
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+VAPID_SUBJECT=
