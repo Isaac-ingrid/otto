@@ -101,8 +101,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/          # 200
 curl -s -X POST -H "authorization: Bearer $SERVER_KEY" -H 'content-type: application/json' \
      -d '{"text":"hello"}' http://127.0.0.1:8787/api/messages
 
-# 3. pairing code, then a connector handshake over ws://
-curl -s -X POST -H "authorization: Bearer $SERVER_KEY" http://127.0.0.1:8787/api/pairing
+# 3. pairing code via the configured IP HTTPS entry point, then a connector handshake over wss://
+curl -s -X POST -H "authorization: Bearer $SERVER_KEY" https://YOUR_SERVER_IP/api/pairing
 ```
 
 Step 2 writes `sh_run`/`sh_outbound`/`pi_entries` and returns `200` with a ULID; step 3 plus a

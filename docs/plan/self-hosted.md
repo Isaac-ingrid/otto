@@ -1,11 +1,11 @@
 # Self-hosted steward — next steps
 
-Status at the time of writing: the steward runs on the Aliyun ECS (`115.29.164.8`) under systemd,
-bound to `127.0.0.1:8787`, with the gateway model answering real messages. What is *not* done is
-a public entry point. Machine layout and ops commands live in [`deploy/NOTES.md`](../../deploy/NOTES.md).
+Status: the steward runs on the Aliyun ECS under systemd, bound to `127.0.0.1:8787`,
+with an IP HTTPS entry point. The domain entry point still awaits 备案; keep the IP HTTPS
+address as a fallback. Machine layout and ops commands live in [`deploy/NOTES.md`](../../deploy/NOTES.md).
 
-Ordering principle: everything up to and including "P2" is testable through an SSH tunnel and
-needs no domain, no certificate and no 备案. Only "P3" does.
+Historical P1/P2 test observations below used a loopback SSH tunnel. For current sign-in and
+pairing, use the HTTPS entry point; do not use public HTTP.
 
 The product was renamed from Sig to Otto in 2026-11 ([ADR-0014](../adr/0014-rename-to-otto.md)):
 identifiers, cookie, derivation strings and paths all changed in one break, so the deployment was
@@ -15,9 +15,9 @@ P1 rows were verified before it, and the two test suites cover the renamed ident
 
 ## P1 · Flows to exercise on the VPS
 
-| Flow | How to test today | Pass condition |
+| Flow | Test method / earlier evidence | Pass condition |
 | --- | --- | --- |
-| Connector pairing | tunnel to `127.0.0.1:8787`, `otto connect http://127.0.0.1:8787 <code>` | `otto status` shows paired; machine appears in **机器** |
+| Connector pairing | historical tunnel test; for current use, `otto connect https://<server-IP> <code>` | `otto status` shows paired; machine appears in **机器** |
 | Worker dispatch | from the workspace, ask for a trivial repo task | run settles `done`, files land in the local repo, output returns to the chat |
 | Workspace stream | open `/app` → workspace tab through the tunnel | live frames arrive and the socket survives idle ✅ |
 | Budget guard | set `DAILY_BUDGET_USD` low, send messages until it trips | the cap gates *wakes*, not messages; ledger records the spend ✅ |
@@ -280,18 +280,17 @@ Done by `deploy/harden.sh` (idempotent, re-runnable; details in NOTES.md):
   `3eb860d0`, and both the sealed provider key and the connector token had converged onto the new
   id before the window was closed. Blocked until then by Finding 5.
 
-## P3 · Public entry point (blocked on 备案)
+## P3 · Domain entry point (blocked on 备案)
 
-Deliberately deferred: a Hangzhou ECS cannot serve 80/443 to a domain without ICP 备案, so the
-steward stays on loopback and testing uses a tunnel. Everything else is already prepared:
+IP HTTPS is already deployed; only the custom domain is deferred. nginx terminates TLS while
+the steward remains bound to loopback. Keep the IP HTTPS vhost as a fallback.
 
-- `deploy/nginx-otto.conf` + `deploy/enable-tls.sh` (`--stage` then `--live`), rehearsed on the box.
-- `deploy/aliyun.env` has empty `OTTO_DOMAIN` / `OTTO_EMAIL` fields waiting for a name.
+- `deploy/nginx-otto.conf` + `deploy/enable-tls.sh` (`--stage` then `--live`) are for the domain path.
+- Fill `OTTO_DOMAIN` / `OTTO_EMAIL` in the untracked `deploy/aliyun.env` when ready.
+- Keep `OTTO_PUBLIC_ORIGIN` in the server's `.dev.vars` and the untracked `deploy/aliyun.env`
+  synchronized: `deploy/apply-env.sh` replaces the server file. Production startup requires it.
 
-Before shipping the updated Node bundle, set `OTTO_PUBLIC_ORIGIN=https://115.29.164.8` in the
-server's `.dev.vars` and the untracked `deploy/aliyun.env` used by `apply-env.sh`; production
-startup now refuses a missing value. When 备案 clears: check that the provider's HTTP interception
-is gone → DNS A record → `./deploy/enable-tls.sh --stage` (routing probe **only**, no HTTP login or
+When 备案 clears: check that the provider's HTTP interception is gone → DNS A record → `./deploy/enable-tls.sh --stage` (routing probe **only**, no HTTP login or
 pairing) → `--live` → verify HTTPS + WebSockets → change `OTTO_PUBLIC_ORIGIN` to the HTTPS domain,
 restart and verify the generated link/command. Re-point existing connectors without a new pairing
 code where possible (see `deploy/NOTES.md`); keep IP HTTPS as a fallback.

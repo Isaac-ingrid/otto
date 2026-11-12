@@ -15,7 +15,7 @@ export interface BudgetConfig {
   error?: string;
 }
 
-/** `vars.DAILY_BUDGET_USD` (root wrangler.jsonc): dollars per UTC day. Zero disables the
+/** `DAILY_BUDGET_USD` (Node environment or Cloudflare vars): dollars per UTC day. Zero disables the
  *  automatic wakes entirely (only owner messages reach the model) — the honest reading of a
  *  "0" cap. A very large number is how to say "effectively off"; a typo never widens it. */
 export function resolveBudgetConfig(raw: unknown): BudgetConfig {
@@ -151,7 +151,7 @@ export function renderSpendStatus(state: BudgetState): string {
     ...(state.costUsd === 0 && state.tokens > 0
       ? ["注意：当前模型报告的价格为 $0（目录无定价或免费模型），预算不会触发；请按 token 数自行估算。"]
       : []),
-    "每天 00:00 UTC 重置；仅统计总管的模型调用，按模型报告的用量和价格估算，不含机器上编码 agent 或 Cloudflare 的费用。",
+    "每天 00:00 UTC 重置；仅统计总管的模型调用，按模型报告的用量和价格估算，不含机器上编码 agent 或服务器托管费用。",
   ].join("\n");
 }
 

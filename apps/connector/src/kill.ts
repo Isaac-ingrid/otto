@@ -24,8 +24,8 @@ function taskkillSync(pid: number, force: boolean): number | null {
   }
 }
 
-/** Ends `pid` (and, on Windows, its whole tree). Never throws: a process that is already gone
- *  is the expected outcome of every caller, and pid 0/1/4 are never signalled. */
+/** Ends `pid` (and, on Windows, its whole tree). An already-exited process is harmless;
+ *  unexpected signal errors still propagate. pid 0/1/4 are never signalled. */
 export function terminateProcess(pid: number, signal: NodeJS.Signals = "SIGTERM", deps: KillDeps = {}): void {
   const platform = deps.platform ?? process.platform;
   if (!Number.isFinite(pid) || pid <= (platform === "win32" ? 4 : 1) || pid === process.pid) return;
@@ -33,7 +33,12 @@ export function terminateProcess(pid: number, signal: NodeJS.Signals = "SIGTERM"
     (deps.taskkill ?? taskkillSync)(pid, signal === "SIGKILL");
     return;
   }
-  process.kill(pid, signal);
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    // The process can exit between a liveness check and this signal.
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
 }
 
 /** True for a platform where a single signal does not reach descendants. */

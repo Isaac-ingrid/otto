@@ -465,6 +465,8 @@ describe('"How much have you spent today?" — answered from the counter', () =>
   it("renderSpendStatus says when the model's reported price is $0 — the cap cannot trip", () => {
     const state = { day: "2026-10-17", costUsd: 0, tokens: 7797, budgetUsd: 1, over: false, resetsAt: 0, skippedWakes: 0, overNotedAt: null };
     expect(renderSpendStatus(state)).toContain("价格为 $0");
+    expect(renderSpendStatus(state)).toContain("服务器托管费用");
+    expect(renderSpendStatus(state)).not.toContain("Cloudflare 的费用");
     expect(renderSpendStatus({ ...state, tokens: 0 })).not.toContain("价格为 $0");
     expect(renderSpendStatus({ ...state, costUsd: 0.5 })).not.toContain("价格为 $0");
   });

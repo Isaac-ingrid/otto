@@ -135,9 +135,8 @@ Run `--live` immediately, then confirm HTTPS login and WebSocket before setting
 `OTTO_PUBLIC_ORIGIN` to the domain. Keep the existing IP HTTPS vhost as a rollback path.
 
 > On a mainland-China host, an A record alone is not enough: the provider will not serve 80/443 for
-> a domain without ICP 备案. Until that is done, reach the box over an SSH tunnel
-> (`ssh -N -L 18787:127.0.0.1:8787`) and use `http://127.0.0.1:18787` — the whole product,
-> including WebSockets, works that way.
+> a domain without ICP 备案. Until that is done, use the configured **IP HTTPS** vhost for sign-in
+> and pairing. Keep the steward bound to loopback; do not sign in or pair over HTTP.
 
 ## 4. First sign-in, then machines
 
@@ -216,11 +215,17 @@ memory ceiling so a Node heap blow takes only the steward, and installs the back
 | --- | --- |
 | `Cannot find module 'ws'` at startup | the bundle is external on `ws`; put `ws` in `node_modules` next to `dist/` |
 | Process starts, then every sign-in is refused | `LOGIN_PASSWORD` missing or rejected by the policy (length, commonness, breach); the reason is on the login page and in the journal |
-| Settings changes and hand-written pages disagree | the origin is wrong: check `Host` and `X-Forwarded-Proto` reach the process |
+| Settings changes and generated links disagree | check that `OTTO_PUBLIC_ORIGIN` matches the intended HTTPS entry point |
 | Connector gets 401/4403 | machine revoked, or paired against a different origin/DB |
-| Login links point at `127.0.0.1` | the proxy is not forwarding `Host` |
-| Everything works over the tunnel but not on the domain | ICP 备案 (mainland host), or the vhost is not the one answering |
+| Login links point at `127.0.0.1` | set `OTTO_PUBLIC_ORIGIN` to the canonical HTTPS origin and restart |
+| IP HTTPS works but the domain does not | check ICP 备案, DNS, TLS certificate, and the domain vhost |
 | `node:sqlite` not found | Node too old, or 22.x without `--experimental-sqlite` |
+
+If you cannot sign in with a password or passkey, replace `LOGIN_PASSWORD` in
+`/etc/otto/.dev.vars` with a new, unique password of at least 15 characters, then restart
+`otto`. If you deploy via `deploy/apply-env.sh`, update the untracked `deploy/aliyun.env` too,
+so a later apply does not restore the old value. Existing browser sessions and login links are
+revoked; machine credentials and data are preserved. Never send the password in chat.
 
 Logs are `journalctl -u otto -f`. The database browser is `sqlite3
 /var/lib/otto/steward.sqlite` — `sh_run` is the run ledger (`status` is `open`/`settled`/`cancelled`),

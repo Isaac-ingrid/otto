@@ -24,6 +24,20 @@ describe("terminateProcess routing", () => {
     expect(taskkill).not.toHaveBeenCalled();
   });
 
+  it("treats a POSIX process that already exited as stopped", () => {
+    const kill = vi.spyOn(process, "kill").mockImplementationOnce(() => {
+      const error = new Error("kill ESRCH") as NodeJS.ErrnoException;
+      error.code = "ESRCH";
+      throw error;
+    });
+    try {
+      expect(() => terminateProcess(4242, "SIGKILL", { platform: "linux" })).not.toThrow();
+      expect(kill).toHaveBeenCalledWith(4242, "SIGKILL");
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
   it("knows which platforms need the tree walk", () => {
     expect(killNeedsTree("win32")).toBe(true);
     expect(killNeedsTree("linux")).toBe(false);

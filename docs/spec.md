@@ -1,11 +1,14 @@
 # Otto Product Requirements Document (Spec)
 
-> Status: draft v0.2.
+> Status: historical design draft v0.2. For current deployment and onboarding, see
+> [self-hosted Node](self-hosted.md) (primary) or [Cloudflare Workers](deploy.md) (alternative).
+> The Cloudflare-only, Feishu, and one-click onboarding statements below record earlier
+> proposals, not the current setup instructions.
 >
 > **Update (ADR-0003/0010):** the chat-channel requirement (Feishu) is deferred. The owner
 > uses the browser workspace, whose optional programmatic API remains SERVER_KEY-gated;
-> everything else in this document stands. The channel sections remain as the future-integration
-> design.
+> the channel sections remain as the future-integration design. Other historical deployment
+> assumptions are superseded by the current runbooks linked above.
 >
 > **Update (ADR-0004/0005):** the web workspace is the owner's everyday entry — one
 > continuous conversation over the API's local channel, with Threads, "Needs you" decisions,
@@ -23,7 +26,7 @@
 
 ## 1. Overview
 
-Otto is a personal agent "steward" deployed on a Cloudflare Durable Object, online 24/7.
+Otto is a personal agent "steward" intended to be online continuously. The current primary deployment is a Node process with SQLite; Cloudflare Workers with a SQLite Durable Object remains an alternative.
 
 It does not write code itself. Its job is:
 
@@ -32,7 +35,7 @@ It does not write code itself. Its job is:
 3. Let the user issue or append to a task at any time with a single sentence, and route it to the right place.
 4. Report briefly to the user when something progresses, completes, or gets stuck.
 
-The product is built on [pi-durable](https://github.com/earendil-works/pi) (`@earendil-works/pi-durable`) and released as an open-source project: users fork it and one-click deploy to their own Cloudflare account, with all data staying in their own hands.
+The steward uses [pi-durable](https://github.com/earendil-works/pi) (`@earendil-works/pi-durable`) and runs with owner-controlled storage on either host. The original proposal was to fork and one-click deploy to Cloudflare; see the deployment guides above for the paths available now.
 
 ## 2. Target Users and Use Cases
 
@@ -290,6 +293,8 @@ When several matters run at the same time on the same repo, **each change-making
 
 ### 12.1 Onboarding Flow
 
+The following is the original Feishu/Cloudflare proposal, not the implemented onboarding flow. Today, deploy a Node host or Cloudflare Worker, sign in to the web workspace, and pair computers from **Machines** ([connector runbook](agent-connect.md)).
+
 1. Click Deploy to deploy to Cloudflare and fill in the model API key. **Users in mainland China must additionally bind a custom domain to the Worker**: `*.workers.dev` is blocked in mainland China (verified on this machine), which breaks both the user's access to the web pages and the connector's connection to the steward.
 2. When deployment completes, a QR code appears; scan it with Feishu to create a bot, and the scanner becomes the owner (based on Feishu's official app-registration device flow; see the Feishu channel research, not retained in this tree).
 3. In the conversation, the steward gives a command; paste and run it in a terminal on the computer to connect, and the machine shows up with the steward.
@@ -301,17 +306,17 @@ The MVP goes up to step 3.
 
 The connector is effectively a remote-code-execution entry point and is fully automatic by default, so it must be designed as a security problem from the start:
 
-- **Identity**: carried by the Feishu account system; only the owner's direct messages are answered.
+- **Identity (original proposal)**: carried by the Feishu account system; only the owner's direct messages are answered. Current browser access uses the password/passkey flow below.
 - **Machine pairing**: the command embeds a one-time pairing code that expires once used; each machine has its own credentials, revocable individually on the web.
 - **Web access**: historical one-time IM links are superseded by password/passkey
   authentication with rate limits and recent-auth checks for security changes
   ([ADR-0010](adr/0010-browser-password-authentication.md)).
-- **Model keys**: stored encrypted in the user's own Cloudflare account, never passing through a third party.
+- **Model keys**: sealed in the owner's deployment storage (SQLite on Node or a Durable Object on Cloudflare); the browser sends them to the steward, not to an intermediary service.
 - Content from external sources (agent reports, future external events) is never treated as a trusted instruction.
 
 ### 12.3 Cost Transparency
 
-The steward should be dormant, costing nothing, most of the time. The documentation must clearly state the order of magnitude of Cloudflare-side costs and the drivers of model-call cost (conversation count, summary generation), so users are not startled by the bill.
+The steward should be dormant, avoiding model calls most of the time. The documentation must clearly state hosting costs (VPS or Cloudflare) and the drivers of model-call cost (conversation count, summary generation), so users are not startled by the bill.
 
 ## 13. The Steward's Capability Boundaries
 

@@ -1,12 +1,12 @@
 # Agent connector runbook
 
-You are a coding agent running on a computer the owner wants to connect to an existing Otto deployment. Install the connector, pair this machine, register the owner's chosen repositories, and verify a real task. Cloud deployment is covered separately in [agent-deploy.md](agent-deploy.md).
+You are a coding agent running on a computer the owner wants to connect to an existing Otto deployment. Install the connector, pair this machine, register the owner's chosen repositories, and verify a real task. For deployment, start with the [self-hosted Node runbook](self-hosted.md); [agent-deploy.md](agent-deploy.md) covers the alternative Cloudflare setup.
 
 ## 0 · Check the machine and destination
 
 - Confirm this is the machine that will run coding agents. Ask for the existing Otto HTTPS URL and the local repository paths the owner wants to connect.
 - Check macOS, Linux or Windows, Node ≥ 22.18 (`node -v`), npm, and git. Background mode uses launchd on macOS, a systemd user service on Linux, and a per-user logon entry on Windows (the `Run` key plus a generated `~/.otto/otto-daemon.vbs` — no elevation; the launcher starts the daemon under `otto daemon --supervise`, which restarts it with backoff, since a `Run` value can start a process but never restart one). On Windows or Linux, if the machine's policy forbids the logon entry or the session cannot reach its service manager, `connect` refuses before spending the code and `--foreground` is the fallback, in a terminal that must stay open. The same applies to a container with no service manager.
-- Check the intended local coding agent: pi (`pi --version`) is the default; installed Claude Code (`claude --version`) is also supported. These CLIs are separate from the connector. If missing, install the owner's chosen agent using its official instructions. Have the owner complete its login or provider setup directly, keeping credentials out of chat and logs. The cloud model key does not configure the local coding agent.
+- Check the intended local coding agent: pi (`pi --version`) is the default; installed Claude Code (`claude --version`) is also supported. These CLIs are separate from the connector. If missing, install the owner's chosen agent using its official instructions. Have the owner complete its login or provider setup directly, keeping credentials out of chat and logs. The steward's model key does not configure the local coding agent.
 - If `otto` is already installed, run `otto status` first. Preserve a correct pairing. If it points to a different deployment, confirm the intended replacement before pairing again.
 - Check for `OTTO_HOME` overrides without dumping the environment. A custom state directory cannot install the shared background service; resolve the intended setup or use `--foreground`.
 - Verify that the deployment URL is reachable. An unauthenticated `GET /app` returning 401 is expected. On a network where the URL is only reachable through a local HTTP proxy (filtered networks, mainland China), connect with `otto connect <url> <code> --proxy http://127.0.0.1:7890` — both channels (fetch, WebSocket), the connector's `git` calls, and worker children follow it, and the choice is stored so the background service needs no inherited environment. An `HTTPS_PROXY` already set in the shell is captured automatically; `otto doctor` diagnoses direct-vs-proxy reachability when things fail.
@@ -58,7 +58,7 @@ otto connect https://otto.example.com <pairing-code>
 
 The owner can run it directly in their terminal, keeping the pairing code out of the agent transcript. With an authorized browser session, an agent may carry out pairing without repeating the code in its report. Use the final reachable deployment URL and do not reuse a code from an example.
 
-`connect` saves the device credentials, installs the background service, and starts it. Before it redeems the code it checks that this machine can host that service at all, so a machine with no service manager, one whose session cannot reach it (a headless Linux session with no systemd user bus), or a Windows machine whose policy disables the logon entry (Run key blocked, Windows Script Host off, no `wscript.exe`) is refused without spending the code — the check is skipped with `--foreground`, which needs no service. `--foreground` is also the right shape for a container with no service manager. The error tells you to pair again with `--foreground`. If the code expires or has already been used, generate a fresh one in the workspace. If the owner cannot sign in, follow [browser access recovery](deploy.md#recover-browser-access). Never ask for a password or SERVER_KEY in chat.
+`connect` saves the device credentials, installs the background service, and starts it. Before it redeems the code it checks that this machine can host that service at all, so a machine with no service manager, one whose session cannot reach it (a headless Linux session with no systemd user bus), or a Windows machine whose policy disables the logon entry (Run key blocked, Windows Script Host off, no `wscript.exe`) is refused without spending the code — the check is skipped with `--foreground`, which needs no service. `--foreground` is also the right shape for a container with no service manager. The error tells you to pair again with `--foreground`. If the code expires or has already been used, generate a fresh one in the workspace. If the owner cannot sign in, follow the [self-hosted password recovery steps](self-hosted.md#troubleshooting), or [Cloudflare recovery](deploy.md#recover-browser-access) for a Worker deployment. Never ask for a password or SERVER_KEY in chat.
 
 Before the first task, confirm two things about the local agent — both have silently wasted a dispatch:
 
@@ -71,7 +71,7 @@ In the web workspace, open **Machines**, find the connected machine, and choose 
 
 The connector resolves and saves each directory's identity locally before the workspace shows it as registered. Keep the connector online during registration. No restart is needed.
 
-Keep the default `worktree` isolation unless the owner wants a different write policy — a plain (non-Git) directory can only run `in-place`. Do not add `--approve` as a setup shortcut: it enables the repository's local pi extensions and is a separate trust choice. Repository settings are documented in [deploy.md](deploy.md#connecting-a-machine).
+Keep the default `worktree` isolation unless the owner wants a different write policy — a plain (non-Git) directory can only run `in-place`. Do not add `--approve` as a setup shortcut: it enables the repository's local pi extensions and is a separate trust choice. The `otto repo-config` examples in the [deployment guide](deploy.md#connecting-a-machine) apply to connectors on either host.
 
 ## 4 · Verify the full connection
 
@@ -91,4 +91,4 @@ otto install     # install (or repair) the logon entry/unit for a machine that i
 otto uninstall   # removes the service, preserves local state
 ```
 
-State is stored in `~/.otto/`. The owner can revoke a machine from the workspace at any time. See [deploy.md](deploy.md) for updates and operations, and [usage.md](usage.md) for agent behavior and session viewing.
+State is stored in `~/.otto/`. The owner can revoke a machine from the workspace at any time. See [self-hosted.md](self-hosted.md#upgrades-and-rollback) for Node updates and operations, [deploy.md](deploy.md#updates) for Cloudflare updates, and [usage.md](usage.md) for agent behavior and session viewing.

@@ -6,13 +6,13 @@
 
 **English** · [简体中文](#otto-connector-简体中文)
 
-`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs in your Cloudflare account; the connector runs on a macOS or Linux computer and connects that computer to Otto. It keeps a WebSocket connection to your deployment, starts local coding agents such as pi and Claude Code, and reports their progress back to your personal agent.
+`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs primarily as a Node process on your own server, with Cloudflare Workers as an alternative. The connector runs on macOS, Linux, or Windows and connects that computer to Otto. It keeps a WebSocket connection to your deployment, starts local coding agents such as pi and Claude Code, and reports their progress back to your personal agent.
 
 The connector makes only an outbound connection. You do not need to open an inbound port on your computer.
 
 ## Requirements
 
-- macOS or Linux
+- macOS, Linux, or Windows
 - Node.js 22.18 or newer
 - npm 7 or newer
 - A deployed Otto workspace
@@ -47,7 +47,7 @@ The pairing code is single-use and expires after 10 minutes. `connect` saves the
 
 ### Networks that block the deployment
 
-`*.workers.dev` and similar hosts are unreachable from some networks (notably mainland China without a proxy). Pass a proxy so both the pairing request and the long-lived connection can get through:
+If your deployment URL is unreachable from this network (for example, a Cloudflare `*.workers.dev` URL without a proxy in mainland China), pass a proxy so both the pairing request and the long-lived connection can get through:
 
 ```sh
 otto connect https://otto.example.com <pairing-code> --proxy http://127.0.0.1:7890
@@ -83,7 +83,8 @@ Released under the [MIT License](LICENSE).
 
 The deployment and connector runbooks live in the Otto repository checkout:
 
-- Deploy Otto — `docs/deploy.md`
+- Deploy Otto on your own server (primary) — `docs/self-hosted.md`
+- Deploy on Cloudflare Workers (alternative) — `docs/deploy.md`
 - Connect a machine — `docs/agent-connect.md`
 - Usage and agent behavior — `docs/usage.md`
 
@@ -91,13 +92,13 @@ The deployment and connector runbooks live in the Otto repository checkout:
 
 # Otto connector 简体中文
 
-`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是部署在你 Cloudflare 账号里的 personal agent；connector 运行在 macOS 或 Linux 电脑上，把这台电脑接入 Otto。它保持到你部署地址的 WebSocket 连接，启动本地的 pi、Claude Code 等 coding agent，并把进展回传给 personal agent。
+`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是自托管 personal agent，主要以 Node 进程运行在自己的服务器上，也可选择部署到 Cloudflare Workers；connector 运行在 macOS、Linux 或 Windows 电脑上，把这台电脑接入 Otto。它保持到你部署地址的 WebSocket 连接，启动本地的 pi、Claude Code 等 coding agent，并把进展回传给 personal agent。
 
 Connector 只主动发起出站连接，不需要在电脑上开放入站端口。
 
 ## 环境要求
 
-- macOS 或 Linux
+- macOS、Linux 或 Windows
 - Node.js 22.18 或更新版本
 - npm 7 或更新版本
 - 已部署的 Otto 工作台
@@ -132,7 +133,7 @@ otto connect https://otto.example.com <pairing-code>
 
 ### 无法直连部署地址的网络
 
-部分网络（典型如未开代理的中国大陆）无法访问 `*.workers.dev` 等域名。请传入代理，让配对请求和长连接都能通过：
+如果当前网络无法访问部署地址（例如未开代理时无法从中国大陆访问 Cloudflare 的 `*.workers.dev` 域名），请传入代理，让配对请求和长连接都能通过：
 
 ```sh
 otto connect https://otto.example.com <pairing-code> --proxy http://127.0.0.1:7890

@@ -698,7 +698,7 @@ sh.Run cmd, 0, False
     await this.deleteRunValue();
     const lock = this.lock();
     if (lock.held && lock.pid) {
-      terminateProcess(lock.pid, "SIGKILL", { taskkill: this.taskkill });
+      terminateProcess(lock.pid, "SIGKILL", { platform: "win32", taskkill: this.taskkill });
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline && this.lock().held) {
         await new Promise((resolve) => setTimeout(resolve, 100));
