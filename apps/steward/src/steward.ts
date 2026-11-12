@@ -2834,7 +2834,9 @@ export class Steward extends Agent<Env> {
     // millisecond-precision ackDeadline. Re-arm while anything is still waiting for an ack,
     // or a command could get stuck in `sent` forever (the spike's bug, protocol §4.2).
     const waiting = this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM outbox WHERE state = 'sent'`[0]!.n;
-    if (waiting > 0) void this.schedule(1, "resendUnacked");
+    // Do not return from the alarm handler until the follow-up is durable: an early alarm
+    // under load (or an isolate restart here) must not strand sent commands forever.
+    if (waiting > 0) await this.schedule(1, "resendUnacked");
   }
 
   // Periodic backstop (spike-conclusions bug 5): a command queued for a device that never
