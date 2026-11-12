@@ -279,6 +279,7 @@ export interface WebDeps {
     | "webauthnRemove"
     | "pushSubscribe"
     | "pushUnsubscribe"
+    | "pushTest"
   >;
   sessionEnded?(sid: string): void;
   loginLinkPolicy?: LoginLinkPolicy;

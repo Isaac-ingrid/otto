@@ -836,6 +836,11 @@ export class Steward extends Agent<Env> {
           return true;
         },
         pushUnsubscribe: (endpoint) => this.push.unsubscribe(endpoint),
+        pushTest: async (endpoint) => {
+          if (!this.push.queueTest(endpoint)) return false;
+          await this.schedule(1, "drainPush");
+          return true;
+        },
       },
       sessionEnded: (sid) => this.closeWebSession({ sid }),
     }));

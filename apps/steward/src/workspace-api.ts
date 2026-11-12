@@ -69,6 +69,7 @@ export interface WorkspaceApiDeps {
   webauthnRemove?(credentialId: string): void;
   pushSubscribe?(subscription: unknown, timeZone: string, quiet: boolean): boolean | Promise<boolean>;
   pushUnsubscribe?(endpoint: string): void;
+  pushTest?(endpoint: string): Promise<boolean>;
 }
 
 export interface ApiSession {
@@ -194,6 +195,11 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       const { endpoint } = await readJson(request);
       if (typeof endpoint !== "string" || endpoint.length > 2048) return json({ error: "bad_request" }, 400);
       deps.pushUnsubscribe(endpoint);
+      return json({ ok: true });
+    }
+    if (url.pathname === "/app/api/push/test" && deps.pushTest) {
+      const { endpoint } = await readJson(request);
+      if (typeof endpoint !== "string" || !(await deps.pushTest(endpoint))) return json({ error: "not_subscribed" }, 400);
       return json({ ok: true });
     }
     if (url.pathname === "/app/api/pairing" && deps.pairing) {

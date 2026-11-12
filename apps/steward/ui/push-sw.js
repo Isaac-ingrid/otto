@@ -6,7 +6,8 @@ self.addEventListener('push', (event) => {
     try { message = event.data?.json() ?? {}; } catch { /* generic wake-up */ }
     const attention = message.kind === 'attention';
     await self.registration.showNotification('Otto', {
-      body: attention ? 'A decision needs you · 有待处理事项' : 'A task has finished · 有任务已完成',
+      body: message.kind === 'test' ? 'Test notification · 测试通知已送达' :
+        attention ? 'A decision needs you · 有待处理事项' : 'A task has finished · 有任务已完成',
       tag: typeof message.tag === 'string' && message.tag.length < 256 ? message.tag : 'otto-update',
       icon: '/brand/otto-avatar.png',
       data: { url: '/app' },

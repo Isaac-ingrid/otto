@@ -876,9 +876,13 @@ function pushSection() {
         Notification.permission === 'denied' ? h('p', { class: 'dialog-hint' }, t('pushDenied')) : null,
         h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy || Notification.permission === 'denied',
           dataset: { action: enabled ? 'push-disable' : 'push-enable' } }, t(enabled ? 'pushDisable' : 'pushEnable')),
-        enabled ? h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
-          dataset: { action: 'push-quiet' }, 'aria-pressed': String(state.pushQuiet) },
-        `${state.pushQuiet ? '✓ ' : ''}${t('pushQuiet')}`) : null,
+        enabled ? [
+          h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
+            dataset: { action: 'push-test' } }, t('pushTest')),
+          h('button', { type: 'button', class: 'button quiet', disabled: state.pushBusy,
+            dataset: { action: 'push-quiet' }, 'aria-pressed': String(state.pushQuiet) },
+          `${state.pushQuiet ? '✓ ' : ''}${t('pushQuiet')}`),
+        ] : null,
       ]);
 }
 
@@ -1618,6 +1622,17 @@ async function disablePush() {
   finally { state.pushBusy = false; bumpDialog(); }
 }
 
+async function testPush() {
+  if (state.pushBusy || !state.pushSubscription) return;
+  state.pushBusy = true;
+  bumpDialog();
+  try {
+    const { status } = await request('/app/api/push/test', { endpoint: state.pushSubscription.endpoint });
+    toast(t(status === 200 ? 'pushTestSent' : 'pushFailed'));
+  } catch { toast(t('pushFailed')); }
+  finally { state.pushBusy = false; bumpDialog(); }
+}
+
 async function setPushQuiet(quiet) {
   if (state.pushBusy || !state.pushSubscription) return;
   state.pushBusy = true;
@@ -2198,6 +2213,7 @@ document.addEventListener('click', (event) => {
     case 'sign-out': return void signOut();
     case 'push-enable': return void enablePush();
     case 'push-disable': return void disablePush();
+    case 'push-test': return void testPush();
     case 'push-quiet': return void setPushQuiet(!state.pushQuiet);
     case 'create-pairing': return void createPairing();
     case 'copy-pairing': return void copyPairing();

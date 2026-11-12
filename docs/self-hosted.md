@@ -216,7 +216,9 @@ subscriptions need to opt in again after rotation.
 
 The browser requires trusted HTTPS and permission from a direct tap. On iPhone/iPad (iOS 16.4+),
 first add the Otto site to the Home Screen and open it from that icon; a Safari tab cannot
-subscribe. The current IP HTTPS origin and any future domain are **different push origins**:
+subscribe. After enabling, tap **Send a test notification** on that device; test sends immediately
+(even during quiet hours), at most once a minute, and does not create a task. The current IP
+HTTPS origin and any future domain are **different push origins**:
 after switching to the domain, install/enable notifications again there. Delivery also depends
 on the phone's network reaching its platform push service; test from the real phone/network
 before relying on it. Signing out on a device removes its subscription; use the in-app pending

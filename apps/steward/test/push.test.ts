@@ -58,6 +58,24 @@ describe("opt-in Web Push", () => {
     expect((await SELF.fetch(`${base}/app/api/push/subscribe`, { method: "POST", headers: { ...headers, origin: "https://evil.test", "x-csrf-token": snapshot.csrf }, body })).status).toBe(403);
     // A deployment with no VAPID key is disabled, not silently subscribed.
     expect((await SELF.fetch(`${base}/app/api/push/subscribe`, { method: "POST", headers: { ...headers, "x-csrf-token": snapshot.csrf }, body })).status).toBe(400);
+    expect((await SELF.fetch(`${base}/app/api/push/test`, { method: "POST", headers: { ...headers, "x-csrf-token": snapshot.csrf }, body: JSON.stringify({ endpoint }) })).status).toBe(400);
+  });
+
+  it("sends an explicit test only to a registered device, at most once per minute", async () => {
+    const { config, subscription } = await keys();
+    const sends = vi.fn(async () => new Response(null, { status: 201 }));
+    const ok = await runInDurableObject(ownerStub(), async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance) as SqlExecutor;
+      const service = new PushService(sql, config, async () => {}, sends as typeof fetch);
+      expect(service.queueTest(endpoint)).toBe(false);
+      service.subscribe(subscription, "UTC", true);
+      service.queueTest(endpoint);
+      service.queueTest(endpoint);
+      await service.drain(); // A direct owner tap bypasses quiet hours.
+      return sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_push_job WHERE kind = 'test'`[0]!.n;
+    });
+    expect(ok).toBe(1);
+    expect(sends).toHaveBeenCalledTimes(1);
   });
 
   it("recovers a settled report after a crash without replaying a delivered alert", async () => {

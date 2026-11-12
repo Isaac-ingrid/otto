@@ -76,6 +76,16 @@ export class PushService {
       SELECT ${outboundId}, endpoint, ${kind}, ${now}, ${now} FROM sh_push_sub`;
   }
 
+  /** An explicit per-device test, rate-limited to one per minute by its durable id. */
+  queueTest(endpoint: string): boolean {
+    if (!this.settings().available || !validEndpoint(endpoint) ||
+        this.sql`SELECT 1 FROM sh_push_sub WHERE endpoint = ${endpoint}`.length === 0) return false;
+    const now = Date.now();
+    this.sql`INSERT OR IGNORE INTO sh_push_job (outboundId, endpoint, kind, createdAt, dueAt)
+      VALUES (${`test:${Math.floor(now / 60_000)}`}, ${endpoint}, ${"test"}, ${now}, ${now})`;
+    return true;
+  }
+
   /** Close the crash window between settling an outbound row and scheduling its push job.
    *  Sent/exhausted jobs remain for 24h so an isolate restart never replays a delivered alert. */
   reconcile(): void {
@@ -114,7 +124,7 @@ export class PushService {
           continue;
         }
       }
-      if (job.quiet && quietNow(job.timeZone, Date.now())) {
+      if (job.kind !== "test" && job.quiet && quietNow(job.timeZone, Date.now())) {
         this.sql`UPDATE sh_push_job SET dueAt = ${Date.now() + 60 * 60_000} WHERE outboundId = ${job.outboundId} AND endpoint = ${job.endpoint}`;
         continue;
       }
