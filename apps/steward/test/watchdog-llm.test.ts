@@ -8,6 +8,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Steward } from "../src/steward.ts";
+import type { SqlExecutor } from "../src/schema.ts";
 import {
   configureAndBind,
   llmState,
@@ -38,6 +39,13 @@ async function enableWatchdog(on = true): Promise<void> {
 }
 
 /** Backdates the worker's lastEventAt — the stall alarm's clock. */
+async function processedSeq(workerId: string): Promise<number> {
+  return runInDurableObject(ownerStub(), (instance: Steward) => {
+    const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance) as SqlExecutor;
+    return sql<{ processedUpTo: number }>`SELECT processedUpTo FROM worker_ack WHERE workerId = ${workerId}`[0]?.processedUpTo ?? 0;
+  });
+}
+
 async function backdate(workerId: string, minutes: number): Promise<void> {
   await runInDurableObject(ownerStub(), (instance: Steward, state: DurableObjectState) => {
     state.storage.sql.exec(`UPDATE sh_worker SET lastEventAt = ${Date.now() - minutes * MIN} WHERE workerId = '${workerId}'`);
@@ -133,7 +141,11 @@ describe("the ⟦watchdog⟧ ask (issue #3, steward.md §8.4)", () => {
     expect((await watchdogWakes()).length).toBe(1);
 
     // A real event starts a new stretch, so the next silence is a new question.
+    const beforeProgress = await processedSeq(workerId);
     await fake.emit("progress", workerId, { phase: "tool", tool: "edit", target: "src/a.ts", turn: 2 });
+    // emit() only sends a WebSocket frame. Wait for the reducer's durable ack before
+    // backdating, or a busy CI runner may process the fresh progress after our SQL update.
+    await waitFor(() => processedSeq(workerId), (seq) => seq > beforeProgress);
     await backdate(workerId, 21);
     expect(await sweep()).toEqual({ stalled: 1, reaped: 0 });
     await waitFor(() => watchdogWakes(), (rows) => rows.length === 2);
