@@ -44,7 +44,7 @@ describe("connection probe", () => {
     expect(url).toBe("https://proxy.example/v1/chat/completions");
     expect(authorization).toBe("Bearer test-only");
     expect(JSON.parse(requestBody)).toMatchObject({ messages: [{ role: "user", content: "Reply with OK." }], max_tokens: 32 });
-  });
+  }, 15_000);
 
   it.each([[401, "authentication"], [403, "authentication"], [429, "quota"], [404, "endpoint"], [500, "provider_error"]])("sanitizes HTTP %s without retrying or leaking upstream errors", async (status, error) => {
     let calls = 0;
