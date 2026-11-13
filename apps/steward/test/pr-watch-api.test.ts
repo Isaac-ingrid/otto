@@ -60,6 +60,20 @@ describe('owner-authorized persistent PR watches', () => {
     expect((await llmState()).runs).toHaveLength(0);
   });
 
+  it('requires explicit statuses-only scope and preserves it in API results and notices', async () => {
+    expect((await send({ ...payload, evidenceMode: 'unknown' })).status).toBe(400);
+    const created = await send({ ...payload, evidenceMode: 'statuses-only' });
+    expect(created.status).toBe(200);
+    expect((await created.json() as { watch: { evidenceMode: string } }).watch.evidenceMode).toBe('statuses-only');
+    expect((await send(payload)).status).toBe(409);
+    await ownerStub().pollPrWatches();
+    await waitWhileOutboundPending();
+    const reports = (await ownerStub().outboundRows(100)).filter(row => row.id.startsWith('pr-watch:follow-pr-42:'));
+    expect(reports).toHaveLength(1);
+    expect(JSON.stringify(reports[0]!.payload)).toContain('未验证 Checks/Actions');
+    expect((await llmState()).runs).toHaveLength(0);
+  });
+
   it('cancels future checks, survives repeated cancellation and never resurrects on create retry', async () => {
     await send(payload);
     expect((await send({ action: 'cancel', id: payload.id })).status).toBe(200);

@@ -1056,4 +1056,12 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX sh_pr_watch_notice_due ON sh_pr_watch_notice(deliveredAt, id)`;
     },
   },
+  {
+    id: "035_pr_watch_evidence_mode",
+    up: (sql) => {
+      // Existing commissions retain their original evidence requirement. No implicit
+      // downgrade when a credential cannot read Checks.
+      sql`ALTER TABLE sh_pr_watch ADD COLUMN evidenceMode TEXT NOT NULL DEFAULT 'checks-and-statuses'`;
+    },
+  },
 ];

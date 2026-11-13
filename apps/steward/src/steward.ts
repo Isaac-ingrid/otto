@@ -3609,7 +3609,7 @@ export class Steward extends Agent<Env> {
     return this.prWatches_ ??= new PrWatchService({
       sql: this.sql.bind(this), tx: (fn) => this.ctx.storage.transactionSync(fn),
       threadExists: (id) => this.ledger.threads.get(id) !== null,
-      read: (target) => readPrEvidence(target, { token: this.env.OTTO_GITHUB_READ_TOKEN }),
+      read: (target, mode) => readPrEvidence(target, { token: this.env.OTTO_GITHUB_READ_TOKEN, mode }),
       record: (threadId, text, data) => { this.ledger.timeline.add(threadId, "note", text, data); },
       notify: async (notice) => {
         const owner = this.ownerOpenIdSync();
@@ -3643,7 +3643,7 @@ export class Steward extends Agent<Env> {
     if (body.action !== "create") return json({ error: "invalid_action" }, 400);
     try {
       const watch = this.prWatches.create({ id: body.id, threadId: body.threadId, url: body.url,
-        expiresAt: body.expiresAt, intervalSeconds: body.intervalSeconds });
+        expiresAt: body.expiresAt, intervalSeconds: body.intervalSeconds, evidenceMode: body.evidenceMode });
       // Persist first; retrying the same owner id repairs a failed schedule write.
       await this.armPrWatches();
       return json({ watch });

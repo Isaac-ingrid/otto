@@ -1,12 +1,12 @@
 // Durable, owner-authorized read-only commissions. No LLM, worker dispatch or GitHub writes.
 import type { SqlExecutor } from "./schema.ts";
-import { parsePrUrl, readPrEvidence, type EvidenceResult, type PrTarget } from "./pr-evidence.ts";
+import { parsePrUrl, readPrEvidence, type EvidenceResult, type PrTarget, type PrEvidenceMode } from "./pr-evidence.ts";
 
 export interface PrWatchRow {
   id: string; threadId: string; url: string; status: "active" | "completed" | "cancelled" | "expired";
   createdAt: number; expiresAt: number; intervalMs: number; nextCheckAt: number; generation: number;
   head: string | null; observedState: string | null; checkedAt: number | null; lastError: string | null;
-  checks: number; failed: number; pending: number;
+  checks: number; failed: number; pending: number; evidenceMode: PrEvidenceMode;
 }
 interface Notice { id: string; watchId: string; threadId: string; text: string }
 export interface PrWatchDeps {
@@ -15,7 +15,7 @@ export interface PrWatchDeps {
   threadExists(id: string): boolean;
   notify(input: Notice): Promise<void>;
   record?(threadId: string, text: string, data: Record<string, unknown>): void;
-  read?(target: PrTarget): Promise<EvidenceResult>;
+  read?(target: PrTarget, mode: PrEvidenceMode): Promise<EvidenceResult>;
   now?: () => number;
 }
 export class PrWatchInputError extends Error {}
@@ -32,7 +32,7 @@ export class PrWatchService {
   hasWork(): boolean {
     return this.sql<{ n: number }>`SELECT (SELECT COUNT(*) FROM sh_pr_watch WHERE status = 'active') + (SELECT COUNT(*) FROM sh_pr_watch_notice WHERE deliveredAt IS NULL) AS n`[0]!.n > 0;
   }
-  create(input: { id: unknown; threadId: unknown; url: unknown; expiresAt?: unknown; intervalSeconds?: unknown }): PrWatchRow {
+  create(input: { id: unknown; threadId: unknown; url: unknown; expiresAt?: unknown; intervalSeconds?: unknown; evidenceMode?: unknown }): PrWatchRow {
     const now = this.now();
     if (typeof input.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(input.id) || typeof input.threadId !== "string" || !this.deps.threadExists(input.threadId)) throw new PrWatchInputError("invalid_id_or_thread");
     const target = parsePrUrl(input.url);
@@ -40,20 +40,22 @@ export class PrWatchService {
     const intervalSeconds = input.intervalSeconds ?? 900;
     if (!Number.isInteger(intervalSeconds) || Number(intervalSeconds) < 60 || Number(intervalSeconds) > 3600) throw new PrWatchInputError("interval_must_be_60_to_3600_seconds");
     const intervalMs = Number(intervalSeconds) * 1000;
+    const evidenceMode = input.evidenceMode ?? 'checks-and-statuses';
+    if (evidenceMode !== 'checks-and-statuses' && evidenceMode !== 'statuses-only') throw new PrWatchInputError('invalid_evidence_mode');
     const existing = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${input.id}`[0];
     // Default expiration is chosen once, not recomputed on an idempotent retry.
     const expiresAt = input.expiresAt ?? existing?.expiresAt ?? now + DAY;
     if (existing) {
-      if (existing.threadId !== input.threadId || existing.url !== target.url || existing.intervalMs !== intervalMs || existing.expiresAt !== expiresAt) throw new PrWatchInputError("id_conflict");
+      if (existing.threadId !== input.threadId || existing.url !== target.url || existing.intervalMs !== intervalMs || existing.expiresAt !== expiresAt || existing.evidenceMode !== evidenceMode) throw new PrWatchInputError("id_conflict");
       return existing; // never resurrect completed/cancelled/expired commissions
     }
     if (!Number.isSafeInteger(expiresAt) || Number(expiresAt) <= now || Number(expiresAt) > now + 7 * DAY) throw new PrWatchInputError("expiry_must_be_within_seven_days");
     const { id, threadId } = input;
     return this.deps.tx(() => {
       if (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_pr_watch WHERE status = 'active'`[0]!.n >= MAX_ACTIVE) throw new PrWatchInputError("active_watch_limit");
-      this.sql`INSERT INTO sh_pr_watch (id, threadId, url, status, createdAt, expiresAt, intervalMs, nextCheckAt, generation, checks, failed, pending)
-        VALUES (${id}, ${threadId}, ${target.url}, 'active', ${now}, ${Number(expiresAt)}, ${intervalMs}, ${now}, 0, 0, 0, 0)`;
-      this.deps.record?.(threadId, `开始只读跟进 PR：${target.url}`, { watchId: id, expiresAt, intervalMs });
+      this.sql`INSERT INTO sh_pr_watch (id, threadId, url, status, createdAt, expiresAt, intervalMs, nextCheckAt, generation, checks, failed, pending, evidenceMode)
+        VALUES (${id}, ${threadId}, ${target.url}, 'active', ${now}, ${Number(expiresAt)}, ${intervalMs}, ${now}, 0, 0, 0, 0, ${evidenceMode})`;
+      this.deps.record?.(threadId, `开始只读跟进 PR：${target.url}${evidenceMode === 'statuses-only' ? '（仅 commit statuses，未验证 Checks/Actions）' : ''}`, { watchId: id, expiresAt, intervalMs, evidenceMode });
       return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${id}`[0]!;
     });
   }
@@ -79,14 +81,14 @@ export class PrWatchService {
     if (this.sql`SELECT id FROM sh_pr_watch_notice WHERE id = ${id}`.length > 0) return;
     this.sql`INSERT OR IGNORE INTO sh_pr_watch_notice (id, watchId, threadId, text)
       VALUES (${id}, ${row.id}, ${row.threadId}, ${text})`;
-    this.deps.record?.(row.threadId, text, { watchId: row.id, head: row.head, observation: kind });
+    this.deps.record?.(row.threadId, text, { watchId: row.id, head: row.head, observation: kind, evidenceMode: row.evidenceMode });
   }
   private expire(): void {
     this.deps.tx(() => {
       for (const row of this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE status = 'active' AND expiresAt <= ${this.now()}`) {
         this.sql`UPDATE sh_pr_watch SET status = 'expired', generation = generation + 1 WHERE id = ${row.id}`;
         this.sql`DELETE FROM sh_pr_watch_notice WHERE watchId = ${row.id}`;
-        this.notice(row, "expired", `PR 跟进已到期：${row.url}\n未确认 CI 通过；未重跑检查或修改代码。`);
+        this.notice(row, "expired", `PR 跟进已到期：${row.url}\n${row.evidenceMode === 'statuses-only' ? '未确认 commit statuses 通过；未验证 Checks/Actions' : '未确认 CI 通过'}；未重跑检查或修改代码。`);
       }
     });
   }
@@ -109,7 +111,7 @@ export class PrWatchService {
       if (!claim) continue;
       const target = parsePrUrl(claim.url);
       let result: EvidenceResult;
-      try { result = target ? await (this.deps.read ?? readPrEvidence)(target) : { ok: false, reason: 'invalid_target' }; }
+      try { result = target ? await (this.deps.read ? this.deps.read(target, claim.evidenceMode) : readPrEvidence(target, { mode: claim.evidenceMode })) : { ok: false, reason: 'invalid_target' }; }
       catch { result = { ok: false, reason: 'github_unavailable' }; }
       this.expire();
       this.deps.tx(() => {
@@ -128,11 +130,13 @@ export class PrWatchService {
           checks = ${evidence.checks}, failed = ${evidence.failed}, pending = ${evidence.pending},
           status = ${terminal ? 'completed' : 'active'}, nextCheckAt = ${this.now() + current.intervalMs} WHERE id = ${claim.id}`;
         if (evidence.state !== 'waiting' && (current.head !== evidence.head || current.observedState !== evidence.state)) {
-          const label = evidence.state === 'success' ? '已观察到 CI 检查通过（不代表需求验收通过）'
-            : evidence.state === 'failure' ? `CI 检查失败：${evidence.failed} 项失败、${evidence.pending} 项等待，继续只读跟进`
+          const limited = current.evidenceMode === 'statuses-only';
+          const subject = limited ? 'commit statuses' : 'CI 检查';
+          const label = evidence.state === 'success' ? `已观察到 ${subject}通过（不代表需求验收通过）`
+            : evidence.state === 'failure' ? `${subject}失败：${evidence.failed} 项失败、${evidence.pending} 项等待，继续只读跟进`
             : evidence.state === 'merged' ? 'PR 已被合并，跟进结束' : 'PR 已关闭，跟进结束';
           this.notice({ ...current, head: evidence.head }, evidence.state,
-            `${label}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`);
+            `${label}${limited ? '\n仅验证 commit statuses；未验证 Checks/Actions，不代表完整 CI 通过。' : ''}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`);
         }
       });
     }

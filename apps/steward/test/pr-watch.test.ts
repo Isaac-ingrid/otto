@@ -40,7 +40,7 @@ function create(service: PrWatchService, patch: Record<string, unknown> = {}) {
 
 describe('durable PR commissions', () => {
   it('validates targets, scope, interval, expiry and caps active watches', async () => fixture(h => {
-    for (const patch of [{ threadId: 'missing' }, { url: 'http://127.0.0.1/private' }, { intervalSeconds: 0 }, { intervalSeconds: 59 }, { intervalSeconds: 3601 }, { expiresAt: h.now }, { expiresAt: h.now + 8 * 86_400_000 }]) expect(() => create(h.service, patch)).toThrow();
+    for (const patch of [{ threadId: 'missing' }, { url: 'http://127.0.0.1/private' }, { intervalSeconds: 0 }, { intervalSeconds: 59 }, { intervalSeconds: 3601 }, { expiresAt: h.now }, { expiresAt: h.now + 8 * 86_400_000 }, { evidenceMode: 'automatic-downgrade' }]) expect(() => create(h.service, patch)).toThrow();
     for (let n = 0; n < 10; n++) create(h.service, { id: `watch-${n}` });
     expect(() => create(h.service, { id: 'watch-overflow' })).toThrow('active_watch_limit');
   }));
@@ -54,6 +54,25 @@ describe('durable PR commissions', () => {
     expect(create(h.service).status).toBe('cancelled');
     expect(h.service.cancel(first.id)).toBe(true);
     expect(h.service.cancel('missing')).toBe(false);
+  }));
+
+  it('evidence scope persists across restart, cannot be changed by retry, and labels limited notices', async () => fixture(async h => {
+    const row = create(h.service, { evidenceMode: 'statuses-only' });
+    expect(row.evidenceMode).toBe('statuses-only');
+    expect(() => create(h.service)).toThrow('id_conflict');
+    expect(() => create(h.service, { evidenceMode: 'checks-and-statuses' })).toThrow('id_conflict');
+    const modes: string[] = [];
+    h.deps.read = async (_target, mode) => { modes.push(mode); return success; };
+    await new PrWatchService(h.deps).tick();
+    expect(modes).toEqual(['statuses-only']);
+    expect([...h.notices.values()][0]).toContain('未验证 Checks/Actions');
+    expect([...h.notices.values()][0]).toContain('不代表完整 CI 通过');
+    expect(h.service.list()[0]).toMatchObject({ status: 'completed', evidenceMode: 'statuses-only' });
+  }));
+
+  it('default scope is checks-and-statuses and cannot be downgraded by a replay', async () => fixture(h => {
+    expect(create(h.service).evidenceMode).toBe('checks-and-statuses');
+    expect(() => create(h.service, { evidenceMode: 'statuses-only' })).toThrow('id_conflict');
   }));
 
   it('no checks is silent waiting; scheduled polling is not model execution', async () => fixture(async h => {

@@ -34,6 +34,7 @@ Create fields:
 | `threadId` | Existing Thread to receive the reports |
 | `url` | Canonical `https://github.com/owner/repo/pull/number` URL only |
 | `intervalSeconds` | Optional, 60–3600; default 900 (15 minutes) |
+| `evidenceMode` | Optional, `checks-and-statuses` (default) or explicit `statuses-only`; immutable for an id |
 | `expiresAt` | Optional Unix epoch milliseconds, future and within 7 days; default 24 hours |
 
 Retry the same create payload with the same id. A conflicting payload returns 409. An id is never
@@ -50,8 +51,19 @@ The reader stores structured counts, commit SHA and fixed reason codes, not raw 
 
 Public repositories can be read without a token, subject to GitHub's unauthenticated rate limit.
 For private repositories or higher limits, set `OTTO_GITHUB_READ_TOKEN` on the server (Node env or
-protected `.dev.vars`; Cloudflare secret). Prefer a fine-grained, selected-repository token with
-read-only Pull requests, Checks and Commit statuses permissions. Do not grant write permissions.
+protected `.dev.vars`; Cloudflare secret). Do not grant write permissions.
+
+For **explicit `statuses-only` commissions**, a selected-repository fine-grained token with read-only
+Pull requests, Commit statuses and automatic Metadata permissions is sufficient. In the owner's
+current GitHub PAT UI, Checks is not selectable; server verification returned 200 for PR/statuses
+but 403 for check runs. The original instruction to select Checks on that screen was incorrect.
+Do not switch to a broad classic token or assume Actions permissions are a substitute.
+
+The default `checks-and-statuses` mode still requires a credential that can actually read both
+sources (for example an appropriately scoped GitHub App token). It never falls back after a 403.
+To use the limited mode, create a **new** id with `"evidenceMode":"statuses-only"`; it reads PR and
+commit statuses only, and every result notice states that Checks/Actions and full CI were not
+verified. No modes are inferred from a credential's permissions.
 The token never enters a model context, API response or notice. Revoking it at GitHub or removing
 it from deployment config blocks later authorized reads; this is distinct from cancelling a watch.
 A request already in flight may finish, so use watch cancellation to reject its late result.
@@ -73,8 +85,11 @@ SQL only. Default first observation occurs on the next cron pass; later observat
 stored interval. At most 10 watches may be active. Rate limits and outages back off at least five
 minutes and do not create a Needs you item for every failure.
 
-For an open PR, the reader gets the head SHA, latest check runs and combined commit statuses pinned
-to that SHA, then re-reads the PR. A changed head/state invalidates the observation. Unknown
+For an open PR, the default reader gets the head SHA, latest check runs and combined commit statuses
+pinned to that SHA, then re-reads the PR. `statuses-only` skips the check-runs request entirely but
+retains the same head recheck, pagination validation, cancellation and expiry safeguards. Empty
+commit statuses remain waiting, not success. The scope is stored in SQLite and returned by the API;
+a create retry cannot silently strengthen or weaken it. A changed head/state invalidates the observation. Unknown
 conclusions, response truncation (over 100 results), malformed data or a mismatched check SHA are
 unavailable evidence, never success. Zero checks and all-skipped/neutral checks remain waiting;
 a success requires at least one actual success and no observed failure or pending check.

@@ -379,7 +379,10 @@ Logs are `journalctl -u otto -f`. The database browser is `sqlite3
 [PR watches](pr-watches.md) bind a GitHub PR to an existing Thread through the explicit-SERVER_KEY
 Owner API. A persistent timer checks external status without waking a model or dispatching a worker.
 For private repositories, set `OTTO_GITHUB_READ_TOKEN` in the protected configuration to a
-selected-repository, read-only token (Pull requests, Checks, Commit statuses), then restart Otto.
+selected-repository, read-only token (Pull requests and Commit statuses), then restart Otto and
+explicitly create a `statuses-only` watch. Fine-grained PATs in the current GitHub UI do not offer
+Checks. The default `checks-and-statuses` mode requires a credential that can read Checks as well;
+it does not automatically downgrade when access is denied.
 No token is needed for public repositories, subject to GitHub rate limits. Watches expire, can be
 cancelled independently of turns, and never modify code, re-run CI or merge a PR. No conversation
 tool or workspace management page is included in this first pilot.

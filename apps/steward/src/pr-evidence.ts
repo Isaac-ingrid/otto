@@ -1,4 +1,5 @@
 // GitHub evidence reader: fixed origin, GET only, no redirects, no model or shell.
+export type PrEvidenceMode = "checks-and-statuses" | "statuses-only";
 export interface PrTarget { owner: string; repo: string; number: number; url: string }
 export interface PrEvidence {
   head: string;
@@ -24,7 +25,9 @@ function pullOf(raw: unknown): Pull {
   return p as Pull;
 }
 
-export async function readPrEvidence(target: PrTarget, options: { token?: string; fetch?: typeof fetch } = {}): Promise<EvidenceResult> {
+export async function readPrEvidence(target: PrTarget, options: { token?: string; fetch?: typeof fetch; mode?: PrEvidenceMode } = {}): Promise<EvidenceResult> {
+  const mode = options.mode ?? "checks-and-statuses";
+  if (mode !== "checks-and-statuses" && mode !== "statuses-only") return { ok: false, reason: "invalid_evidence_mode" };
   const canonical = parsePrUrl(target.url);
   if (!canonical || canonical.owner !== target.owner || canonical.repo !== target.repo || canonical.number !== target.number) return { ok: false, reason: "invalid_target" };
   const send = options.fetch ?? fetch;
@@ -58,15 +61,19 @@ export async function readPrEvidence(target: PrTarget, options: { token?: string
     const first = pullOf(await get(`/pulls/${target.number}`));
     if (first.state === "closed") return { ok: true, evidence: { head: first.head.sha, state: first.merged ? "merged" : "closed", checks: 0, failed: 0, pending: 0 } };
     const sha = first.head.sha;
-    const checksRaw = await get(`/commits/${sha}/check-runs?filter=latest&per_page=100`) as { total_count?: number; check_runs?: Array<{ head_sha?: string; status?: string; conclusion?: string | null }> };
+    let checkRuns: Array<{ head_sha?: string; status?: string; conclusion?: string | null }> = [];
+    if (mode === "checks-and-statuses") {
+      const raw = await get(`/commits/${sha}/check-runs?filter=latest&per_page=100`) as { total_count?: number; check_runs?: typeof checkRuns };
+      if (!raw || !Array.isArray(raw.check_runs) || !Number.isInteger(raw.total_count) || raw.total_count !== raw.check_runs.length) throw new EvidenceError("incomplete_checks");
+      checkRuns = raw.check_runs;
+    }
     const statusesRaw = await get(`/commits/${sha}/status?per_page=100`) as { total_count?: number; statuses?: Array<{ state?: string }>; sha?: string };
-    if (!checksRaw || !Array.isArray(checksRaw.check_runs) || !Number.isInteger(checksRaw.total_count) || checksRaw.total_count !== checksRaw.check_runs.length ||
-        !statusesRaw || statusesRaw.sha !== sha || !Array.isArray(statusesRaw.statuses) || !Number.isInteger(statusesRaw.total_count) || statusesRaw.total_count !== statusesRaw.statuses.length) {
+    if (!statusesRaw || statusesRaw.sha !== sha || !Array.isArray(statusesRaw.statuses) || !Number.isInteger(statusesRaw.total_count) || statusesRaw.total_count !== statusesRaw.statuses.length) {
       throw new EvidenceError("incomplete_checks"); // includes truncation/pagination: never infer green
     }
     let failed = 0;
     let pending = 0;
-    for (const check of checksRaw.check_runs) {
+    for (const check of checkRuns) {
       if (!check || check.head_sha !== sha || !["queued", "in_progress", "completed", "waiting", "requested", "pending"].includes(check.status ?? "")) throw new EvidenceError("invalid_check_response");
       if (check.status !== "completed") pending++;
       else if (["failure", "timed_out", "cancelled", "action_required", "stale", "startup_failure"].includes(check.conclusion ?? "")) failed++;
@@ -80,9 +87,9 @@ export async function readPrEvidence(target: PrTarget, options: { token?: string
     // PR may acquire a new head or close while checks are fetched. Never apply old-head evidence.
     const final = pullOf(await get(`/pulls/${target.number}`));
     if (final.head.sha !== sha || final.state !== first.state || final.merged !== first.merged) throw new EvidenceError("pr_changed_during_check");
-    const checks = checksRaw.check_runs.length + statusesRaw.statuses.length;
+    const checks = checkRuns.length + statusesRaw.statuses.length;
     // All-neutral/skipped is not a green build. At least one real success is required.
-    const successful = checksRaw.check_runs.some(c => c.status === "completed" && c.conclusion === "success") || statusesRaw.statuses.some(s => s.state === "success");
+    const successful = checkRuns.some(c => c.status === "completed" && c.conclusion === "success") || statusesRaw.statuses.some(s => s.state === "success");
     return { ok: true, evidence: { head: sha, state: failed ? "failure" : pending || !successful ? "waiting" : "success", checks, failed, pending } };
   } catch (error) {
     return { ok: false, reason: error instanceof EvidenceError ? error.message : "github_unavailable" };

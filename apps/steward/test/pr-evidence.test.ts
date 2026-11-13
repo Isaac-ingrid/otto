@@ -64,6 +64,35 @@ describe('GitHub PR evidence: never trust text or an old head', () => {
     }
   });
 
+  it('statuses-only is explicit and never requests Checks, even when they would be forbidden', async () => {
+    for (const state of ['success', 'failure', 'pending']) {
+      const { send, calls } = fake([pull(), { sha: HEAD, total_count: 1, statuses: [{ state }] }, pull()]);
+      expect(await readPrEvidence(target, { fetch: send, mode: 'statuses-only' })).toMatchObject({ ok: true, evidence: { state: state === 'pending' ? 'waiting' : state, checks: 1 } });
+      expect(calls).toHaveLength(3);
+      expect(calls.some(c => c.url.includes('check-runs'))).toBe(false);
+    }
+  });
+
+  it('default mode never falls back to statuses-only after a Checks permission failure', async () => {
+    const { send, calls } = fake([pull(), new Response('forbidden', { status: 403 }), { sha: HEAD, total_count: 1, statuses: [{ state: 'success' }] }, pull()]);
+    expect(await readPrEvidence(target, { fetch: send })).toEqual({ ok: false, reason: 'github_http_403' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('statuses-only still requires evidence, complete responses and a stable head', async () => {
+    const empty = fake([pull(), statuses, pull()]);
+    expect(await readPrEvidence(target, { fetch: empty.send, mode: 'statuses-only' })).toMatchObject({ ok: true, evidence: { state: 'waiting', checks: 0 } });
+    const changed = fake([pull(), { sha: HEAD, total_count: 1, statuses: [{ state: 'success' }] }, pull(NEXT)]);
+    expect(await readPrEvidence(target, { fetch: changed.send, mode: 'statuses-only' })).toEqual({ ok: false, reason: 'pr_changed_during_check' });
+    for (const response of [{ sha: HEAD, total_count: 101, statuses: [] }, new Response('private', { status: 403 })]) {
+      const invalid = fake([pull(), response]);
+      expect(await readPrEvidence(target, { fetch: invalid.send, mode: 'statuses-only' })).toMatchObject({ ok: false });
+    }
+    const invalidMode = fake([]);
+    expect(await readPrEvidence(target, { fetch: invalidMode.send, mode: 'invalid' as never })).toEqual({ ok: false, reason: 'invalid_evidence_mode' });
+    expect(invalidMode.calls).toHaveLength(0);
+  });
+
   it('rejects a changed head instead of publishing old green checks', async () => {
     const { send } = fake([pull(), checks(), statuses, pull(NEXT)]);
     expect(await readPrEvidence(target, { fetch: send })).toEqual({ ok: false, reason: 'pr_changed_during_check' });
