@@ -193,6 +193,24 @@ describe("owner messages", () => {
   });
 });
 
+describe("deterministic health notices", () => {
+  it("requires server authorization, deduplicates retries and never starts a model turn", async () => {
+    const payload = { id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", issue: "otto active", event: "failure" };
+    const send = (authorized: boolean, body: unknown = payload) => SELF.fetch(`${BASE}/api/health-notice`, {
+      method: "POST", headers: { "content-type": "application/json", ...(authorized ? { authorization: "Bearer test-server-key-not-a-secret" } : {}) }, body: JSON.stringify(body),
+    });
+    expect((await send(false)).status).toBe(401);
+    expect((await send(true, { ...payload, event: "dispatch" })).status).toBe(400);
+    expect((await send(true)).status).toBe(200);
+    expect((await send(true)).status).toBe(200);
+    await waitWhileOutboundPending();
+    const rows = (await ownerStub().outboundRows(100)).filter(row => row.id === `health:${payload.id}`);
+    expect(rows).toHaveLength(1);
+    expect(JSON.stringify(rows[0]!.payload)).toContain("自检发现故障");
+    expect((await llmState()).runs).toHaveLength(0);
+  });
+});
+
 describe("threadless question answers", () => {
   it("settles the exact ask_user decision when Answer submits a quoted message", async () => {
     const { get, post } = await browser();

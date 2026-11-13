@@ -28,6 +28,7 @@ jobs:
           node-version: "22"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: node --test deploy/health-monitor.test.mjs
       - run: pnpm -r typecheck
       - run: pnpm -r test
       # The Node host's canonical-origin regression uses its own in-process SQLite harness.

@@ -7,6 +7,7 @@ self.addEventListener('push', (event) => {
     const attention = message.kind === 'attention';
     await self.registration.showNotification('Otto', {
       body: message.kind === 'test' ? 'Test notification · 测试通知已送达' :
+        message.kind === 'health' ? 'Health check update · 自检状态有更新' :
         attention ? 'A decision needs you · 有待处理事项' : 'A task has finished · 有任务已完成',
       tag: typeof message.tag === 'string' && message.tag.length < 256 ? message.tag : 'otto-update',
       icon: '/brand/otto-avatar.png',

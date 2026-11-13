@@ -323,12 +323,31 @@ memory ceiling so a Node heap blow takes only the steward, and installs the back
 Run the read-only `deploy/doctor.sh` on the server to check `otto`/nginx, the IP certificate's
 48-hour validity, recent local SQLite integrity, disk use, the last encrypted offsite
 verification, overdue connector commands, overdue push retries, and pushes that exhausted
-six attempts in the last 24 hours. Only aggregate counts are printed; payloads, endpoints
+six attempts in the last 30 minutes. Older exhausted jobs within 24 hours are historical warnings,
+not current failures (a cleared check is not proof of end-to-end phone delivery). Only aggregate counts are printed; payloads, endpoints
 and credentials are never printed. Failures exit nonzero; intentionally unconfigured offsite
 storage is a warning unless `OTTO_REQUIRE_OFFSITE=1`. No automatic task replay or alerts.
 From a checkout, run `./deploy/remote.sh 'bash -s' < deploy/doctor.sh`.
 An external monitor may alert on that exit status. This script checks the current IP-vhost
 layout, not an arbitrary domain deployment.
+
+### Scheduled health monitoring (Node only, optional)
+
+Copy `deploy/doctor.sh`, `deploy/health-monitor.mjs` and `deploy/install-health-monitor.sh`
+into the same directory on the server, then run `sudo bash install-health-monitor.sh`.
+It installs `otto-health.timer` (every 15 minutes) independently of the Otto service.
+The root-only state directory `/var/lib/otto-health` durably queues notices while Otto is down;
+failed sends retry on the next check using stable IDs. The monitor reads the explicit
+`SERVER_KEY` from `/etc/otto/.dev.vars` and sends only fixed check labels/event types to
+loopback `/api/health-notice`; it never prints the key or starts a model turn.
+
+Each check failure emits one Workspace message, with reminders at most every six hours,
+and one recovery message when the check clears. Optional generic Web Push obeys device quiet
+hours; Workspace history is the fallback. If the server, network or Otto is unavailable,
+immediate phone notification is **not guaranteed**: use an external monitor for whole-host
+outages. Health messages are conversation history, not questions requiring an answer.
+Use `systemctl status otto-health.timer` and `journalctl -u otto-health.service` to inspect it;
+`sudo systemctl disable --now otto-health.timer` disables future checks.
 
 Machine online flags are reconciled against actual restored connector sockets at server startup:
 Node restarts cannot leave a disconnected machine looking online, and Cloudflare hibernated

@@ -72,8 +72,12 @@ if [[ -f "$db" ]]; then
   count_check "SELECT COUNT(*) FROM outbox WHERE state='queued' AND held=0 AND createdAt < $now_ms - 600000;"
   description='push jobs overdue by over 5 minutes (including retries)'
   count_check "SELECT COUNT(*) FROM sh_push_job WHERE sentAt IS NULL AND dueAt < $now_ms - 300000;"
-  description='push jobs exhausting six failed attempts in the past 24 hours'
-  count_check "SELECT COUNT(*) FROM sh_push_job WHERE attempts >= 6 AND createdAt >= $now_ms - 86400000;"
+  description='push jobs exhausting six failed attempts in the past 30 minutes'
+  count_check "SELECT COUNT(*) FROM sh_push_job WHERE attempts >= 6 AND COALESCE(sentAt, dueAt) >= $now_ms - 1800000;"
+  history="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM sh_push_job WHERE attempts >= 6 AND createdAt >= $now_ms - 86400000 AND COALESCE(sentAt, dueAt) < $now_ms - 1800000;" || true)"
+  if [[ "$history" =~ ^[1-9][0-9]*$ ]]; then
+    echo "WARN: historical exhausted push jobs in past 24 hours = $history (not a current failure)"
+  fi
 else
   echo 'FAIL: production database missing' >&2
   failures=$((failures + 1))

@@ -112,7 +112,7 @@ export class PushService {
   }
 
   /** Stable outbound id × endpoint: retries and DO restarts cannot create a second job. */
-  queue(outboundId: string, kind: "attention" | "done"): void {
+  queue(outboundId: string, kind: "attention" | "done" | "health"): void {
     if (!this.settings().available) return;
     const now = Date.now();
     this.sql`INSERT OR IGNORE INTO sh_push_job (outboundId, endpoint, kind, createdAt, dueAt)

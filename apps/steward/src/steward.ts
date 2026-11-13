@@ -1284,6 +1284,7 @@ export class Steward extends Agent<Env> {
         return request.method === "POST" ? this.handleApiMessage(request) : this.handleApiListMessages(url);
       }
       if (url.pathname === "/api/actions" && request.method === "POST") return this.handleApiActions(request);
+      if (url.pathname === "/api/health-notice" && request.method === "POST") return this.handleHealthNotice(request);
       if (url.pathname === "/api/pairing" && request.method === "POST") return this.handleApiPairing();
       if (url.pathname === "/api/login-link" && request.method === "POST") return this.handleApiLoginLink();
       return new Response("not found", { status: 404 });
@@ -3598,6 +3599,25 @@ export class Steward extends Agent<Env> {
   }
 
   // ---- Owner HTTP API (ADR-0003): the Worker pre-checked SERVER_KEY; these run in the DO ----
+
+  /** Trusted monitor input becomes a deterministic local notice, never an agent turn. */
+  private async handleHealthNotice(request: Request): Promise<Response> {
+    const raw = await request.text();
+    if (raw.length > 4096) return new Response("too large", { status: 413 });
+    let input: { id?: string; issue?: string; event?: string };
+    try { input = JSON.parse(raw); } catch { return new Response("bad JSON", { status: 400 }); }
+    if (!input || typeof input.id !== "string" || !/^[a-f0-9-]{36}$/.test(input.id) ||
+        typeof input.issue !== "string" || !/^[A-Za-z0-9 ()'.,:_/-]{1,180}$/.test(input.issue) ||
+        !["failure", "reminder", "recovery"].includes(input.event ?? "")) return new Response("bad notice", { status: 400 });
+    const owner = this.ownerOpenIdSync();
+    if (!owner) return new Response("not ready", { status: 503 });
+    const id = `health:${input.id}`;
+    const label = input.event === "recovery" ? "自检恢复" : input.event === "reminder" ? "自检故障持续" : "自检发现故障";
+    await this.enqueueOutbound({ id, kind: "text", to: owner, text: `${label}：${input.issue}\n这是只读检查结果，未自动重派任务。`, urgency: "push" });
+    this.push.queue(id, "health");
+    void this.drainPush();
+    return Response.json({ ok: true });
+  }
 
   /** POST /api/messages — the owner's text. `replyTo` quotes one of our sent messages (the
    *  outbound row id / merged group id), which routes deterministically before the model ever
