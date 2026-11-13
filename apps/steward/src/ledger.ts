@@ -689,6 +689,14 @@ export function createLedger(deps: LedgerDeps) {
     setOnline(deviceId: string, online: boolean, fallbackName?: string): void {
       machineStatus.setOnline(deviceId, online, fallbackName);
     },
+    /** Reconcile persisted flags with restored sockets after startup (Node loses all sockets).
+     * Only transitions are written: a hibernated live socket must not reset reliability clocks. */
+    reconcileOnline(connected: ReadonlySet<string>): void {
+      for (const row of sql<{ deviceId: string; online: number }>`SELECT deviceId, online FROM sh_machine`) {
+        const online = connected.has(row.deviceId);
+        if (!!row.online !== online) machineStatus.setOnline(row.deviceId, online);
+      }
+    },
     get(deviceId: string): MachineRow | null {
       const row = sql<Record<string, unknown>>`SELECT * FROM sh_machine WHERE deviceId = ${deviceId}`[0];
       return row ? viewMachine(row) : null;

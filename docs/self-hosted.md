@@ -321,11 +321,19 @@ memory ceiling so a Node heap blow takes only the steward, and installs the back
 ## Troubleshooting
 
 Run the read-only `deploy/doctor.sh` on the server to check `otto`/nginx, the IP certificate's
-48-hour validity, recent local SQLite integrity, disk use, and the last encrypted offsite
-verification. It exits nonzero until offsite storage is configured and verified; it does not
-send alerts by itself. From a checkout, run `./deploy/remote.sh 'bash -s' < deploy/doctor.sh`.
+48-hour validity, recent local SQLite integrity, disk use, the last encrypted offsite
+verification, overdue connector commands, overdue push retries, and pushes that exhausted
+six attempts in the last 24 hours. Only aggregate counts are printed; payloads, endpoints
+and credentials are never printed. Failures exit nonzero; intentionally unconfigured offsite
+storage is a warning unless `OTTO_REQUIRE_OFFSITE=1`. No automatic task replay or alerts.
+From a checkout, run `./deploy/remote.sh 'bash -s' < deploy/doctor.sh`.
 An external monitor may alert on that exit status. This script checks the current IP-vhost
 layout, not an arbitrary domain deployment.
+
+Machine online flags are reconciled against actual restored connector sockets at server startup:
+Node restarts cannot leave a disconnected machine looking online, and Cloudflare hibernated
+connections remain online. `lastSeen` records hello/connection transitions, not a periodic
+heartbeat; its age alone is not proof that a long-lived connection is dead.
 
 | Symptom | Cause |
 | --- | --- |

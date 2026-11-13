@@ -13,6 +13,7 @@ import {
   waitWhileOutboundPending,
 } from "./helpers.ts";
 import type { ShOutboundRow } from "../src/steward.ts";
+import type { Ledger } from "../src/ledger.ts";
 
 beforeEach(async () => {
   await resetLedgerState();
@@ -58,6 +59,24 @@ async function allSent(): Promise<string> {
   const rows = await ownerStub().outboundRows(40);
   return JSON.stringify(rows.filter((r) => r.status === "sent").map((r) => r.payload));
 }
+
+describe("startup socket reconciliation", () => {
+  it("clears stale online flags but preserves hibernated live connections and is idempotent", async () => {
+    await runInDurableObject(ownerStub(), (raw) => {
+      const { ledger } = raw as unknown as { ledger: Ledger };
+      ledger.machines.setOnline("stale-device", true);
+      ledger.machines.setOnline("live-device", true);
+      const liveBefore = ledger.machines.get("live-device");
+      ledger.machines.reconcileOnline(new Set(["live-device"]));
+      expect(ledger.machines.get("stale-device")?.online).toBe(false);
+      expect(ledger.machines.get("live-device")).toEqual(liveBefore);
+      const staleAfter = ledger.machines.get("stale-device");
+      ledger.machines.reconcileOnline(new Set(["live-device"]));
+      expect(ledger.machines.get("stale-device")).toEqual(staleAfter);
+      expect(ledger.machines.get("live-device")).toEqual(liveBefore);
+    });
+  });
+});
 
 describe("a machine drops mid-task (spec §9: lost contact, not failed)", () => {
   it("marks the running worker unreachable — never broken — and nothing is sent immediately", async () => {

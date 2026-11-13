@@ -399,6 +399,13 @@ export class Steward extends Agent<Env> {
     runMigrations(this.sql.bind(this), MIGRATIONS, (fn) => this.ctx.storage.transactionSync(fn));
     // Fail before any credential is minted if this deployment cannot establish its durable key.
     this.deploymentKeySecrets();
+    // SQLite survives a Node restart but its sockets do not. Cloudflare may restore
+    // hibernated connections, so reconcile against those rather than marking all offline.
+    this.ledger.machines.reconcileOnline(new Set(
+      [...this.getConnections<ConnState>()]
+        .filter((connection) => connection.state?.role !== "web" && !!connection.state?.deviceId)
+        .map((connection) => connection.state!.deviceId),
+    ));
     // Notes maintenance is daily (steward.md §2.5, issue #19): a 02:00 UTC cron, idempotent
     // by expression — re-arming at boot dedups onto the same row and never postpones it,
     // so the chain cannot die (or drift) with an evicted isolate.
