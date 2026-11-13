@@ -1,0 +1,73 @@
+{
+  "startedAt": "2026-11-13T07:55:16.811Z",
+  "status": "completed",
+  "runs": [
+    {
+      "role": "baseline",
+      "revision": "cd08d1a5c48caa34bafafe2fd78d8996222e250c",
+      "bundleSha256": "cfb439cb6d19352c28b6bff99c1e9b49507f1a6a7b681795e042cbd195b50c72",
+      "status": "completed",
+      "startedAt": "2026-11-13T07:55:32.601Z",
+      "resultPath": "/opt/otto/validation/prtools-20261113/baseline/apps/steward/eval/results/production-prtools-20261113.json",
+      "exitCode": 1,
+      "finishedAt": "2026-11-13T08:07:07.833Z",
+      "summary": {
+        "n": 106,
+        "pass": 91,
+        "passTextAsk": 1,
+        "wrongRoute": 0,
+        "missedAsk": 1,
+        "unnecessaryAsk": 13,
+        "errors": 0
+      },
+      "thresholds": {
+        "wrongRoute": 0.02,
+        "missedAsk": 0.03,
+        "unnecessaryAsk": 0.15
+      },
+      "runId": "e70672c7-5f78-482f-8f16-c67f5b858ed2",
+      "fingerprint": "f098352f6ada97128bcc775acb8a10eec3ba2aff1f398955d2047611e11dd4c1",
+      "inputStable": true,
+      "gatePassed": false
+    },
+    {
+      "role": "candidate",
+      "revision": "60efdc874ee455e219d7d79042b82438cb224909",
+      "bundleSha256": "f954d66a63eb381ef52e6aa97088110c3024e627a0207e65ca6011b0b03eb3ca",
+      "status": "completed",
+      "startedAt": "2026-11-13T08:07:07.907Z",
+      "resultPath": "/opt/otto/validation/prtools-20261113/candidate/apps/steward/eval/results/production-prtools-20261113.json",
+      "exitCode": 0,
+      "finishedAt": "2026-11-13T08:17:54.535Z",
+      "summary": {
+        "n": 106,
+        "pass": 93,
+        "passTextAsk": 0,
+        "wrongRoute": 0,
+        "missedAsk": 0,
+        "unnecessaryAsk": 13,
+        "errors": 0
+      },
+      "thresholds": {
+        "wrongRoute": 0.02,
+        "missedAsk": 0.03,
+        "unnecessaryAsk": 0.15
+      },
+      "runId": "cc4f5722-efd6-4bfb-bed4-d3d36eb2cc53",
+      "fingerprint": "d2bb1f46eac5e6c2468e5151e3cdc4066f3df079284f123d3cab1b1cc6889d35",
+      "inputStable": true,
+      "gatePassed": true
+    }
+  ],
+  "mode": "isolated-bundled-git-snapshots",
+  "concurrency": 2,
+  "selection": {
+    "provider": "openai-compatible",
+    "modelId": "deepseek-v4.1-flash",
+    "thinkingLevel": "high",
+    "endpointHash": "068dbcaed6ddaab1f97b02decb446d89cd23ef81cbf341f231145c63929fa953",
+    "customHeaders": false,
+    "tcpMs": 1000
+  },
+  "finishedAt": "2026-11-13T08:17:54.543Z"
+}
