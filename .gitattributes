@@ -1,0 +1,7 @@
+# Text is stored and checked out with LF everywhere. This machine's global core.autocrlf is
+# true, so without this rule a file opened and saved by an editor gets every line rewritten
+# and the commit reads as a whole-file change — one doc edit once arrived as 240 insertions
+# against 223 deletions while `git diff -w` showed 17. Vitest snapshots are the worst case,
+# since the runner rewrites them itself: a line-ending-only rewrite looks like a test edit.
+# Binary files are still detected by content (text=auto), so images are untouched.
+* text=auto eol=lf
