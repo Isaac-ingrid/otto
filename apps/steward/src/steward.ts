@@ -3757,6 +3757,17 @@ export class Steward extends Agent<Env> {
       }
       this.ledger.questions.closeOpen(routedThread.threadId, "用户回复了提问");
     }
+    // Threadless ask_user cards have no outbound.questionId: their buttons carry the qid.
+    // Answering via the workspace composer must settle that exact question too, not leave
+    // the decision in Needs You. Never close a different open question by guessing a Thread.
+    if (input.parentId && !routedThread && routedRow) {
+      const quotedCard = this.ledger.outbound.row(routedRow.id);
+      if (quotedCard?.kind === "card") {
+        const card = cardView((JSON.parse(String(quotedCard.payload)) as { card?: unknown }).card);
+        const qid = card.buttons.map((button) => /^ask(?:new)?:([^:]+)/.exec(button.action ?? "")?.[1]).find(Boolean);
+        if (qid && this.ledger.questions.get(qid)?.status === "open") this.ledger.questions.close(qid, "用户回复了提问");
+      }
+    }
     // Content markers (§4.2): user text is escaped so it can never mimic a ⟦…⟧ system input;
     // the routing note is prefixed as clearly-marked system metadata (never the ⟦ form, so
     // the input still reads as user-originated).

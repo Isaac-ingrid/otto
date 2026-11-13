@@ -193,6 +193,22 @@ describe("owner messages", () => {
   });
 });
 
+describe("threadless question answers", () => {
+  it("settles the exact ask_user decision when Answer submits a quoted message", async () => {
+    const { get, post } = await browser();
+    await scriptModel(fauxAssistantMessage([fauxToolCall("ask_user", { question: "Which repo?", options: ["A", "B"] })], { stopReason: "toolUse" }));
+    expect((await post("messages", { id: "threadless-question", text: "Choose a repo" })).status).toBe(202);
+    await waitRunsSettled();
+    const [card] = (await get()).attention;
+    expect(card).toMatchObject({ kind: "question", threadId: null, questionId: null });
+    await scriptModel(fauxAssistantMessage([fauxText("Understood.")]));
+    expect((await post("messages", { id: "threadless-answer", text: "Use A", replyTo: card!.id })).status).toBe(202);
+    await waitRunsSettled();
+    expect((await get()).attention.find((item) => item.id === card!.id)).toBeUndefined();
+    expect((await get()).messages.find((item) => item.id === card!.id)).toMatchObject({ open: false });
+  });
+});
+
 describe("card taps", () => {
   it("answer a threadless question through its durable card and refuse forged or stale choices", async () => {
     const { get, post } = await browser();
