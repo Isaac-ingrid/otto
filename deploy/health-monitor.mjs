@@ -34,6 +34,7 @@ export async function main() {
   const failures = [...new Set(`${check.stdout ?? ''}\n${check.stderr ?? ''}`.split('\n')
     .filter(line => line.startsWith('FAIL: ')).map(line => line.slice(6)))];
   if (check.error || (check.status !== 0 && !failures.length)) failures.push('health checker could not complete');
+  for (const issue of failures) console.error(`health check failed: ${issue}`);
   state = transition(state, failures, Date.now());
   const save = async () => {
     await writeFile(`${file}.tmp`, JSON.stringify(state), { mode: 0o600 });

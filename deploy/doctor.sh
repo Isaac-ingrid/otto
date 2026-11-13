@@ -21,7 +21,9 @@ if [[ -n "$latest" && -f "$latest" ]]; then
   description='latest local backup younger than 36 hours'
   check test "$age" -ge 0 -a "$age" -le 129600
   description='latest local SQLite passes integrity_check'
-  check test "$(sqlite3 -readonly "$latest" 'PRAGMA integrity_check;')" = ok
+  # Completed .backup snapshots are immutable. Avoid SQLite creating WAL/SHM siblings:
+  # the independent monitor intentionally mounts production/backup paths read-only.
+  check test "$(sqlite3 "file:$latest?mode=ro&immutable=1" 'PRAGMA integrity_check;')" = ok
 else
   echo 'FAIL: no local SQLite backup' >&2
   failures=$((failures + 1))
