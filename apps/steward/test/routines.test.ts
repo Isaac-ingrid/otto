@@ -662,9 +662,15 @@ describe("onStart reconciliation (§11: rows ↔ SDK schedules survive crashes)"
     expect((await routineSchedules()).some((s) => s.payload.followupId === "f_stranded")).toBe(false);
 
     await ownerStub().reconcileRoutineSchedules();
-    // Late is better than stranded: the schedule exists again (at the past dueAt → fires now).
-    expect((await routineSchedules()).some((s) => s.payload.followupId === "f_stranded")).toBe(true);
-    const snap = await waitFor(() => ownerStub().debugSnapshot(), (s) => s.followups.some((f) => f.followupId === "f_stranded" && f.status === "fired"), "stranded follow-up fired late", 10_000);
+    // The past-due callback may already have fired and removed its one-shot schedule
+    // before this read (especially on Node). Require a schedule OR evidence it fired,
+    // then require the actual follow-up run below; never accept a stranded row.
+    const scheduled = (await routineSchedules()).some((s) => s.payload.followupId === "f_stranded");
+    const immediate = await ownerStub().debugSnapshot();
+    expect(scheduled || immediate.followups.some((f) => f.followupId === "f_stranded" && f.status === "fired")).toBe(true);
+    const snap = await waitFor(() => ownerStub().debugSnapshot(), (s) =>
+      s.followups.some((f) => f.followupId === "f_stranded" && f.status === "fired") &&
+      s.runs.some((r) => r.operationId === "followup:f_stranded"), "stranded follow-up fired late", 10_000);
     // It fired as a real ⟦followup⟧ wake (the model has no steps → the faux default reply
     // settles it harmlessly; beforeEach resets the script either way).
     expect(snap.followups.find((f) => f.followupId === "f_stranded")!.firedAt).not.toBeNull();
