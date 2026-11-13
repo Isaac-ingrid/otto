@@ -19,12 +19,67 @@ import type { Api, AssistantMessage, Model, TranscriptContext } from "@earendil-
 import { fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
 
 /** The deploy-config shape (`vars.STEWARD_MODEL` in the root wrangler.jsonc). */
+export type StewardThinkingLevel = ModelThinkingLevel | "auto";
+export const COMPATIBLE_THINKING_LEVELS: StewardThinkingLevel[] = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** A gateway model has no catalog entry, so its owner writes down what Pi would have shipped
+ *  as static metadata: the levels this endpoint accepts. Displayed immediately, never probed. */
+export interface ThinkingDeclaration {
+  thinkingLevels: ModelThinkingLevel[];
+  default?: ModelThinkingLevel;
+}
+
+const THINKING_LEVEL_NAMES = COMPATIBLE_THINKING_LEVELS.filter((level): level is ModelThinkingLevel => level !== "auto");
+
+/**
+ * Reads the same shapes a Pi catalog entry carries — `["low","high"]`,
+ * `{"thinkingLevels":[…],"default":"low"}`, or `{"thinkingLevelMap":{"low":"low","max":null}}`
+ * (a null value marks a level the model does not have). Returns undefined for anything else, so
+ * a typo is rejected instead of quietly widening the picker back to every level.
+ */
+export function parseThinkingDeclaration(raw: unknown): ThinkingDeclaration | undefined {
+  const listed = (input: unknown): ModelThinkingLevel[] | undefined => {
+    if (!Array.isArray(input) || input.length === 0 || input.length > THINKING_LEVEL_NAMES.length) return undefined;
+    const levels: ModelThinkingLevel[] = [];
+    for (const entry of input) {
+      if (typeof entry !== "string" || !THINKING_LEVEL_NAMES.includes(entry as ModelThinkingLevel)) return undefined;
+      if (!levels.includes(entry as ModelThinkingLevel)) levels.push(entry as ModelThinkingLevel);
+    }
+    return levels;
+  };
+  const named = (input: unknown): ModelThinkingLevel | undefined =>
+    typeof input === "string" && THINKING_LEVEL_NAMES.includes(input as ModelThinkingLevel) ? input as ModelThinkingLevel : undefined;
+  const levels = Array.isArray(raw)
+    ? listed(raw)
+    : typeof raw === "object" && raw !== null && "thinkingLevels" in raw
+      ? listed((raw as { thinkingLevels: unknown }).thinkingLevels)
+      : typeof raw === "object" && raw !== null && "thinkingLevelMap" in raw && typeof (raw as { thinkingLevelMap: unknown }).thinkingLevelMap === "object"
+        ? listed(Object.entries((raw as { thinkingLevelMap: Record<string, unknown> }).thinkingLevelMap)
+          .filter(([name, value]) => value !== null && THINKING_LEVEL_NAMES.includes(name as ModelThinkingLevel))
+          .map(([name]) => name))
+        : undefined;
+  if (!levels || levels.length === 0) return undefined;
+  const fallback = typeof raw === "object" && raw !== null ? (raw as { default?: unknown }).default : undefined;
+  return { thinkingLevels: THINKING_LEVEL_NAMES.filter((level) => levels.includes(level)), ...(named(fallback) ? { default: fallback as ModelThinkingLevel } : {}) };
+}
+
+/** The stored declaration, as the picker sees it. Undefined when absent or unreadable. */
+export function declaredThinkingLevels(raw: string | null | undefined): ModelThinkingLevel[] | undefined {
+  if (!raw) return undefined;
+  try {
+    return parseThinkingDeclaration(JSON.parse(raw))?.thinkingLevels;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface StewardModelConfig {
   provider: string;
   modelId: string;
   /** Overrides the provider's catalog base URL (self-hosted / proxy endpoints). */
   baseUrl?: string;
-  thinkingLevel?: ModelThinkingLevel;
+  thinkingLevel?: StewardThinkingLevel;
+  headers?: Record<string, string>;
   /** True when the deploy config actually named a provider/model — the sealed sh_model row's
    *  provider only wins when this is false, UNLESS the row itself carries an explicit
    *  modelId (a runtime switch, issue #70), which wins unconditionally (see
@@ -40,7 +95,7 @@ export interface SealedModelSelection {
   modelId: string | null;
   baseUrl: string | null;
   apiKey: string;
-  thinkingLevel?: ModelThinkingLevel;
+  thinkingLevel?: StewardThinkingLevel;
 }
 
 /**
@@ -65,7 +120,7 @@ export interface ProviderCatalogEntry {
   id: string;
   name: string;
   info?: ProviderInfo;
-  models: Array<{ id: string; name: string; baseUrl: string; api: string; thinkingLevels: ModelThinkingLevel[]; defaultThinkingLevel: ModelThinkingLevel }>;
+  models: Array<{ id: string; name: string; baseUrl: string; api: string; thinkingLevels: StewardThinkingLevel[]; defaultThinkingLevel: StewardThinkingLevel }>;
 }
 
 /** Keep legacy Coding Plan IDs stable so existing encrypted keys remain usable. */
@@ -84,6 +139,24 @@ export function stewardProviders(): Provider[] {
       api: { stream: base.stream.bind(base), streamSimple: base.streamSimple.bind(base) },
     }));
   }
+  // A generic OpenAI Chat Completions endpoint must not inherit OpenAI's Responses API
+  // dialect. Reuse a completions adapter under its own provider id and credential slot.
+  const completions = providers.find((provider) => provider.id === "deepseek");
+  if (!completions) throw new Error("Missing catalog provider: deepseek");
+  providers.push(createProvider({
+    id: "openai-compatible", name: "OpenAI-compatible endpoint", baseUrl: "https://example.invalid/v1",
+    auth: {},
+    models: completions.getModels().filter((model) => model.api === "openai-completions").map((model) => ({ ...model, provider: "openai-compatible", baseUrl: "https://example.invalid/v1" })),
+    api: { stream: completions.stream.bind(completions), streamSimple: completions.streamSimple.bind(completions) },
+  }));
+  const anthropic = providers.find((provider) => provider.id === "anthropic");
+  if (!anthropic) throw new Error("Missing catalog provider: anthropic");
+  providers.push(createProvider({
+    id: "anthropic-compatible", name: "Anthropic-compatible endpoint", baseUrl: "https://example.invalid",
+    auth: {},
+    models: anthropic.getModels().filter((model) => model.api === "anthropic-messages").map((model) => ({ ...model, provider: "anthropic-compatible", baseUrl: "https://example.invalid" })),
+    api: { stream: anthropic.stream.bind(anthropic), streamSimple: anthropic.streamSimple.bind(anthropic) },
+  }));
   return providers;
 }
 
@@ -94,18 +167,24 @@ let catalogMemo: ProviderCatalogEntry[] | undefined;
  *  and JSON-friendly (it rides /app/api/settings). */
 export function providerCatalog(): ProviderCatalogEntry[] {
   if (!catalogMemo) {
-    catalogMemo = stewardProviders().filter((provider) => provider.getModels().length > 0).map((provider) => ({
+    catalogMemo = stewardProviders().filter((provider) => provider.getModels().length > 0 || provider.id === "openai-compatible" || provider.id === "anthropic-compatible").map((provider) => ({
       id: provider.id,
       name: provider.name,
       info: providerInfo(provider.id, provider.name),
-      models: provider.getModels().map((model) => ({ id: model.id, name: model.name, baseUrl: model.baseUrl, api: model.api, thinkingLevels: getSupportedThinkingLevels(model), defaultThinkingLevel: clampThinkingLevel(model, "off") })),
+      models: provider.id.endsWith("-compatible") ? [] : provider.getModels().map((model) => ({ id: model.id, name: model.name, baseUrl: model.baseUrl, api: model.api, thinkingLevels: getSupportedThinkingLevels(model), defaultThinkingLevel: clampThinkingLevel(model, "off") })).sort((a, b) => {
+        if (provider.id !== "openai") return 0;
+        const version = (id: string) => /^gpt-(\d+)(?:\.(\d+))?/.exec(id);
+        const av = version(a.id), bv = version(b.id);
+        if (!av || !bv) return Number(Boolean(bv)) - Number(Boolean(av));
+        return Number(bv[1]) - Number(av[1]) || Number(bv[2] ?? 0) - Number(av[2] ?? 0) || b.id.localeCompare(a.id, undefined, { numeric: true });
+      }),
     }));
   }
   return catalogMemo;
 }
 
-export function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
-  return MODEL_THINKING_LEVELS.some((level) => value === level);
+export function isThinkingLevel(value: unknown): value is StewardThinkingLevel {
+  return value === "auto" || MODEL_THINKING_LEVELS.some((level) => value === level);
 }
 
 /**
@@ -123,23 +202,53 @@ export function resolveCatalogModel(config: StewardModelConfig): Model<Api> | un
   if (!base) return undefined;
   const models = base.getModels();
   const known = models.find((model) => model.id === config.modelId);
-  if (known !== undefined || !config.baseUrl) return known;
+  if (!config.provider.endsWith("-compatible") && (known !== undefined || !config.baseUrl)) return known;
+  if (!config.baseUrl) return undefined;
   // The sibling donates the dialect (api, compat, reasoning map, context window): a gateway
   // proxying one vendor's models speaks that vendor's request shape.
-  const sibling = models.find((model) => model.api === "openai-completions") ?? models[0];
+  const sibling = known ?? models.find((model) => model.api === (config.provider === "anthropic-compatible" ? "anthropic-messages" : "openai-completions")) ?? models[0];
   if (sibling === undefined) return undefined;
+  if (config.provider === "openai-compatible") {
+    // A gateway model must not inherit another model's thinking-level map.
+    // Auto omits both reasoning_effort and the DeepSeek thinking=disabled flag.
+    return { ...sibling, id: config.modelId, name: config.modelId, baseUrl: config.baseUrl,
+      reasoning: true, thinkingLevelMap: {
+        off: config.thinkingLevel === "auto" || config.thinkingLevel === undefined ? null : undefined,
+        minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
+      } };
+  }
   return { ...sibling, id: config.modelId, name: config.modelId, baseUrl: config.baseUrl };
 }
 
-export function resolveModelThinking(config: StewardModelConfig): { thinkingLevel: ModelThinkingLevel; thinkingLevels: ModelThinkingLevel[] } {
+export function resolveModelThinking(config: StewardModelConfig): { thinkingLevel: StewardThinkingLevel; thinkingLevels: StewardThinkingLevel[] } {
+  if (config.provider === "openai-compatible" && config.baseUrl) return {
+    thinkingLevel: config.thinkingLevel ?? "auto", thinkingLevels: COMPATIBLE_THINKING_LEVELS,
+  };
   const model = resolveCatalogModel(config);
   return model
-    ? { thinkingLevel: clampThinkingLevel(model, config.thinkingLevel ?? "off"), thinkingLevels: getSupportedThinkingLevels(model) }
+    ? { thinkingLevel: clampThinkingLevel(model, config.thinkingLevel === "auto" ? "off" : config.thinkingLevel ?? "off"), thinkingLevels: getSupportedThinkingLevels(model) }
     : { thinkingLevel: "off", thinkingLevels: ["off"] };
 }
 
-export type ModelSwitchInput = Pick<StewardModelConfig, "provider" | "modelId" | "baseUrl" | "thinkingLevel"> & { apiKey?: string };
-export type ComposerModelInput = Pick<StewardModelConfig, "provider" | "modelId"> & { thinkingLevel: ModelThinkingLevel };
+export type ModelSwitchInput = Pick<StewardModelConfig, "provider" | "modelId" | "baseUrl" | "thinkingLevel" | "headers"> & {
+  apiKey?: string;
+  importedModelIds?: string[];
+  /** The owner's written-down level list for a gateway model, as canonical JSON (models.ts
+   *  parseThinkingDeclaration), or null to clear it. */
+  thinkingJson?: string | null;
+  /** Save, then run the connection test (and the level probes) automatically — the owner asked
+   *  for the endpoint to be checked on save, so no separate button press is needed. */
+  autoTest?: boolean;
+};
+
+/** What a save reports back: the save itself succeeded, plus the automatic check, if any. */
+export interface ModelSaveResult {
+  ok: true;
+  verified?: boolean;
+  testError?: string;
+  acceptedThinkingLevels?: ModelThinkingLevel[];
+}
+export type ComposerModelInput = Pick<StewardModelConfig, "provider" | "modelId"> & { thinkingLevel: StewardThinkingLevel };
 
 /** Parses `vars.STEWARD_MODEL`; anything malformed falls back to the default. */
 export function resolveModelConfig(raw: unknown): StewardModelConfig {
@@ -171,19 +280,19 @@ export function resolveModelConfig(raw: unknown): StewardModelConfig {
  * the Worker. A missing key keeps the provider registered but unconfigured, so model calls
  * fail loudly instead of silently trying `DEEPSEEK_API_KEY`.
  */
-export function providerWithInlineKey(base: Provider, apiKey: string | undefined, baseUrl?: string, extraModels: readonly Model<Api>[] = []): Provider {
+export function providerWithInlineKey(base: Provider, apiKey: string | undefined, baseUrl?: string, extraModels: readonly Model<Api>[] = [], headers?: Record<string, string>): Provider {
   return createProvider({
     id: base.id,
     name: base.name,
     baseUrl: baseUrl ?? base.baseUrl,
-    headers: base.headers,
+    headers: { ...base.headers, ...headers },
     auth: {
       apiKey: {
         name: `${base.name} API key`,
-        resolve: async () => (apiKey ? { auth: { apiKey, ...(baseUrl ? { baseUrl } : {}) }, source: "deploy config" } : undefined),
+        resolve: async () => (apiKey ? { auth: { apiKey, ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}) }, source: "deploy config" } : undefined),
       },
     },
-    models: [...base.getModels(), ...extraModels],
+    models: [...base.getModels().filter((entry) => !extraModels.some((extra) => extra.id === entry.id)), ...extraModels],
     api: {
       stream: base.stream.bind(base),
       streamSimple: base.streamSimple.bind(base),
@@ -197,8 +306,8 @@ export function providerWithInlineKey(base: Provider, apiKey: string | undefined
  *  configured model registered too when the catalog does not ship it (resolveCatalogModel). */
 export function providerForConfig(base: Provider, config: StewardModelConfig, apiKey: string | undefined): Provider {
   const model = resolveCatalogModel(config);
-  const extra = model !== undefined && !base.getModels().some((entry) => entry.id === model.id) ? [model] : [];
-  return providerWithInlineKey(base, apiKey, config.baseUrl, extra);
+  const extra = model !== undefined && (config.provider.endsWith("-compatible") || !base.getModels().some((entry) => entry.id === model.id)) ? [model] : [];
+  return providerWithInlineKey(base, apiKey, config.baseUrl, extra, config.headers);
 }
 
 /** One captured model request, as the test scaffolding sees it (after beforeRequest). */

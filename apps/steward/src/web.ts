@@ -270,6 +270,7 @@ export interface WebDeps {
     | "saveModel"
     | "selectModel"
     | "testModel"
+    | "importModels"
     | "pairing"
     | "revoke"
     | "addDirectory"

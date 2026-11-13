@@ -606,7 +606,10 @@ a.button { text-decoration: none; }
 .passkey-input-row { display: flex; gap: 10px; }
 .passkey-input-row input { flex: 1; }
 .passkey-form label, .provider-form label { font-size: 12px; font-weight: 500; }
-.passkey-form input, .provider-form input, .provider-form select { padding: 10px 12px; }
+.passkey-form input, .provider-form input, .provider-form select, .provider-form textarea { padding: 10px 12px; }
+.provider-form textarea { width: 100%; resize: vertical; font: inherit; }
+.provider-form .dialog-check { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 400; line-height: 1.6; margin: 2px 0 14px; }
+.provider-form .dialog-check input { width: auto; padding: 0; margin: 0; }
 .settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); margin-top: 26px; padding-top: 18px; }
 .settings-footer .dialog-hint { margin: 0; }
 .key-input-row { display: flex; gap: 8px; }

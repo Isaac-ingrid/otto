@@ -1,9 +1,10 @@
 import type { FetchFunction } from "@earendil-works/pi-ai";
 import { buildStewardModels, resolveModelThinking, type StewardModelConfig } from "./models.ts";
 
+export type ConnectionTestError = "missing_key" | "unknown_model" | "authentication" | "quota" | "endpoint" | "timeout" | "provider_error" | "busy";
 export type ConnectionTestResult =
   | { ok: true }
-  | { ok: false; error: "missing_key" | "unknown_model" | "authentication" | "quota" | "endpoint" | "timeout" | "provider_error" | "busy" };
+  | { ok: false; error: ConnectionTestError };
 
 /** Use the same provider adapter as a conversation, without installing it on the steward. */
 export async function testModelConnection(
@@ -30,7 +31,7 @@ export async function testModelConnection(
       const reply = await models.completeSimple(model, {
         messages: [{ role: "user", content: "Reply with OK.", timestamp: Date.now() }],
       }, {
-        ...(thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
+        ...(thinkingLevel === "off" || thinkingLevel === "auto" ? {} : { reasoning: thinkingLevel }),
         maxTokens: 32, maxRetries: 0, timeoutMs: 20_000, signal: controller.signal,
         fetch: async (input, init) => {
           const response = await fetcher(input, init);

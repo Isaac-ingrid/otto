@@ -26,8 +26,55 @@ describe("provider endpoint selection", () => {
 
 import { testModelConnection } from "../src/llm/connection-test.ts";
 import { providerCatalog, resolveCatalogModel, resolveModelThinking } from "../src/llm/models.ts";
+import { probeAcceptedThinkingLevels } from "../src/llm/thinking-probe.ts";
 
 const config = { provider: "deepseek", modelId: "deepseek-flash", explicit: true };
+
+describe("gateway reasoning levels", () => {
+  const gateway = { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", baseUrl: "https://ai.ctaigw.cn/v1", explicit: true };
+
+  it("does not inherit deepseek-flash tiers or invent deepseek-v4-pro", () => {
+    expect(resolveModelThinking(gateway).thinkingLevel).toBe("auto");
+    const model = resolveCatalogModel(gateway)!;
+    expect(model.id).toBe("deepseek-v4.1-flash");
+    expect(model.thinkingLevelMap?.minimal).toBe("minimal");
+    expect(model.thinkingLevelMap?.medium).toBe("medium");
+    expect(providerCatalog().find((provider) => provider.id === "openai-compatible")?.models).toEqual([]);
+  });
+
+  it("probes only the configured gateway model and records accepted tiers (not silent support)", async () => {
+    const ids: string[] = [];
+    const levels = await probeAcceptedThinkingLevels(gateway, "test-only", async (input) => {
+      ids.push(input.modelId);
+      return input.thinkingLevel === "minimal" || input.thinkingLevel === "medium" ? { ok: true } : { ok: false, error: "provider_error" };
+    });
+    expect(levels).toEqual(["minimal", "medium"]);
+    expect(ids).toEqual(Array(7).fill("deepseek-v4.1-flash"));
+  });
+
+  it("sends the exact gateway model ID and selected reasoning effort during a tier probe", async () => {
+    let body = "";
+    await testModelConnection({ ...gateway, thinkingLevel: "medium" }, "test-only", async (_input, init) => {
+      body = String(init?.body);
+      return new Response(JSON.stringify({ error: { message: "rejected" } }), { status: 400 });
+    });
+    const sent = JSON.parse(body) as Record<string, unknown>;
+    expect(sent.model).toBe("deepseek-v4.1-flash");
+    expect(sent.reasoning_effort).toBe("medium");
+  });
+
+  it("auto omits both reasoning_effort and the thinking=disabled flag", async () => {
+    let body = "";
+    await testModelConnection(gateway, "test-only", async (_input, init) => {
+      body = String(init?.body);
+      return new Response(JSON.stringify({ error: { message: "rejected" } }), { status: 401 });
+    });
+    const sent = JSON.parse(body) as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("reasoning_effort");
+    expect(sent).not.toHaveProperty("thinking");
+    expect(sent.model).toBe("deepseek-v4.1-flash");
+  });
+});
 
 describe("connection probe", () => {
   it("sends a minimal real completion through the selected adapter and endpoint", async () => {
@@ -88,6 +135,43 @@ describe("connection probe", () => {
     const noFetch = async () => { throw new Error("must not fetch"); };
     expect(await testModelConnection(config, undefined, noFetch)).toEqual({ ok: false, error: "missing_key" });
     expect(await testModelConnection({ ...config, modelId: "missing" }, "test-only", noFetch)).toEqual({ ok: false, error: "unknown_model" });
+  });
+
+  it("uses the Anthropic Messages path for the Anthropic-compatible protocol", async () => {
+    let url = "";
+    await testModelConnection(
+      { provider: "anthropic-compatible", modelId: "custom-claude", baseUrl: "https://gateway.example", explicit: true },
+      "test-only", async (input) => {
+        url = String(input);
+        return new Response(JSON.stringify({ error: { message: "rejected" } }), { status: 401 });
+      },
+    );
+    expect(new URL(url).pathname).toBe("/v1/messages");
+  });
+
+  it("passes custom provider headers to the completion request", async () => {
+    let header = "";
+    await testModelConnection(
+      { provider: "openai-compatible", modelId: "gateway-model", baseUrl: "https://gateway.example/v1", headers: { "x-client-id": "otto-test" }, explicit: true },
+      "test-only", async (_input, init) => {
+        header = new Headers(init?.headers).get("x-client-id") ?? "";
+        return new Response(JSON.stringify({ error: { message: "rejected" } }), { status: 401 });
+      },
+    );
+    expect(header).toBe("otto-test");
+  });
+
+  it("uses Chat Completions for a generic OpenAI-compatible endpoint", async () => {
+    let url = "";
+    const result = await testModelConnection(
+      { provider: "openai-compatible", modelId: "gateway-model", baseUrl: "https://ai.ctaigw.cn/v1", explicit: true },
+      "test-only", async (input) => {
+        url = String(input);
+        return new Response('data: {"id":"t","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}\n\ndata: {"id":"t","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } });
+      },
+    );
+    expect(result).toEqual({ ok: true });
+    expect(url).toBe("https://ai.ctaigw.cn/v1/chat/completions");
   });
 
   it("addresses a gateway's own model name once the selection also names its endpoint", async () => {

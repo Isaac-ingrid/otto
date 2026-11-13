@@ -81,9 +81,13 @@ import { buildSituationBrief } from "./llm/brief.ts";
 import { buildStewardExtension, type StewardExtensionContext } from "./llm/extension.ts";
 import { searchBrave } from "./llm/web-search.ts";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { testModelConnection } from "./llm/connection-test.ts";
+import { testModelConnection, type ConnectionTestError } from "./llm/connection-test.ts";
+import { importProviderModels } from "./llm/model-import.ts";
+import { probeAcceptedThinkingLevels } from "./llm/thinking-probe.ts";
 import {
   buildStewardModels,
+  COMPATIBLE_THINKING_LEVELS,
+  declaredThinkingLevels,
   installModel,
   mergeModelSelection,
   providerCatalog,
@@ -92,6 +96,7 @@ import {
   resolveModelThinking,
   resolveCatalogModel,
   type ComposerModelInput,
+  type StewardThinkingLevel,
   type FauxRequestRecord,
   type StewardModels,
 } from "./llm/models.ts";
@@ -556,6 +561,14 @@ export class Steward extends Agent<Env> {
     const sealed = await this.modelConfig();
     const vars = this.modelVarsConfig;
     const config = mergeModelSelection(sealed, vars);
+    config.headers = await this.headersFor(config.provider, config.modelId);
+    if (config.provider === "openai-compatible" && config.baseUrl) {
+      // Only something actually known may override the stored level: a measured probe, or the
+      // owner's own declaration. With neither, the level they picked from the (unverified) list
+      // is what goes on the wire — a silent rewrite to "auto" would look like a failed switch.
+      const known = await this.thinkingLevelsFor(config.provider, config.modelId, config.baseUrl);
+      if (config.thinkingLevel !== "auto" && known && !known.includes(config.thinkingLevel ?? "off")) config.thinkingLevel = "auto";
+    }
     const apiKey = sealed && sealed.provider === config.provider ? sealed.apiKey : undefined;
     installModel(this.llmModels.models, config, apiKey);
     // Review #10: a provider/model combination the catalog does not know (e.g. a sealed
@@ -572,7 +585,7 @@ export class Steward extends Agent<Env> {
     const signature = JSON.stringify([config.provider, config.modelId, config.baseUrl, Boolean(apiKey), thinkingLevel]);
     if (this.appliedRootModel === signature) return;
     const root = await (await this.piHarness.pi()).root(BACKGROUND_CONTEXT);
-    await root.configure({ model: { provider: config.provider, modelId: config.modelId }, thinkingLevel }, BACKGROUND_CONTEXT);
+    await root.configure({ model: { provider: config.provider, modelId: config.modelId }, thinkingLevel: thinkingLevel === "auto" ? "off" : thinkingLevel }, BACKGROUND_CONTEXT);
     this.appliedRootModel = signature;
   }
 
@@ -810,18 +823,42 @@ export class Steward extends Agent<Env> {
           push: this.push.settings(),
           providers: providerCatalog(),
           keyedProviders: await this.keyedProviders(),
+          savedModels: this.savedModels().map((entry) => ({ ...entry, thinkingLevels: declaredThinkingLevels(entry.thinkingJson) ?? null })),
+          verifiedModels: await this.verifiedModels(),
+          thinkingProbes: await this.thinkingProbes(),
         }),
         testModel: async (input) => {
           if (this.testingModel) return { ok: false, error: "busy" };
           this.testingModel = true;
           try {
-            const apiKey = input.apiKey ?? await this.sealedKeyFor(input.provider) ?? undefined;
-            return await testModelConnection({ ...input, explicit: true }, apiKey);
+            return await this.verifyAndProbe(input, { force: true });
           } finally {
             this.testingModel = false;
           }
         },
-        saveModel: async (input) => { await this.setModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel); },
+        importModels: async (input) => importProviderModels({ ...input, headers: input.headers ?? await this.headersFor(input.provider, input.modelId) }, input.apiKey || await this.sealedKeyFor(input.provider) || undefined),
+        saveModel: async (input) => {
+          await this.setModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel, input.headers, input.thinkingJson);
+          for (const id of input.importedModelIds ?? []) this.sql`
+            INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, updatedAt)
+            VALUES (${input.provider}, ${id}, ${input.baseUrl ?? null}, ${input.headers ? await sealSecret((await this.serverKeys())[0]!, JSON.stringify(input.headers)) : null}, ${Date.now()})
+            ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
+              headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc), updatedAt = excluded.updatedAt
+          `;
+          // A save is where an owner expects the endpoint to be checked (there is no separate
+          // "verify" chore). Cached results are reused, so re-saving without changing the key
+          // costs nothing; the manual test button forces a fresh probe.
+          if (!input.autoTest || this.testingModel) return { ok: true };
+          this.testingModel = true;
+          try {
+            const probe = await this.verifyAndProbe(input, { force: false });
+            return probe.ok
+              ? { ok: true, verified: true, ...(probe.acceptedThinkingLevels ? { acceptedThinkingLevels: probe.acceptedThinkingLevels } : {}) }
+              : { ok: true, verified: false, testError: probe.error };
+          } finally {
+            this.testingModel = false;
+          }
+        },
         selectModel: (input) => this.selectComposerModel(input),
         pairing: (id: string) => this.webPairing(id),
         revoke: (id: string) => { this.logChannel("web_machine_revoked", id); void this.revoke(id); },
@@ -3277,7 +3314,7 @@ export class Steward extends Agent<Env> {
    * MODEL_KEY seed path, and the pre-#70 provider-only form) keeps the legacy behavior —
    * vars still supply modelId/baseUrl.
    */
-  async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: ModelThinkingLevel): Promise<void> {
+  async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null): Promise<void> {
     if (!provider.trim()) throw new Error("provider is required");
     const providerId = provider.trim();
     const [primary] = await this.serverKeys();
@@ -3296,7 +3333,7 @@ export class Steward extends Agent<Env> {
     }
     const modelIdValue = modelId?.trim() || null;
     const baseUrlValue = baseUrl?.trim() || null;
-    const previous = this.sql<{ provider: string; modelId: string | null; thinkingLevel: ModelThinkingLevel | null }>`SELECT provider, modelId, thinkingLevel FROM sh_model WHERE id = 0`[0];
+    const previous = this.sql<{ provider: string; modelId: string | null; thinkingLevel: StewardThinkingLevel | null }>`SELECT provider, modelId, thinkingLevel FROM sh_model WHERE id = 0`[0];
     const thinkingValue = thinkingLevel ?? (previous?.provider === providerId && previous.modelId === modelIdValue ? previous.thinkingLevel : null);
     this.sql`
       INSERT INTO sh_model (id, provider, apiKeyEnc, modelId, baseUrl, thinkingLevel, updatedAt)
@@ -3309,6 +3346,14 @@ export class Steward extends Agent<Env> {
     // the next submit) — resetting the memo is enough; the models collection handed to pi at
     // open stays the same object and is re-keyed in place. The faux provider's scripted state
     // is per-isolate and never rebuilt.
+    if (modelIdValue) this.sql`
+      INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, thinkingJson, updatedAt)
+      VALUES (${providerId}, ${modelIdValue}, ${baseUrlValue}, ${headers !== undefined ? await sealSecret(primary!, JSON.stringify(headers)) : null}, ${thinkingJson ?? null}, ${Date.now()})
+      ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
+        headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc),
+        thinkingJson = CASE WHEN ${thinkingJson === undefined ? 0 : 1} THEN ${thinkingJson ?? null} ELSE sh_saved_model.thinkingJson END,
+        updatedAt = excluded.updatedAt
+    `;
     this.appliedRootModel = undefined;
     const frame = JSON.stringify({ t: "model_changed" });
     for (const connection of this.getConnections(WORKSPACE_TAG)) if (this.webConnectionAlive(connection)) connection.send(frame);
@@ -3325,10 +3370,13 @@ export class Steward extends Agent<Env> {
     // into sh_model, a self-hosted deployment writes it into vars.STEWARD_MODEL. Whatever the
     // deployment is *currently* addressing is the thing an unknown id may be resolved against.
     const current = mergeModelSelection(await this.modelConfig(), resolveModelConfig(this.env.STEWARD_MODEL));
-    const baseUrl = current.provider === input.provider ? current.baseUrl : undefined;
+    const saved = this.savedModels().find((entry) => entry.provider === input.provider && entry.modelId === input.modelId);
+    const baseUrl = saved?.baseUrl ?? (current.provider === input.provider && current.modelId === input.modelId ? current.baseUrl : undefined);
     const model = resolveCatalogModel({ provider: input.provider, modelId: input.modelId, baseUrl, explicit: true });
     if (!model || !(await this.sealedKeyFor(input.provider))) throw new WorkspaceError("model_not_available");
-    if (!getSupportedThinkingLevels(model).includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
+    const accepted = await this.thinkingLevelsFor(input.provider, input.modelId, baseUrl);
+    if (input.provider === "openai-compatible" && input.thinkingLevel !== "auto" && accepted && !accepted.includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
+    if (input.provider !== "openai-compatible" && !getSupportedThinkingLevels(model).includes(input.thinkingLevel as ModelThinkingLevel)) throw new WorkspaceError("thinking_not_supported");
     if (await this.piHarness.session().busy()) throw new WorkspaceError("model_busy", 409);
     // The endpoint rides along: setModelConfig writes what it is given, so passing undefined
     // here would drop a gateway deployment's baseUrl and re-point it at the vendor's own API
@@ -3336,6 +3384,119 @@ export class Steward extends Agent<Env> {
     await this.setModelConfig(input.provider, undefined, input.modelId, baseUrl, input.thinkingLevel);
     await this.ensureRootModel();
     return this.llmSelection();
+  }
+
+  private async headersFor(provider: string, modelId: string): Promise<Record<string, string> | undefined> {
+    const row = this.sql<{ headersEnc: string | null }>`SELECT headersEnc FROM sh_saved_model WHERE provider = ${provider} AND modelId = ${modelId}`[0];
+    if (!row?.headersEnc) return undefined;
+    const opened = await openSecret(await this.serverKeys(), row.headersEnc);
+    return opened ? JSON.parse(opened.text) as Record<string, string> : undefined;
+  }
+
+  private async modelCredentialHash(apiKey: string, headers?: Record<string, string>): Promise<string> {
+    const canonical = JSON.stringify([apiKey, Object.entries(headers ?? {}).sort(([a], [b]) => a.localeCompare(b))]);
+    return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical))), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  private async verifiedModels(): Promise<{ provider: string; modelId: string }[]> {
+    const rows = this.sql<{ provider: string; modelId: string; baseUrl: string; credentialHash: string }>`
+      SELECT provider, modelId, baseUrl, credentialHash FROM sh_verified_model
+    `;
+    const saved = this.savedModels();
+    const keys = new Map<string, string | null>();
+    const verified: { provider: string; modelId: string }[] = [];
+    for (const row of rows) {
+      if (!saved.some((entry) => entry.provider === row.provider && entry.modelId === row.modelId && (entry.baseUrl ?? "") === row.baseUrl)) continue;
+      if (!keys.has(row.provider)) keys.set(row.provider, await this.sealedKeyFor(row.provider));
+      const key = keys.get(row.provider);
+      if (key && row.credentialHash === await this.modelCredentialHash(key, await this.headersFor(row.provider, row.modelId))) verified.push({ provider: row.provider, modelId: row.modelId });
+    }
+    return verified;
+  }
+
+  private async acceptedThinkingLevels(provider: string, modelId: string, baseUrl?: string): Promise<ModelThinkingLevel[] | null> {
+    const row = this.sql<{ credentialHash: string; levelsJson: string }>`
+      SELECT credentialHash, levelsJson FROM sh_model_thinking_probe
+      WHERE provider = ${provider} AND modelId = ${modelId} AND baseUrl = ${baseUrl ?? ""}
+    `[0];
+    if (!row) return null;
+    const key = await this.sealedKeyFor(provider);
+    if (!key || row.credentialHash !== await this.modelCredentialHash(key, await this.headersFor(provider, modelId))) return null;
+    try { return JSON.parse(row.levelsJson) as ModelThinkingLevel[]; } catch { return null; }
+  }
+
+  /**
+   * The levels the picker may offer, in the order the owner last described them: a measured
+   * probe result wins over the owner's declaration, which wins over "not described yet" — the
+   * picker then shows every level, marked unverified, instead of a greyed-out single option.
+   */
+  private async thinkingLevelsFor(provider: string, modelId: string, baseUrl?: string): Promise<ModelThinkingLevel[] | null> {
+    return await this.acceptedThinkingLevels(provider, modelId, baseUrl)
+      ?? declaredThinkingLevels(this.savedModels().find((entry) => entry.provider === provider && entry.modelId === modelId)?.thinkingJson)
+      ?? null;
+  }
+
+  /**
+   * One connection test plus (for a compatible gateway) the level probes, recording both in
+   * sh_verified_model / sh_model_thinking_probe. A successful probe proves the endpoint
+   * *accepted* a level, not that it honored reasoning. `force` is the manual test button;
+   * a save reuses a result already measured for the same key+endpoint so nothing is spent twice.
+   */
+  private async verifyAndProbe(
+    input: { provider: string; modelId: string; baseUrl?: string; apiKey?: string; headers?: Record<string, string>; thinkingLevel?: StewardThinkingLevel },
+    options: { force: boolean },
+  ): Promise<{ ok: true; acceptedThinkingLevels?: ModelThinkingLevel[]; cached?: boolean } | { ok: false; error: ConnectionTestError }> {
+    const config = { provider: input.provider, modelId: input.modelId, explicit: true, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) };
+    const apiKey = input.apiKey ?? await this.sealedKeyFor(input.provider) ?? undefined;
+    const headers = input.headers ?? await this.headersFor(input.provider, input.modelId);
+    const hash = apiKey ? await this.modelCredentialHash(apiKey, headers) : undefined;
+    const probesLevels = input.provider === "openai-compatible" && Boolean(input.baseUrl);
+    if (!options.force && probesLevels && hash) {
+      const row = this.sql<{ levelsJson: string }>`SELECT levelsJson FROM sh_model_thinking_probe
+        WHERE provider = ${input.provider} AND modelId = ${input.modelId} AND baseUrl = ${input.baseUrl ?? ""} AND credentialHash = ${hash}`[0];
+      if (row) {
+        try { return { ok: true, acceptedThinkingLevels: JSON.parse(row.levelsJson) as ModelThinkingLevel[], cached: true }; } catch { /* re-probe an unreadable row */ }
+      }
+    }
+    // A gateway's "auto" sends no reasoning field at all, so the connection test stays neutral.
+    const result = await testModelConnection({ ...config, ...(headers ? { headers } : {}), ...(probesLevels ? { thinkingLevel: "auto" as const } : {}) }, apiKey);
+    if (!result.ok) return { ok: false, error: result.error };
+    if (apiKey && hash) {
+      this.sql`
+        INSERT INTO sh_verified_model (provider, modelId, baseUrl, credentialHash, verifiedAt)
+        VALUES (${input.provider}, ${input.modelId}, ${input.baseUrl ?? ""}, ${hash}, ${Date.now()})
+        ON CONFLICT(provider, modelId, baseUrl) DO UPDATE SET credentialHash = excluded.credentialHash, verifiedAt = excluded.verifiedAt
+      `;
+      if (probesLevels) {
+        // Seven bounded, billable completions — one per level — only ever after a test the
+        // owner asked for (a save with auto-test, or the test button).
+        const accepted = await probeAcceptedThinkingLevels({ ...config, ...(headers ? { headers } : {}) }, apiKey);
+        this.sql`
+          INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt)
+          VALUES (${input.provider}, ${input.modelId}, ${input.baseUrl ?? ""}, ${hash}, ${JSON.stringify(accepted)}, ${Date.now()})
+          ON CONFLICT(provider, modelId, baseUrl) DO UPDATE SET credentialHash = excluded.credentialHash,
+            levelsJson = excluded.levelsJson, probedAt = excluded.probedAt
+        `;
+        return { ok: true, acceptedThinkingLevels: accepted };
+      }
+    }
+    return { ok: true };
+  }
+
+  private async thinkingProbes(): Promise<{ provider: string; modelId: string; acceptedLevels: ModelThinkingLevel[] }[]> {
+    const saved = this.savedModels();
+    const result: { provider: string; modelId: string; acceptedLevels: ModelThinkingLevel[] }[] = [];
+    for (const entry of saved.filter((item) => item.provider === "openai-compatible")) {
+      const acceptedLevels = await this.acceptedThinkingLevels(entry.provider, entry.modelId, entry.baseUrl ?? undefined);
+      if (acceptedLevels) result.push({ provider: entry.provider, modelId: entry.modelId, acceptedLevels });
+    }
+    return result;
+  }
+
+  private savedModels(): { provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null }[] {
+    return this.sql<{ provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null }>`
+      SELECT provider, modelId, baseUrl, thinkingJson FROM sh_saved_model ORDER BY updatedAt DESC
+    `;
   }
 
   private async sealedKeyFor(provider: string): Promise<string | null> {
@@ -3357,7 +3518,7 @@ export class Steward extends Agent<Env> {
     return opened.text;
   }
 
-  async modelConfig(): Promise<{ provider: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: ModelThinkingLevel } | null> {
+  async modelConfig(): Promise<{ provider: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: StewardThinkingLevel } | null> {
     // One-click-deploy glue (issue #25, spec §12.1 step 1): MODEL_KEY — the secret the
     // Deploy-to-Cloudflare form collects — seeds the sealed config on first read, so the key
     // never lives anywhere outside the user's own account. Seeding fills an empty deployment
@@ -3370,7 +3531,7 @@ export class Steward extends Agent<Env> {
     ) {
       await this.setModelConfig(Steward.DEFAULT_MODEL_PROVIDER, this.env.MODEL_KEY.trim());
     }
-    const row = this.sql<{ provider: string; modelId: string | null; baseUrl: string | null; thinkingLevel: ModelThinkingLevel | null }>`
+    const row = this.sql<{ provider: string; modelId: string | null; baseUrl: string | null; thinkingLevel: StewardThinkingLevel | null }>`
       SELECT provider, modelId, baseUrl, thinkingLevel FROM sh_model WHERE id = 0
     `[0];
     if (!row) return null;
@@ -3402,17 +3563,25 @@ export class Steward extends Agent<Env> {
      *  catalog does not ship counts as known when the selection also names its endpoint
      *  (resolveCatalogModel). */
     modelKnown: boolean;
-    thinkingLevel: ModelThinkingLevel;
-    thinkingLevels: ModelThinkingLevel[];
+    thinkingLevel: StewardThinkingLevel;
+    thinkingLevels: StewardThinkingLevel[];
   }> {
     const sealed = await this.modelConfig();
     // `varsRaw: null` models an unset deploy config; `undefined` (the production call) reads env.
     const vars = resolveModelConfig(varsRaw === undefined ? this.env.STEWARD_MODEL : varsRaw);
     const config = mergeModelSelection(sealed, vars);
+    const accepted = await this.thinkingLevelsFor(config.provider, config.modelId, config.baseUrl);
+    if (config.thinkingLevel !== "auto" && accepted && !accepted.includes(config.thinkingLevel ?? "off")) config.thinkingLevel = "auto";
+    const levels = config.provider === "openai-compatible" && config.baseUrl
+      ? await this.thinkingLevelsFor(config.provider, config.modelId, config.baseUrl)
+      : null;
     return {
       provider: config.provider,
       modelId: config.modelId,
       ...resolveModelThinking(config),
+      ...(config.provider === "openai-compatible" && config.baseUrl ? {
+        thinkingLevels: (levels ? ["auto", ...levels] : COMPATIBLE_THINKING_LEVELS) as StewardThinkingLevel[],
+      } : {}),
       baseUrl: config.baseUrl ?? null,
       explicitVars: vars.explicit,
       sealedProvider: sealed?.provider ?? null,

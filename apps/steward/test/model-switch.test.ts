@@ -20,6 +20,9 @@ async function clearModelRow(): Promise<void> {
   await runInDurableObject(ownerStub(), (instance: Steward) => {
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_model`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_provider_key`;
+    (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_saved_model`;
+    (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_verified_model`;
+    (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_model_thinking_probe`;
   });
 }
 
@@ -170,6 +173,116 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     await post("settings/model", { provider: "openai", modelId: "gpt-x", apiKey: "sk-openai-web", baseUrl: "https://proxy.example/v1" });
     const after = (await (await settings()).json()) as { model: { baseUrl: string | null } };
     expect(after.model.baseUrl).toBe("https://proxy.example/v1");
+  });
+
+  it("shows only accepted tiers for the exact saved gateway and invalidates a rotated key", async () => {
+    const { post, settings } = await browser();
+    await post("settings/model", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", apiKey: "key-a", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(["key-a", []])))), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    await runInDurableObject(ownerStub(), (instance: Steward) => {
+      (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt) VALUES ('openai-compatible', 'deepseek-v4.1-flash', 'https://gateway.example/v1', ${digest}, '["minimal","medium"]', 1)`;
+    });
+    const body = (await (await settings()).json()) as { thinkingProbes: { acceptedLevels: string[] }[]; model: { thinkingLevels: string[] } };
+    expect(body.thinkingProbes[0]?.acceptedLevels).toEqual(["minimal", "medium"]);
+    expect(body.model.thinkingLevels).toEqual(["auto", "minimal", "medium"]);
+    expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", thinkingLevel: "medium" })).status).toBe(200);
+    expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", thinkingLevel: "max" })).status).toBe(400);
+    await post("settings/model", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", apiKey: "key-b", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
+    const rotated = (await (await settings()).json()) as { thinkingProbes: unknown[]; model: { thinkingLevels: string[] } };
+    expect(rotated.thinkingProbes).toEqual([]);
+    // Nothing is declared or measured for the rotated key any more, so the picker stops
+    // pretending to know: it lists every level (unverified) instead of a dead "auto" stub.
+    expect(rotated.model.thinkingLevels).toEqual(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("stores an owner-written level list and narrows the picker to it, immediately", async () => {
+    const { post, settings } = await browser();
+    const declared = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-b", apiKey: "key-b", baseUrl: "https://gateway.example/v1", thinkingJson: JSON.stringify(["minimal", "low", "medium", "high"]), thinkingLevel: "max" });
+    expect(declared.status).toBe(200);
+    const body = (await (await settings()).json()) as { savedModels: { modelId: string; thinkingJson: string; thinkingLevels: string[] }[]; model: { thinkingLevel: string; thinkingLevels: string[] } };
+    expect(body.savedModels.find((entry) => entry.modelId === "gateway-b")).toMatchObject({ thinkingLevels: ["minimal", "low", "medium", "high"] });
+    // A level the owner's own list does not have is dropped back to auto rather than sent.
+    expect(body.model.thinkingLevels).toEqual(["auto", "minimal", "low", "medium", "high"]);
+    expect(body.model.thinkingLevel).toBe("auto");
+    expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "gateway-b", thinkingLevel: "medium" })).status).toBe(200);
+    expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "gateway-b", thinkingLevel: "xhigh" })).status).toBe(400);
+    const cleared = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-b", baseUrl: "https://gateway.example/v1", thinkingJson: "", thinkingLevel: "medium" });
+    expect(cleared.status).toBe(200);
+    const after = (await (await settings()).json()) as { model: { thinkingLevels: string[] } };
+    expect(after.model.thinkingLevels).toEqual(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("rejects a declaration naming a level that does not exist", async () => {
+    const { post } = await browser();
+    const res = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-c", apiKey: "key-c", baseUrl: "https://gateway.example/v1", thinkingJson: JSON.stringify(["medium", "galaxy"]), thinkingLevel: "auto" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "thinking_levels_invalid" });
+  });
+
+  it("a save with auto-test reuses a probe already measured for the same key", async () => {
+    const { post } = await browser();
+    await post("settings/model", { provider: "openai-compatible", modelId: "gateway-d", apiKey: "key-d", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(["key-d", []])))), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    await runInDurableObject(ownerStub(), (instance: Steward) => {
+      (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt) VALUES ('openai-compatible', 'gateway-d', 'https://gateway.example/v1', ${digest}, '["low","high"]', 1)`;
+    });
+    // The endpoint is a made-up host: reaching the network here would fail the test, so a 200
+    // with the cached levels proves the save never spent a request.
+    const res = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-d", apiKey: "key-d", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto", autoTest: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, verified: true, acceptedThinkingLevels: ["low", "high"] });
+  });
+
+  it("keeps the saved level until the endpoint is declared or measured", async () => {
+    await ownerStub().setModelConfig("openai-compatible", "test-only", "deepseek-v4.1-flash", "https://gateway.example/v1", "max");
+    const selection = await ownerStub().llmSelection();
+    expect(selection.thinkingLevel).toBe("max");
+    expect(selection.thinkingLevels).toEqual(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(selection.modelId).toBe("deepseek-v4.1-flash");
+  });
+
+  it("lists only verified saved models and invalidates verification when the key changes", async () => {
+    const { post, settings } = await browser();
+    await post("settings/model", { provider: "openai-compatible", modelId: "gateway-a", apiKey: "key-a", baseUrl: "https://gateway.example/v1" });
+    const before = (await (await settings()).json()) as { verifiedModels: unknown[] };
+    expect(before.verifiedModels).toEqual([]);
+    const canonical = JSON.stringify(["key-a", []]);
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical))), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    await runInDurableObject(ownerStub(), (instance: Steward) => {
+      (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_verified_model (provider, modelId, baseUrl, credentialHash, verifiedAt) VALUES ('openai-compatible', 'gateway-a', 'https://gateway.example/v1', ${digest}, 1)`;
+    });
+    const ready = (await (await settings()).json()) as { verifiedModels: unknown[] };
+    expect(ready.verifiedModels).toEqual([{ provider: "openai-compatible", modelId: "gateway-a" }]);
+    await post("settings/model", { provider: "openai-compatible", modelId: "gateway-a", apiKey: "key-b", baseUrl: "https://gateway.example/v1" });
+    const rotated = (await (await settings()).json()) as { verifiedModels: unknown[] };
+    expect(rotated.verifiedModels).toEqual([]);
+  });
+
+  it("persists imported model identifiers for later switching", async () => {
+    const { post, settings } = await browser();
+    const saved = await post("settings/model", {
+      provider: "openai-compatible", modelId: "gateway-a", apiKey: "sk-test", baseUrl: "https://gateway.example/v1",
+      importedModelIds: ["gateway-a", "gateway-b"],
+    });
+    expect(saved.status).toBe(200);
+    const list = (await (await settings()).json()) as { savedModels: { modelId: string }[] };
+    expect(list.savedModels.map((entry) => entry.modelId)).toEqual(expect.arrayContaining(["gateway-a", "gateway-b"]));
+    expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "gateway-b", thinkingLevel: "auto" })).status).toBe(200);
+  });
+
+  it("keeps multiple saved gateway models and switches back to each endpoint", async () => {
+    const { post, settings } = await browser();
+    await post("settings/model", { provider: "deepseek", modelId: "gateway-a", apiKey: "sk-gateway", baseUrl: "https://a.example/v1" });
+    await post("settings/model", { provider: "deepseek", modelId: "gateway-b", baseUrl: "https://b.example/v1" });
+    const listed = (await (await settings()).json()) as { savedModels: { modelId: string; baseUrl: string | null }[] };
+    expect(listed.savedModels).toEqual(expect.arrayContaining([
+      expect.objectContaining({ modelId: "gateway-a", baseUrl: "https://a.example/v1" }),
+      expect.objectContaining({ modelId: "gateway-b", baseUrl: "https://b.example/v1" }),
+    ]));
+    const back = await post("settings/model/selection", { provider: "deepseek", modelId: "gateway-a", thinkingLevel: "off" });
+    expect(back.status).toBe(200);
+    const after = (await (await settings()).json()) as { model: { modelId: string; baseUrl: string | null } };
+    expect(after.model).toMatchObject({ modelId: "gateway-a", baseUrl: "https://a.example/v1" });
   });
 
   it("a switch without apiKey keeps the provider's sealed key (issue #74)", async () => {

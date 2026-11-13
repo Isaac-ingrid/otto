@@ -996,4 +996,45 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX IF NOT EXISTS sh_push_due ON sh_push_job (dueAt)`;
     },
   },
+  {
+    id: "029_saved_models",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_saved_model (
+        provider TEXT NOT NULL, modelId TEXT NOT NULL, baseUrl TEXT,
+        updatedAt INTEGER NOT NULL, PRIMARY KEY (provider, modelId)
+      )`;
+      sql`INSERT OR IGNORE INTO sh_saved_model (provider, modelId, baseUrl, updatedAt)
+        SELECT provider, modelId, baseUrl, updatedAt FROM sh_model WHERE id = 0 AND modelId IS NOT NULL`;
+    },
+  },
+  {
+    id: "030_model_headers",
+    up: (sql) => { ignoringDuplicateColumn(() => { sql`ALTER TABLE sh_saved_model ADD COLUMN headersEnc TEXT`; }); },
+  },
+  {
+    id: "031_verified_models",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_verified_model (
+        provider TEXT NOT NULL, modelId TEXT NOT NULL, baseUrl TEXT NOT NULL,
+        credentialHash TEXT NOT NULL, verifiedAt INTEGER NOT NULL,
+        PRIMARY KEY (provider, modelId, baseUrl)
+      )`;
+    },
+  },
+  {
+    id: "032_model_thinking_probe",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_model_thinking_probe (
+        provider TEXT NOT NULL, modelId TEXT NOT NULL, baseUrl TEXT NOT NULL,
+        credentialHash TEXT NOT NULL, levelsJson TEXT NOT NULL, probedAt INTEGER NOT NULL,
+        PRIMARY KEY (provider, modelId, baseUrl)
+      )`;
+    },
+  },
+  {
+    id: "033_model_thinking_declaration",
+    up: (sql) => {
+      sql`ALTER TABLE sh_saved_model ADD COLUMN thinkingJson TEXT`;
+    },
+  },
 ];

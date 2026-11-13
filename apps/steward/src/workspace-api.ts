@@ -3,7 +3,7 @@
 // the session's CSRF token in a header, a same-origin Origin, and a JSON body — so a form
 // post or a cross-site fetch can never act for the owner. Every mutation carries a client
 // request id; the Durable Object makes retries of one id a single effect.
-import { isThinkingLevel, type ComposerModelInput, type ModelSwitchInput } from "./llm/models.ts";
+import { isThinkingLevel, parseThinkingDeclaration, type ComposerModelInput, type ModelSaveResult, type ModelSwitchInput } from "./llm/models.ts";
 import type { ConnectionTestResult } from "./llm/connection-test.ts";
 import type { BudgetState } from "./budget.ts";
 import { DirectoryBrowseArgsSchema, RegisterRepoArgsSchema, type DirectoryBrowseArgs, type DirectoryListing, type RegisterRepoResult } from "@isaac2ingrid/protocol";
@@ -47,9 +47,10 @@ export interface WorkspaceApiDeps {
    *  optional baseUrl), with `apiKey` optional once the provider has a sealed key: switching
    * to a previously keyed provider needs no re-entry, while giving a key reseals it (the
    * "fix a rejected key" flow stays the same single form). */
-  saveModel?(input: ModelSwitchInput): Promise<void>;
+  saveModel?(input: ModelSwitchInput): Promise<ModelSaveResult>;
   selectModel?(input: ComposerModelInput): Promise<unknown>;
   testModel?(input: ModelSwitchInput): Promise<ConnectionTestResult>;
+  importModels?(input: ModelSwitchInput): Promise<{ models: { id: string; name: string }[] }>; 
   pairing?(id: string): Promise<{ code: string; expiresAt: number }>;
   revoke?(deviceId: string): void;
   addDirectory?(input: MachineDirectoryInput): Promise<MachineDirectoryResult>;
@@ -145,18 +146,42 @@ function parseAction(body: Record<string, unknown>): WorkspaceActionInput {
  *  together — switching provider always needs a new key, and re-submitting the same
  *  provider/modelId still reseals the key (the "fix a rejected key" flow is this same form). */
 function parseModelSwitch(body: Record<string, unknown>): ModelSwitchInput {
-  const { provider, modelId, apiKey, baseUrl, thinkingLevel } = body;
+  const { provider, modelId, apiKey, baseUrl, thinkingLevel, headers, importedModelIds, thinkingJson, autoTest } = body;
   if (thinkingLevel !== undefined && !isThinkingLevel(thinkingLevel)) throw new WorkspaceError("bad_request");
   if (typeof provider !== "string" || !provider.trim() || provider.length > 128) throw new WorkspaceError("bad_request");
   if (typeof modelId !== "string" || !modelId.trim() || modelId.length > 256) throw new WorkspaceError("bad_request");
   if (apiKey !== undefined && (typeof apiKey !== "string" || apiKey.length > 8192)) throw new WorkspaceError("bad_request");
   if (baseUrl !== undefined && (typeof baseUrl !== "string" || baseUrl.length > 2048)) throw new WorkspaceError("bad_request");
+  if (importedModelIds !== undefined && (!Array.isArray(importedModelIds) || importedModelIds.length > 500 || importedModelIds.some((id) => typeof id !== "string" || !id || id.length > 200) || !baseUrl)) throw new WorkspaceError("bad_request");
+  if (headers !== undefined && (headers === null || typeof headers !== "object" || Array.isArray(headers) || Object.keys(headers).length > 12 || Object.entries(headers).some(([name, value]) => !/^[a-z0-9-]{1,64}$/i.test(name) || /^(authorization|host|content-length|connection|transfer-encoding|cookie)$/i.test(name) || typeof value !== "string" || value.length > 1024 || /[\r\n]/.test(value)))) throw new WorkspaceError("bad_request");
+  if (autoTest !== undefined && typeof autoTest !== "boolean") throw new WorkspaceError("bad_request");
+  // The declaration is stored as the canonical JSON this layer produced, so a stored row can
+  // only ever carry levels that exist (an unknown name is rejected here, not silently widened).
+  let declaration: string | null | undefined;
+  if (thinkingJson !== undefined && thinkingJson !== null) {
+    if (typeof thinkingJson !== "string" || thinkingJson.length > 4096) throw new WorkspaceError("bad_request");
+    if (thinkingJson.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(thinkingJson);
+      } catch {
+        throw new WorkspaceError("thinking_levels_invalid", 400);
+      }
+      const canonical = parseThinkingDeclaration(parsed);
+      if (!canonical) throw new WorkspaceError("thinking_levels_invalid", 400);
+      declaration = JSON.stringify(canonical);
+    } else declaration = null;
+  } else if (thinkingJson === null) declaration = null;
   return {
     provider: provider.trim(),
     ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
     modelId: modelId.trim(),
     ...(typeof apiKey === "string" && apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
     ...(typeof baseUrl === "string" && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+    ...(headers !== undefined ? { headers: headers as Record<string, string> } : {}),
+    ...(importedModelIds !== undefined ? { importedModelIds: importedModelIds as string[] } : {}),
+    ...(declaration !== undefined ? { thinkingJson: declaration } : {}),
+    ...(autoTest !== undefined ? { autoTest } : {}),
   };
 }
 
@@ -213,12 +238,14 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       if (input.thinkingLevel === undefined) throw new WorkspaceError("bad_request");
       return json({ model: await deps.selectModel({ provider: input.provider, modelId: input.modelId, thinkingLevel: input.thinkingLevel }) });
     }
+    if (url.pathname === "/app/api/settings/model/import" && deps.importModels) {
+      return json(await deps.importModels(parseModelSwitch(await readJson(request))));
+    }
     if (url.pathname === "/app/api/settings/model/test" && deps.testModel) {
       return json(await deps.testModel(parseModelSwitch(await readJson(request))));
     }
     if (url.pathname === "/app/api/settings/model" && deps.saveModel) {
-      await deps.saveModel(parseModelSwitch(await readJson(request)));
-      return json({ ok: true });
+      return json(await deps.saveModel(parseModelSwitch(await readJson(request))));
     }
     if (url.pathname === "/app/api/machines/revoke" && deps.revoke) {
       const { deviceId } = await readJson(request);
