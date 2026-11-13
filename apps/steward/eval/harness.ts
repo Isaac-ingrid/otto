@@ -110,6 +110,7 @@ export interface Observation {
 
 /** The steward extension context over a seeded world (dispatch/ask recorded, never sent). */
 export function buildEvalContext(ledger: Ledger, caseId: number, observation: Observation): StewardExtensionContext {
+  const prWatches: import("../src/pr-watch.ts").PrWatchRow[] = [];
   const seedIds = new Set(THREADS.map((t) => t.id));
   return {
     ledger,
@@ -164,8 +165,27 @@ export function buildEvalContext(ledger: Ledger, caseId: number, observation: Ob
     answerWorker: async () => ({ kind: "refused", reason: "eval world has no workers to answer" }),
     isOwnerMessage: async (msgId) => msgId.startsWith("eval_"),
     messageReceivedAt: async () => Date.now(), // consistent with checkProvenanceRef=true
-    ownerMessageText: async () => null, // routing eval never seeds owner message text
+    ownerMessageText: async () => CASES.find(c => c.id === caseId)?.text ?? null,
     recordProactiveOutcome: () => {},
+    // Same visible PR tools as production; inert local state, never GitHub/network access.
+    prWatches: {
+      list: () => prWatches,
+      targetsForThread: threadId => [...new Set(prWatches.filter(w => w.threadId === threadId).map(w => w.url))],
+      threadsForUrl: url => [...new Set(prWatches.filter(w => w.url === url).map(w => w.threadId))],
+      create: async input => {
+        const existing = prWatches.find(w => w.id === input.id);
+        if (existing) return existing;
+        const now = Date.now();
+        const row: import("../src/pr-watch.ts").PrWatchRow = { ...input, status: "active", createdAt: now,
+          expiresAt: input.expiresAt ?? now + 86400000, intervalMs: (input.intervalSeconds ?? 900) * 1000,
+          nextCheckAt: now, generation: 0, head: null, observedState: null, checkedAt: null, lastError: null,
+          checks: 0, failed: 0, pending: 0 };
+        prWatches.push(row);
+        observation.dispatches.push({ threadId: input.threadId, isNew: false });
+        return row;
+      },
+      cancel: id => { const row = prWatches.find(w => w.id === id); if (!row) return false; row.status = "cancelled"; return true; },
+    },
     // The proactive-behavior service (issue #20): a minimal in-memory stand-in. The real
     // RoutineService needs the Agents SDK scheduler + outbound queue; the eval only needs
     // the tools to answer honestly and the routing outcome to land in the observation

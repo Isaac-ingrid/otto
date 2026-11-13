@@ -6,7 +6,34 @@ PR to an existing Thread. Otto waits, checks external state, and reports meaning
 starting an LLM turn or worker. This is not automatic repair, review, branch protection verification,
 or permission to push/merge/re-run anything.
 
-## Create, inspect, cancel
+## Natural-language tools (candidate; real-model routing gate pending)
+
+The source now includes `create_pr_watch`, `list_pr_watches` and `cancel_pr_watch`. Do not assume
+these are live until this prompt/tool change passes ADR-0001 decision 14 and is deployed. The
+previously deployed version remains Owner-API-only.
+
+Examples after deployment:
+
+- "Follow https://github.com/owner/repo/pull/42; only commit statuses, notify me when successful,
+  do not modify code."
+- "Which PRs are being followed?"
+- "Cancel watch pw_123."
+
+This first tool version binds to an **existing Thread**. An explicit URL must occur in the real
+owner message, or a uniquely known PR may be reused from an explicitly selected/named Thread.
+Known targets come from structured PR-consent/watch records, not arbitrary worker prose. If the
+PR or Thread is ambiguous, ask the owner; do not dispatch a worker to invent an association.
+`get_thread` includes `pullRequests` and `prWatches` to make those references inspectable.
+
+Creation and cancellation require an actual owner run; event/routine/follow-up runs cannot create
+a commission. Limited scope must be explicit in the owner's words. Repeating the same request
+reuses the active watch and re-arms scheduling without extending expiry; conflicting scope or
+lifetime requires owner clarification. Once a PR-create tool has been attempted, the same turn
+cannot fall back to a worker or another routine/follow-up (and the reverse order is also blocked).
+An unrelated later owner turn is unaffected. These are deterministic boundary tests; scripted
+model tests do not prove a real model will select the right tool.
+
+## Create, inspect, cancel via Owner API
 
 This first version uses the optional explicit-SERVER_KEY [Owner API](../CONTEXT.md); it is not yet a
 conversation tool or a workspace management page. Browser-only installations do not need to enable

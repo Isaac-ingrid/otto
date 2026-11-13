@@ -29,6 +29,16 @@ export class PrWatchService {
   private get sql(): SqlExecutor { return this.deps.sql; }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
   list(): PrWatchRow[] { return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch ORDER BY (status = 'active') DESC, createdAt DESC LIMIT 100`; }
+  targetsForThread(threadId: string): string[] {
+    const rows = this.sql<{ url: string }>`SELECT url FROM sh_pr_watch WHERE threadId = ${threadId}
+      UNION SELECT url FROM sh_pr_consent WHERE threadId = ${threadId} AND url IS NOT NULL`;
+    return [...new Set(rows.flatMap(row => { const target = parsePrUrl(row.url); return target ? [target.url] : []; }))];
+  }
+  threadsForUrl(url: string): string[] {
+    return this.sql<{ threadId: string }>`SELECT threadId FROM sh_pr_watch WHERE url = ${url} OR url = ${url + '/'}
+      UNION SELECT threadId FROM sh_pr_consent WHERE url = ${url} OR url = ${url + '/'}`
+      .map(row => row.threadId).filter(id => this.deps.threadExists(id));
+  }
   hasWork(): boolean {
     return this.sql<{ n: number }>`SELECT (SELECT COUNT(*) FROM sh_pr_watch WHERE status = 'active') + (SELECT COUNT(*) FROM sh_pr_watch_notice WHERE deliveredAt IS NULL) AS n`[0]!.n > 0;
   }

@@ -1120,6 +1120,17 @@ export class Steward extends Agent<Env> {
         this.logChannel(kind, detail);
       },
       routines: this.routineService,
+      prWatches: {
+        list: () => this.prWatches.list(),
+        targetsForThread: id => this.prWatches.targetsForThread(id),
+        threadsForUrl: url => this.prWatches.threadsForUrl(url),
+        create: async input => {
+          const row = this.prWatches.create(input);
+          await this.armPrWatches();
+          return row;
+        },
+        cancel: id => this.prWatches.cancel(id),
+      },
       /** §4.3/§7.2 (issue #10): whether a user-message evidence ref is one the bound owner
        *  actually sent — the one check answer_worker's hook cannot do for itself. */
       isOwnerMessage: (msgId) => this.isOwnerMessage(msgId),
