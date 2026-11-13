@@ -182,6 +182,7 @@ export default {
         (url.pathname === "/api/messages" && (request.method === "POST" || request.method === "GET")) ||
         (url.pathname === "/api/actions" && request.method === "POST") ||
         (url.pathname === "/api/health-notice" && request.method === "POST") ||
+        (url.pathname === "/api/pr-watches" && (request.method === "GET" || request.method === "POST")) ||
         (url.pathname === "/api/pairing" && request.method === "POST") ||
         (url.pathname === "/api/login-link" && request.method === "POST");
       if (!allowed) return new Response("not found", { status: 404 });

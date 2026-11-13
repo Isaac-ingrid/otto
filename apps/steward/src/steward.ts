@@ -67,6 +67,8 @@ import {
   type WelcomeMessage,
 } from "@isaac2ingrid/protocol";
 import { bearer, resolveKeySecrets } from "./auth.ts";
+import { PrWatchInputError, PrWatchService } from "./pr-watch.ts";
+import { readPrEvidence } from "./pr-evidence.ts";
 import {
   formatUsd,
   renderOverBudgetNote,
@@ -440,6 +442,7 @@ export class Steward extends Agent<Env> {
     // Routine/follow-up rows and their SDK schedules live in different stores — a crash
     // between INSERT and schedule() must not silently kill a routine (issue #20, §11).
     void this.reconcileRoutineSchedules();
+    if (this.prWatches.hasWork()) void this.armPrWatches().catch(() => this.logChannel("pr_watch_schedule", "rearm_failed"));
     void this.recoverWorkspaceInputs();
   }
 
@@ -1285,6 +1288,7 @@ export class Steward extends Agent<Env> {
       }
       if (url.pathname === "/api/actions" && request.method === "POST") return this.handleApiActions(request);
       if (url.pathname === "/api/health-notice" && request.method === "POST") return this.handleHealthNotice(request);
+      if (url.pathname === "/api/pr-watches" && (request.method === "GET" || request.method === "POST")) return this.handlePrWatches(request);
       if (url.pathname === "/api/pairing" && request.method === "POST") return this.handleApiPairing();
       if (url.pathname === "/api/login-link" && request.method === "POST") return this.handleApiLoginLink();
       return new Response("not found", { status: 404 });
@@ -3600,6 +3604,55 @@ export class Steward extends Agent<Env> {
 
   // ---- Owner HTTP API (ADR-0003): the Worker pre-checked SERVER_KEY; these run in the DO ----
 
+  private prWatches_?: PrWatchService;
+  private get prWatches(): PrWatchService {
+    return this.prWatches_ ??= new PrWatchService({
+      sql: this.sql.bind(this), tx: (fn) => this.ctx.storage.transactionSync(fn),
+      threadExists: (id) => this.ledger.threads.get(id) !== null,
+      read: (target) => readPrEvidence(target, { token: this.env.OTTO_GITHUB_READ_TOKEN }),
+      record: (threadId, text, data) => { this.ledger.timeline.add(threadId, "note", text, data); },
+      notify: async (notice) => {
+        const owner = this.ownerOpenIdSync();
+        if (!owner) throw new Error("owner_not_ready");
+        await this.enqueueOutbound({ id: notice.id, kind: "text", to: owner, threadId: notice.threadId,
+          text: notice.text, urgency: "push" });
+        this.push.queue(notice.id, "done");
+        void this.drainPush();
+      },
+    });
+  }
+
+  private async armPrWatches(): Promise<void> {
+    // One idempotent cron, not an LLM heartbeat or a self-extending one-shot chain.
+    await this.schedule("* * * * *", "pollPrWatches");
+  }
+
+  /** SDK callback. Empty passes are local SQL only; evidence reads never dispatch work. */
+  async pollPrWatches(): Promise<void> { await this.prWatches.tick(); }
+
+  private async handlePrWatches(request: Request): Promise<Response> {
+    const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
+    if (request.method === "GET") return json({ watches: this.prWatches.list() });
+    let body: Record<string, unknown>;
+    try { body = await readJsonObject(request, 4096); } catch { return json({ error: "bad_request" }, 400); }
+    if (!this.ownerOpenIdSync()) return json({ error: "not_ready" }, 503);
+    if (body.action === "cancel") {
+      if (typeof body.id !== "string") return json({ error: "invalid_id" }, 400);
+      return this.prWatches.cancel(body.id) ? json({ ok: true }) : json({ error: "not_found" }, 404);
+    }
+    if (body.action !== "create") return json({ error: "invalid_action" }, 400);
+    try {
+      const watch = this.prWatches.create({ id: body.id, threadId: body.threadId, url: body.url,
+        expiresAt: body.expiresAt, intervalSeconds: body.intervalSeconds });
+      // Persist first; retrying the same owner id repairs a failed schedule write.
+      await this.armPrWatches();
+      return json({ watch });
+    } catch (error) {
+      return error instanceof PrWatchInputError ? json({ error: error.message }, error.message === "id_conflict" ? 409 : 400)
+        : json({ error: "schedule_unavailable_retry_same_id" }, 503);
+    }
+  }
+
   /** Trusted monitor input becomes a deterministic local notice, never an agent turn. */
   private async handleHealthNotice(request: Request): Promise<Response> {
     const raw = await request.text();
@@ -4939,12 +4992,15 @@ export class Steward extends Agent<Env> {
   /** Test-only: cancels every routine/follow-up schedule and clears the proactive tables. */
   async resetRoutineStateForTests(): Promise<void> {
     for (const s of await this.listSchedules()) {
-      if (s.callback === "fireRoutine" || s.callback === "fireFollowup") await this.cancelSchedule(s.id).catch(() => {});
+      if (s.callback === "fireRoutine" || s.callback === "fireFollowup" || s.callback === "pollPrWatches") await this.cancelSchedule(s.id).catch(() => {});
     }
     this.ctx.storage.sql.exec("DELETE FROM sh_routine");
     this.ctx.storage.sql.exec("DELETE FROM sh_followup");
     this.ctx.storage.sql.exec("DELETE FROM sh_routine_offer");
     this.routineService_ = undefined;
+    this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_notice");
+    this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch");
+    this.prWatches_ = undefined;
   }
 
   /** Queues the daily lifecycle pass (issue #19) to run at the next 02:00 UTC. Idempotent

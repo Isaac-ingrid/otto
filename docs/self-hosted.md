@@ -374,6 +374,16 @@ Logs are `journalctl -u otto -f`. The database browser is `sqlite3
 /var/lib/otto/steward.sqlite` — `sh_run` is the run ledger (`status` is `open`/`settled`/`cancelled`),
 `sh_outbound` the outbox, `sh_channel_log` the channel.
 
+## Optional read-only PR / CI follow-up
+
+[PR watches](pr-watches.md) bind a GitHub PR to an existing Thread through the explicit-SERVER_KEY
+Owner API. A persistent timer checks external status without waking a model or dispatching a worker.
+For private repositories, set `OTTO_GITHUB_READ_TOKEN` in the protected configuration to a
+selected-repository, read-only token (Pull requests, Checks, Commit statuses), then restart Otto.
+No token is needed for public repositories, subject to GitHub rate limits. Watches expire, can be
+cancelled independently of turns, and never modify code, re-run CI or merge a PR. No conversation
+tool or workspace management page is included in this first pilot.
+
 ## What this shape is not
 
 - **Not replicated.** One process, one Durable Object, one SQLite file. No HA, no second reader.

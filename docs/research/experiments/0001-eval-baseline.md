@@ -17,8 +17,8 @@ Date: 2026-11-13. Lane: one. Director: owner-directed implementation, not autono
 
 ## Candidate lineage (inner loop)
 
-Parent: `c9da512`. Candidate: current working-tree implementation; no candidate commit exists yet.
-Before another iteration, preserve this candidate as a branch/commit and record its ref here.
+Parent: `c9da512`. Candidate: `20a61d3` (traceable supervised improvement evaluations).
+The owner authorized packaging as a local commit; no deployment or paid baseline was performed.
 
 Selector: first remove ambiguity in measurement inputs, then measure noise. Executor: main coding
 assistant; no child agents launched. The first local wire fixture incorrectly assumed case #1

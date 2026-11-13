@@ -1,6 +1,6 @@
 # Supervised Improvement of Otto
 
-Date: 2026-11-13. Status: phase 1 implemented; production pilot planned.
+Date: 2026-11-13. Status: phase 1 implemented; read-only PR-watch pilot integrated, not deployed.
 Research: [RSI](../research/rsi-2026.md), [Personal Agents](../research/personal-agent-2026.md).
 
 ## Purpose and scope
@@ -10,9 +10,9 @@ The production steward does not edit itself. This is a repository development pr
 runtime service, harness extension, or automatically launched agent workflow.
 
 Phase 1 supplies input provenance, an explicit production-builder eval profile, a same-input noise
-report, and an experiment record. Phase 2 will add a narrow read-only PR-watch pilot (below).
-Neither phase is intended to implement automated candidate selection, parallel lanes, an automatic
-acceptance gate, or automatic merge. No paid baseline has been measured: no explicit production-matched eval profile was supplied.
+report, and an experiment record. Phase 2 adds a narrow read-only PR-watch pilot (below). Neither
+implements automated candidate selection, parallel lanes, an automatic acceptance gate, or automatic
+merge. No paid baseline has been measured: no explicit production-matched eval profile was supplied.
 See the [first experiment](../research/experiments/0001-eval-baseline.md).
 
 ## Outer loop: choose the problem
@@ -103,11 +103,12 @@ Partial runs are for debugging, never full merge evidence. Historical baselines 
 stay untouched and cannot retrospectively be made into noise measurements. Do not reuse old scores
 with newly manufactured fingerprints.
 
-## Planned production pilot: read-only PR follow-up
+## Production pilot: read-only PR follow-up
 
-The proposed first vertical slice uses an explicit, authenticated Owner API, not a model tool.
-It will follow a PR, summarize failed/pending counts, notify on a relevant change, and never modify
-code. Log ingestion and model-assisted failure diagnosis are outside the initial slice.
+The first vertical slice is implemented via an explicit, authenticated Owner API, not a model tool:
+[PR watches](../pr-watches.md), [experiment record](../research/experiments/0002-pr-watch.md).
+It follows a PR, summarizes failed/pending counts, notifies on a relevant change, and never modifies
+code. It does not yet read logs or perform model-assisted failure diagnosis.
 
 The broader target remains: follow a PR; analyze CI failure read-only; notify on a relevant change;
 never modify code without permission. Before implementing, inspect existing Thread/follow-up/routine

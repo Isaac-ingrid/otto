@@ -1,0 +1,110 @@
+# Read-only PR / CI Follow-up
+
+Date: 2026-11-13. First persistent-commission pilot from the
+[supervised improvement procedure](design/otto-improvement.md). The owner explicitly binds a GitHub
+PR to an existing Thread. Otto waits, checks external state, and reports meaningful changes without
+starting an LLM turn or worker. This is not automatic repair, review, branch protection verification,
+or permission to push/merge/re-run anything.
+
+## Create, inspect, cancel
+
+This first version uses the optional explicit-SERVER_KEY [Owner API](../CONTEXT.md); it is not yet a
+conversation tool or a workspace management page. Browser-only installations do not need to enable
+this API unless they want the pilot. Use your deployment's HTTPS origin and keep credentials out
+of committed scripts or shell history.
+
+```sh
+# SERVER_KEY comes from your secret manager. THREAD_ID is an existing Thread.
+curl --fail-with-body "$OTTO_ORIGIN/api/pr-watches" \
+  -H "Authorization: Bearer $SERVER_KEY" -H 'Content-Type: application/json' \
+  --data "{\"action\":\"create\",\"id\":\"follow-pr-42\",\"threadId\":\"$THREAD_ID\",\"url\":\"https://github.com/example/project/pull/42\"}"
+
+curl --fail-with-body "$OTTO_ORIGIN/api/pr-watches" -H "Authorization: Bearer $SERVER_KEY"
+
+curl --fail-with-body "$OTTO_ORIGIN/api/pr-watches" \
+  -H "Authorization: Bearer $SERVER_KEY" -H 'Content-Type: application/json' \
+  --data '{"action":"cancel","id":"follow-pr-42"}'
+```
+
+Create fields:
+
+| Field | Meaning |
+|---|---|
+| `id` | Owner-chosen idempotency key, 1–80 ASCII letters/digits/underscore/hyphen |
+| `threadId` | Existing Thread to receive the reports |
+| `url` | Canonical `https://github.com/owner/repo/pull/number` URL only |
+| `intervalSeconds` | Optional, 60–3600; default 900 (15 minutes) |
+| `expiresAt` | Optional Unix epoch milliseconds, future and within 7 days; default 24 hours |
+
+Retry the same create payload with the same id. A conflicting payload returns 409. An id is never
+reused to resurrect cancelled, expired or completed work; start a new commission with a new id.
+The default expiry is chosen once. GET returns the latest 100 records, active first. Cancel is
+idempotent for known ids; it suppresses pending notifications, but cannot unsend a message already
+handed to the durable outbound queue or browser push service. Completed history is retained.
+
+## Permissions and network access
+
+All external requests are GETs to `https://api.github.com`; redirects are refused. No arbitrary API
+host, commands, check logs, PR titles/bodies/comments or workflow names are accepted as instructions.
+The reader stores structured counts, commit SHA and fixed reason codes, not raw provider errors.
+
+Public repositories can be read without a token, subject to GitHub's unauthenticated rate limit.
+For private repositories or higher limits, set `OTTO_GITHUB_READ_TOKEN` on the server (Node env or
+protected `.dev.vars`; Cloudflare secret). Prefer a fine-grained, selected-repository token with
+read-only Pull requests, Checks and Commit statuses permissions. Do not grant write permissions.
+The token never enters a model context, API response or notice. Revoking it at GitHub or removing
+it from deployment config blocks later authorized reads; this is distinct from cancelling a watch.
+A request already in flight may finish, so use watch cancellation to reject its late result.
+
+GitHub Enterprise hosts are not supported. A moved repository that redirects is unavailable until
+the owner creates a commission for its canonical URL. No shell `gh` invocation or ambient local
+GitHub credentials are used.
+
+## State and evidence
+
+- **active**: wait for evidence; failed CI remains active and can later recover.
+- **completed**: observed checks pass, or PR was closed/merged. `observedState` distinguishes these.
+- **cancelled**: no further checks. In-flight results lose authority.
+- **expired**: no further checks; a single expiry notice states success was not established.
+
+The timer answers *when to inspect*. The observed condition answers *whether to act*. One durable
+minute cron serves all watches; each pass handles at most two due watches. Empty passes use local
+SQL only. Default first observation occurs on the next cron pass; later observations respect the
+stored interval. At most 10 watches may be active. Rate limits and outages back off at least five
+minutes and do not create a Needs you item for every failure.
+
+For an open PR, the reader gets the head SHA, latest check runs and combined commit statuses pinned
+to that SHA, then re-reads the PR. A changed head/state invalidates the observation. Unknown
+conclusions, response truncation (over 100 results), malformed data or a mismatched check SHA are
+unavailable evidence, never success. Zero checks and all-skipped/neutral checks remain waiting;
+a success requires at least one actual success and no observed failure or pending check.
+
+**Observed checks passing is not proof that required workflows have all started, branch protection
+is satisfied, or the owner's requirement is met.** New workflows can appear after an observation.
+Success ends this one-shot commission for the observed head, not an everlasting promise that the
+PR will remain green; start another watch if further monitoring is wanted. A final head recheck
+reduces races but is not an atomic snapshot of GitHub.
+
+On unavailable evidence, the last successful observation stays in the record with its original
+`checkedAt`; `lastError` indicates it is not fresh. No error is silently converted into a failed
+build or green result. An outage can still conceal a transient state between polls.
+
+## Recovery and notifications
+
+The observation and notification intent commit in one SQLite transaction. Delivery to the existing
+outbound queue uses a stable id: commission × head × observation kind. A crash after delivery but
+before acknowledgement retries that id rather than creating another message. Failed reads are
+leased; restart retries after the lease expires. Generation checks reject cancelled, expired or
+superseded reads. Startup re-arms the cron if active work or pending notices exist.
+
+Failure is summarized as failed/pending counts and the PR/commit reference. The first version does
+not fetch logs or ask a model to diagnose them. Waiting/repeated observations are silent; failure,
+success, closure, merge and expiry produce a Thread-linked message. Browser push is best-effort and
+respects existing quiet hours. Delivery and GitHub observation are different states.
+
+## Acceptance evidence
+
+The [experiment record](research/experiments/0002-pr-watch.md) names checks and remaining limits.
+Tests use fake GitHub responses and both steward runtimes; no live GitHub token or paid model is
+needed. No production deployment, private-repository connectivity or independent review is implied
+by the test results.

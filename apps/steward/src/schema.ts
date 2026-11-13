@@ -1037,4 +1037,23 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`ALTER TABLE sh_saved_model ADD COLUMN thinkingJson TEXT`;
     },
   },
+  {
+    // Explicit owner-API commissions; polling is read-only and notices share a transaction
+    // with the observation. Leases/generations reject cancelled or superseded reads.
+    id: "034_pr_watches",
+    up: (sql) => {
+      sql`CREATE TABLE sh_pr_watch (
+        id TEXT PRIMARY KEY, threadId TEXT NOT NULL, url TEXT NOT NULL, status TEXT NOT NULL,
+        createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, intervalMs INTEGER NOT NULL,
+        nextCheckAt INTEGER NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
+        head TEXT, observedState TEXT, checkedAt INTEGER, lastError TEXT,
+        checks INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0
+      )`;
+      sql`CREATE INDEX sh_pr_watch_due ON sh_pr_watch(status, nextCheckAt)`;
+      sql`CREATE TABLE sh_pr_watch_notice (
+        id TEXT PRIMARY KEY, watchId TEXT NOT NULL, threadId TEXT NOT NULL, text TEXT NOT NULL, deliveredAt INTEGER
+      )`;
+      sql`CREATE INDEX sh_pr_watch_notice_due ON sh_pr_watch_notice(deliveredAt, id)`;
+    },
+  },
 ];
