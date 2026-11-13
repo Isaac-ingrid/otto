@@ -116,7 +116,23 @@ bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
 Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
 `apps/steward/ui` only needs re-copying when the page itself changes.
 
-What was shipped, newest first: `c11d787` — turns are serial and the working row can stop one
+Latest deployment (2026-11-13): `9fc76c7`, including `d25e65a`'s persistent PR watches and
+`20a61d3`'s offline improvement tooling. Bundle SHA-256:
+`4abc3a7479bee962d96ff7575d478cf96f56dc265744d5cadee9442b610f8552`.
+Migration `035_pr_watch_evidence_mode` applied; existing config/data/UI were preserved. The
+previous bundle/map and a verified SQLite snapshot live under
+`/opt/otto/releases/9fc76c7/previous/` (root-only). Do not restore the database casually on rollback;
+the schema addition is backward-compatible and restoring a snapshot would discard later data.
+
+Live [statuses-only acceptance](../docs/research/experiments/0003-statuses-only.md) verified a
+synthetic failure → success, actual service restart, deduplicated notices and independent watch
+cancellation. No model run, workflow creation or repository-file edit was involved. Checks access
+with the selected-repository fine-grained PAT returned 403, so the scope was explicitly narrowed;
+there was no automatic permission fallback and no claim of full CI success. The server-side
+receipt is `/opt/otto/releases/9fc76c7/acceptance.json`. Deployment health checks passed; encrypted
+offsite backups remain disabled. No credentials are recorded here.
+
+Earlier deployments: `c11d787` — turns are serial and the working row can stop one
 (ADR-0017); the live check with a real turn streaming is recorded in `docs/plan/self-hosted.md`.
 Before that, `9d09ffa` — the dark instrument-panel theme (ADR-0016) — and `93c2b6a` — thread
 frames rendered in place of refetching.

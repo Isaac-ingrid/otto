@@ -1,6 +1,6 @@
 # Supervised Improvement of Otto
 
-Date: 2026-11-13. Status: phase 1 implemented; read-only PR-watch pilot integrated, not deployed.
+Date: 2026-11-13. Status: phase 1 implemented; read-only PR-watch pilot deployed, statuses-only acceptance checked.
 Research: [RSI](../research/rsi-2026.md), [Personal Agents](../research/personal-agent-2026.md).
 
 ## Purpose and scope
@@ -109,6 +109,9 @@ The first vertical slice is implemented via an explicit, authenticated Owner API
 [PR watches](../pr-watches.md), [experiment record](../research/experiments/0002-pr-watch.md).
 It follows a PR, summarizes failed/pending counts, notifies on a relevant change, and never modifies
 code. It does not yet read logs or perform model-assisted failure diagnosis.
+A limited-scope `statuses-only` mode is explicit, never an automatic fallback after a permission
+failure. Its [live acceptance](../research/experiments/0003-statuses-only.md) passed on a synthetic
+commit-status fixture; that is not a real CI workflow or proof of full CI completion.
 
 The broader target remains: follow a PR; analyze CI failure read-only; notify on a relevant change;
 never modify code without permission. Before implementing, inspect existing Thread/follow-up/routine

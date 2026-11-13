@@ -1,6 +1,7 @@
 # Experiment 0003: Least-privilege Commit-status Follow-up
 
-Date: 2026-11-13. Parent: `d25e65a`. Status: implemented; live transition acceptance pending.
+Date: 2026-11-13. Parent: `d25e65a`. Candidate/deployed program: `9fc76c7`.
+Status: limited-scope live acceptance passed; independent review pending.
 
 ## Problem and scope
 
@@ -33,5 +34,28 @@ observation does not duplicate it, restart and verify recovery, then publish suc
 head-bound terminal notice. Separately create/cancel a watch and verify no later observation.
 Leave the fixture status successful. Record real observations separately from this plan; do not
 claim that a synthetic status proves actual CI or changed-head behavior in production.
+
+## Live outcomes (2026-11-13)
+
+The plan above was executed on the Node VPS using the existing lab PR #1 and its Thread, with
+`evidenceMode=statuses-only`. The fixture context was `otto/watch-smoke-9fc76c7`.
+
+- Server token reads: PR 200, commit statuses 200, check runs 403. No credential scope was widened.
+- Deployed `9fc76c7`; migration `035_pr_watch_evidence_mode` applied. Previous program and a verified
+  SQLite snapshot are retained under `/opt/otto/releases/9fc76c7/previous/`.
+- Real cron observed synthetic failure, left the watch active, and sent one Thread-linked notice.
+- After an actual `systemctl restart otto`, cron observed unchanged failure again: still one notice.
+- Publishing synthetic success on the same head produced a second notice and completed the watch.
+- A separate watch cancelled before observation retained null `checkedAt` and emitted no notice,
+  including while the scheduler processed the later success transition.
+- Both result notices explicitly said Checks/Actions were unverified. Both outbound rows reached
+  local `sent`; this does not establish phone push receipt.
+- No test watches remain active; no new steward runs appeared during acceptance. The GitHub
+  fixture status was left successful. Repository files/default branch were unchanged.
+- Deployment health check passed. Existing offsite-backup-disabled warning remains.
+
+Private server receipt: `/opt/otto/releases/9fc76c7/acceptance.json` (no tokens). These results
+validate a synthetic commit-status transition, persistence and dedupe, **not actual CI**, branch
+protection, changed-head behavior in production, or end-to-end phone notifications.
 
 Independent review and paid routing-noise baseline remain pending. No secrets belong in records.
