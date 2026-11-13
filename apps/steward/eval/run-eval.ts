@@ -5,20 +5,25 @@
 // Usage:
 //   node eval/run-eval.ts [--limit N] [--only id,id] [--model deepseek-flash] [--out file] [--concurrency 4]
 //   node eval/run-eval.ts --selftest        # no model, no key: world/recall/gate/scoring checks
+//   node eval/run-eval.ts --config profile.json --out eval/results/noise-r1.json
 //
 // The API key: DEEPSEEK_API_KEY from the env; as a dev-machine fallback, the `deepseek`
 // entry of ~/.pi/agent/auth.json (never printed). Exit code: 0 only when the §3.4
 // thresholds are met — this is the required merge check for routing changes (ADR-0001
 // decision 14; see docs/routing-eval.md).
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { captureProvenance, hash } from "../../../scripts/improvement/provenance.mjs";
+import { readEvalProfile } from "../../../scripts/improvement/eval-config.mjs";
+import { parseEvalArgs } from "../../../scripts/improvement/eval-args.mjs";
 import { createModels, createProvider, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Harness, createRegistry, MemoryStorage, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { buildStewardExtension } from "../src/llm/extension.ts";
-import { buildStewardModels } from "../src/llm/models.ts";
+import { buildStewardModels, resolveCatalogModel, resolveModelThinking, type StewardModelConfig } from "../src/llm/models.ts";
 import {
   CASES,
   THREADS,
@@ -36,10 +41,8 @@ import { RECALL_WEAK_BELOW, recallScore } from "../src/ledger.ts";
 const THRESHOLDS = { wrongRoute: 0.02, missedAsk: 0.03, unnecessaryAsk: 0.15 } as const;
 
 // ---- args ----
-const arg = (name: string): string | undefined => {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-};
+const args = parseEvalArgs(process.argv.slice(2)) as Record<string, string | true>;
+const arg = (name: string): string | undefined => typeof args[name] === "string" ? args[name] : undefined;
 const LIMIT = Number(arg("limit") ?? 0);
 const ONLY = arg("only")?.split(",").map(Number);
 /** `--endpoint '{"id":"magpie","baseUrl":"http://…","apiKey":"…","model":"zhipu/glm-5.3-flash"}'`
@@ -51,11 +54,19 @@ interface EndpointOverride {
   model?: string;
 }
 const ENDPOINT = arg("endpoint") ? (JSON.parse(arg("endpoint")!) as EndpointOverride) : undefined;
-const MODEL_ID = arg("model") ?? ENDPOINT?.model ?? "deepseek-flash";
-const PROVIDER_ID = ENDPOINT?.id ?? "deepseek";
+if (arg("config") && (ENDPOINT || arg("model"))) throw new Error("--config cannot be combined with --endpoint or --model");
+const PROFILE = arg("config") ? readEvalProfile(arg("config")!) : undefined;
+const MODEL_ID = PROFILE?.config.modelId ?? arg("model") ?? ENDPOINT?.model ?? "deepseek-flash";
+const PROVIDER_ID = PROFILE?.config.provider ?? ENDPOINT?.id ?? "deepseek";
+const MODEL_CONFIG: StewardModelConfig = PROFILE?.config ?? { provider: PROVIDER_ID, modelId: MODEL_ID, explicit: true };
+const THINKING = ENDPOINT ? undefined : resolveModelThinking(MODEL_CONFIG).thinkingLevel;
 const OUT = arg("out") ?? `eval/results/${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, "")}.json`;
 const CONCURRENCY = Number(arg("concurrency") ?? 4);
-const SELFTEST = process.argv.includes("--selftest");
+const SELFTEST = args.selftest === true;
+if (!Number.isInteger(LIMIT) || LIMIT < 0 || !Number.isInteger(CONCURRENCY) || CONCURRENCY < 1 || CONCURRENCY > CASES.length ||
+    ONLY?.some((id) => !Number.isInteger(id) || !CASES.some((c) => c.id === id))) {
+  throw new Error("Invalid --limit, --concurrency or --only selection");
+}
 
 // ---- api key: env first, then the dev machine's pi auth store ----
 function apiKey(): string {
@@ -90,7 +101,8 @@ let sharedModels: MutableModels | undefined;
 
 async function buildProvider(): Promise<MutableModels> {
   if (ENDPOINT === undefined) {
-    return buildStewardModels({ provider: PROVIDER_ID, modelId: MODEL_ID, explicit: true }, apiKey()).models;
+    if (!resolveCatalogModel(MODEL_CONFIG)) throw new Error("Eval profile names an unavailable provider/model");
+    return buildStewardModels(MODEL_CONFIG, PROFILE?.apiKey ?? apiKey()).models;
   }
   const { openAICompletionsApi } = await import("@earendil-works/pi-ai/api/openai-completions.lazy");
   const provider = createProvider({
@@ -120,7 +132,12 @@ async function runCase(c: Case): Promise<{ outcome: Outcome; reply: string; disp
   sharedModels ??= await buildProvider();
   const harness = await Harness.open(new MemoryStorage(), { models: sharedModels, registry }, BACKGROUND_CONTEXT);
   try {
-    const conversation = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: PROVIDER_ID, modelId: MODEL_ID } } });
+    const conversation = await harness.root(BACKGROUND_CONTEXT, { agent: {
+      model: { provider: PROVIDER_ID, modelId: MODEL_ID },
+      // Match ensureRootModel: a gateway's auto maps to off at the harness, while its
+      // model metadata omits the wire reasoning fields. Legacy --endpoint stays unchanged.
+      ...(THINKING !== undefined ? { thinkingLevel: THINKING === "auto" ? "off" : THINKING } : {}),
+    } });
     const settled = await Promise.race([
       (await conversation.submit({ type: "input", content: c.text, whenBusy: "followUp" }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("case timeout")), 150_000)),
@@ -302,7 +319,18 @@ async function selftest(): Promise<void> {
 if (SELFTEST) {
   await selftest();
 } else {
+  const runId = randomUUID(); // Observation identity, deliberately outside the cohort fingerprint.
   const cases = CASES.filter((c) => !ONLY || ONLY.includes(c.id)).slice(0, LIMIT || undefined);
+  if (cases.length === 0) throw new Error("Empty case selection");
+  const configuration = {
+    ...(PROFILE?.safe ?? { mode: ENDPOINT ? "legacy-endpoint" : "production-builder", provider: PROVIDER_ID, modelId: MODEL_ID,
+      endpointHash: ENDPOINT ? hash(ENDPOINT.baseUrl) : null, customHeaders: false }),
+    effectiveThinkingLevel: THINKING ?? "legacy-default", concurrency: CONCURRENCY, totalCaseCount: CASES.length,
+    caseIds: cases.map(c => c.id).sort((a, b) => a - b),
+  };
+  const provenance = captureProvenance(configuration);
+  // Resolve configuration before starting concurrent paid calls. No fallback model.
+  sharedModels = await buildProvider();
   console.error(`routing eval: ${cases.length} cases, model ${MODEL_ID}, concurrency ${CONCURRENCY}`);
 
   const results: Array<Case & { outcome: Outcome; verdict: string; reply: string; dispatches: number; ms: number }> = [];
@@ -358,12 +386,16 @@ if (SELFTEST) {
   }
 
   const { mkdirSync, writeFileSync } = await import("node:fs");
-  mkdirSync("eval/results", { recursive: true });
+  const inputStable = captureProvenance(configuration).fingerprint === provenance.fingerprint;
+  mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(
     OUT,
     JSON.stringify(
       {
+        runId,
         model: MODEL_ID,
+        provenance,
+        inputStable,
         at: new Date().toISOString(),
         thresholds: THRESHOLDS,
         summary: { n: results.length, pass: by("pass").length, passTextAsk: by("pass_text_ask").length, wrongRoute, missedAsk, unnecessaryAsk: unask, errors },
@@ -375,7 +407,9 @@ if (SELFTEST) {
   );
   console.error(`results -> ${OUT}`);
 
+  if (!inputStable) console.error("Eval inputs changed during the run; result is not a valid baseline");
   const gatePass =
+    inputStable &&
     wrongRouteRate < THRESHOLDS.wrongRoute &&
     missedAskRate < THRESHOLDS.missedAsk &&
     unaskRate < THRESHOLDS.unnecessaryAsk &&

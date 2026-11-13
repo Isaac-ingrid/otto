@@ -28,9 +28,67 @@ proxy, a self-hosted server:
 node eval/run-eval.ts --endpoint '{"id":"magpie","baseUrl":"http://127.0.0.1:3425/v1","apiKey":"…","model":"zhipu/glm-5.3-flash"}'
 ```
 
+### Explicit production-matched profiles
+
+For new gateway measurements prefer `--config /path/to/eval-profile.json`. Options that take a
+value reject missing/blank values, repeated options and unknown flags before resolving credentials;
+a bare `--config` cannot silently select the default model. It uses the same model
+builder and thinking resolver as production, including custom headers; it does not read production
+SQLite or sealed secrets. Match the **effective** settings shown in the workspace, including any
+probe-induced thinking fallback. Connection success is not proof of routing quality.
+
+```json
+{
+  "provider": "openai-compatible",
+  "modelId": "your-model-id",
+  "baseUrl": "https://gateway.example/v1",
+  "thinkingLevel": "auto",
+  "label": "gateway-a-v1",
+  "apiKeyEnv": "OTTO_EVAL_KEY",
+  "headersEnv": "OTTO_EVAL_HEADERS"
+}
+```
+
+Set those environment variables using your local secret manager. `headersEnv` is optional and its
+value, when used, is a JSON object of string-valued HTTP headers. Inline API keys/headers in a
+profile are rejected. `label` is a non-secret identifier: change it whenever credentials, header
+policy or gateway routing change. Endpoint credentials/query strings are rejected. Do not put
+secrets in a model ID, label or command line. Profiles cannot be combined with `--model`/`--endpoint`.
+For catalog models, use the catalog provider/model ID with the desired explicit thinking level.
+
+```bash
+node eval/run-eval.ts --config /path/to/eval-profile.json --out eval/results/noise-r1.json
+# Explicitly repeat on the unchanged tree with r2 ... r5: these spend real tokens.
+node ../../scripts/improvement/compare-results.mjs eval/results/noise-r1.json eval/results/noise-r2.json eval/results/noise-r3.json eval/results/noise-r4.json eval/results/noise-r5.json
+```
+
+Legacy `--endpoint` remains supported but uses its historical adapter, not the production builder;
+its provenance marks this difference. It cannot be pooled with production-profile measurements.
+
+### Provenance and noise reports
+
+New results add a runner-generated UUID `runId`, `provenance` and `inputStable` beside the existing fields; `summary`, labels,
+scoring and the three thresholds are unchanged. Provenance records LF-normalized source hashes,
+commit/dirty metadata, lockfile, runtime, provider/model, effective thinking, selected cases,
+concurrency, profile label and endpoint hash. It omits API keys, raw endpoints and header values.
+An input fingerprint changing during a run invalidates the baseline and fails the runner. Use an
+otherwise idle worktree; before/after hashes cannot detect edits reverted during execution.
+
+The comparison tool reads files only. It requires valid, unique `runId`s and refuses legacy/mixed/
+unstable inputs and different case sets. It sorts case rows before detecting copied artifact content,
+so reordering rows or merely assigning a copy a new ID does not make an independent observation.
+Do not retrofit IDs onto historical results. IDs are traceability, not proof against deliberate
+metadata forgery. It reports means, ranges, sample standard deviations and route/verdict
+flips. It does **not** approve a candidate or change a gate. Use at least five independent full runs
+for an initial noise estimate. Subsets remain debugging evidence only, even if the runner exits 0.
+Matching local fingerprints cannot detect a remote model change or changed credentials/headers;
+record those changes under a new label. Inspect replies/provider errors for secrets before commit.
+
+Procedure and boundaries: [Supervised Improvement of Otto](design/otto-improvement.md).
+
 Results land in `eval/results/` as JSON (committed files are named baselines; timestamped
 ones are ad-hoc). **Exit code 0 only when all three thresholds are met** — wire it into the
-merge check as `pnpm --filter @shepherd/steward eval:routing`.
+merge check as `pnpm --filter @isaac2ingrid/steward eval:routing`.
 
 > Memory has its own gate, built the opposite way (deterministic, no key, all-or-nothing):
 > [memory-eval.md](memory-eval.md). Routing asks *how often* the model is right; memory asks whether
