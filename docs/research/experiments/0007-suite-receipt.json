@@ -1,0 +1,20 @@
+{
+  "productionSource": "4f66827480e2c99ffb3b50bc1f915298b6d110e6",
+  "suites": [
+    {
+      "runtime": "workerd",
+      "files": 67,
+      "tests": 865,
+      "logSha256": "9fb22f80c1e01df91a2a55cec012d62aed500dd54dde05012c08328e2a25835e",
+      "exitCode": 0
+    },
+    {
+      "runtime": "node",
+      "files": 67,
+      "tests": 865,
+      "logSha256": "ee37098a51ec9ed62d8e7df7f43c43153ce36f7e7eef07effe6a50d0b78f2d2f",
+      "exitCode": 0
+    }
+  ],
+  "note": "Node first run exposed an old order-dependent mode assertion; final run checks Thread-to-mode association and cardinality. Production/eval sources unchanged. Windows test:node inline env syntax bypassed by passing STEWARD_TEST_RUNTIME=node to the same script externally."
+}
