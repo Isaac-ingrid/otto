@@ -139,6 +139,8 @@ describe('bound PR watch decisions', () => {
     expect(card).toBeDefined();
     const payload = JSON.parse(card.payload);
     expect(payload.card.text).toContain('确认前不会开始跟进');
+    expect(payload.card.text).toContain('请使用专用确认／不执行按钮；文字回复不会执行。');
+    expect(payload.card.text).not.toContain('也可以直接回复');
     expect(payload.card.text).toContain('未验证 Checks/Actions');
     const action = payload.card.buttons[0].action as string;
     expect(await inside((_a, w) => w.list().filter(row => row.status === 'active'))).toHaveLength(0);

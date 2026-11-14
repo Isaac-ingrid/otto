@@ -33,6 +33,15 @@ it("keeps the complete question option so paths with the same prefix remain dist
   expect(askUserCard({ question: "分析哪个目录？", buttons }).buttons).toEqual(buttons);
 });
 
+it("button-only confirmation copy never offers text replies, without changing ordinary asks", () => {
+  const buttons = [{ label: "确认", action: "prwatch:q_pwa_test:confirm" }, { label: "不执行", action: "prwatch:q_pwa_test:decline" }];
+  const card = askUserCard({ question: "Confirm this PR watch?", buttonsOnly: true, buttons });
+  expect(card.text).toContain("请使用专用确认／不执行按钮；文字回复不会执行。");
+  expect(card.text).not.toContain("也可以直接回复");
+  expect(card.buttons).toEqual(buttons);
+  expect(askUserCard({ question: "Which approach?", buttons }).text).toContain("也可以直接回复这条消息");
+});
+
 function report(overrides: Partial<ReportRow> = {}): ReportRow {
   return {
     workerId: "w_test",

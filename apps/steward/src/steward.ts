@@ -3651,7 +3651,7 @@ export class Steward extends Agent<Env> {
     const command = JSON.parse(proposal.command) as PrWatchDecision;
     await this.enqueueOutbound({ id: `prwatchapproval:${proposal.id}`, kind: 'card', to: owner,
       threadId: approvalThread(command), questionId: proposal.id, urgency: 'push',
-      card: askUserCard({ question: `${approvalText(command)}\n此确认 10 分钟内有效；普通文字回复不会执行。`, buttons: [
+      card: askUserCard({ question: `${approvalText(command)}\n此确认 10 分钟内有效；普通文字回复不会执行。`, buttonsOnly: true, buttons: [
         { label: command.action === 'cancel' ? '确认取消此跟进' : command.action === 'reuse' ? '确认复用并恢复调度' : '确认创建此跟进', action: `prwatch:${proposal.id}:confirm`, primary: true },
         { label: '不执行', action: `prwatch:${proposal.id}:decline` },
       ] }),

@@ -7,7 +7,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
-import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
+import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -324,6 +324,14 @@ describe("what the page derives from a snapshot", () => {
 });
 
 describe("cards as the workspace reads them", () => {
+  it("offers composer answers only for ordinary open questions, including legacy PR cards", async () => {
+    const question = { kind: "question" };
+    expect(canAnswerCard(question, "prwatchapproval:q_pwa_legacy", true)).toBe(false);
+    expect(canAnswerCard(question, "ask:q_ordinary", true)).toBe(true);
+    expect(canAnswerCard(question, "ask:q_closed", false)).toBe(false);
+    expect(canAnswerCard({ kind: "consent" }, "notify:report:w:1", true)).toBe(false);
+    expect(await asset("workspace.js")).toContain("const canAnswer = canAnswerCard(card, cardId, open)");
+  });
   it("turns a flat question message into a title, answers and the Thread note (ADR-0003 shape)", () => {
     const view = cardView(askUserCard({ question: "Which approach?", threadTitle: "Fix login", buttons: [{ label: "A", action: "ask:q1:0" }, { label: "B", action: "ask:q1:1", primary: true }] }));
     expect(view).toMatchObject({ tone: "attention", title: "Which approach?", note: "Fix login" });

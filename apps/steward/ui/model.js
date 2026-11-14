@@ -8,6 +8,10 @@ const ACTIVE_WORKER_STATES = ['queued', 'starting', 'running', 'recovering'];
 
 export const isActiveWorker = (worker) => ACTIVE_WORKER_STATES.includes(worker.state);
 
+// Bound PR decisions only accept their dedicated buttons, never a composer answer.
+// Use the durable card identity so this also covers cards saved before the copy fix.
+export const canAnswerCard = (card, cardId, open) => open && card.kind === 'question' && !cardId.startsWith('prwatchapproval:');
+
 export function threadMatches(thread, query) {
   const needle = String(query ?? '').trim().toLowerCase();
   if (needle === '') return true;

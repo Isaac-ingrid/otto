@@ -380,10 +380,11 @@ export interface AskCardButton {
  * string — Thread identity is resolved server-side from the question row and the message id,
  * never stuffed into the button (§3.1).
  */
-export function askUserCard(input: { question: string; threadTitle?: string; buttons: AskCardButton[] }): LocalMessage {
+export function askUserCard(input: { question: string; threadTitle?: string; buttons: AskCardButton[]; buttonsOnly?: boolean }): LocalMessage {
   const head = input.threadTitle ? `【${input.threadTitle}】` : "";
   const lines = [`${head}❓ ${clip(input.question, 600)}`];
-  if (input.buttons.length > 0) lines.push("", "点按钮即可回答；也可以直接回复这条消息。");
+  if (input.buttonsOnly) lines.push("", "请使用专用确认／不执行按钮；文字回复不会执行。");
+  else if (input.buttons.length > 0) lines.push("", "点按钮即可回答；也可以直接回复这条消息。");
   else lines.push("", "直接回复这条消息即可回答。");
   const buttons = input.buttons.map((button) => ({
     label: button.label,

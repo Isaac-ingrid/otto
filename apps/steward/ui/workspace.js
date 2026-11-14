@@ -14,7 +14,7 @@ import { markup } from './markup.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
-  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
+  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -133,7 +133,7 @@ function cardNode(card, cardId, open) {
       'aria-busy': busy ? 'true' : null, disabled: busy ? true : null,
     }, label);
   }).filter(Boolean);
-  const canAnswer = open && card.kind === 'question';
+  const canAnswer = canAnswerCard(card, cardId, open);
   return h('div', { class: `card${open ? ' is-open' : ''}`, dataset: { tone: card.tone, kind: card.kind } },
     h('div', { class: 'card-kind' }, icon(KIND_ICONS[card.kind]), t(`kind${cap(card.kind)}`)),
     cardTitle(card) ? h('h3', { class: 'card-title' }, cardTitle(card)) : null,
