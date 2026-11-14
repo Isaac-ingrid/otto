@@ -13,7 +13,7 @@
     "eval:memory": "node eval/run-memory-eval.ts",
     "eval:routing": "node eval/run-eval.ts",
     "eval:routing:selftest": "node eval/run-eval.ts --selftest",
-    "eval:pr-intent:selftest": "node --test eval/pr-intent.test.ts eval/run-pr-intent.test.ts",
+    "eval:pr-intent:selftest": "node --test eval/pr-intent.test.ts eval/pr-review-regressions.test.ts eval/run-pr-intent.test.ts",
     "eval:pr-intent": "node eval/run-pr-intent.ts",
     "build:node": "node scripts/build-node.mjs",
     "dev:node": "node scripts/build-node.mjs && node dist/node/steward-node.mjs",

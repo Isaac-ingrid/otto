@@ -1,7 +1,7 @@
 # Experiment 0006: Independent Review and Real-Model Validation
 
 Date: 2026-11-14. Production candidate: `eaacc48`; parent record: [0005](0005-pr-watch-intent-boundaries.md).
-Status: `eaacc48` rejected by independent review; correcting successor before paid runs.
+Status: `eaacc48` rejected by independent review; successor fixes reproduced offline, re-review and paid runs pending.
 No acceptance or deployment implied.
 
 The owner authorized paid validation and parallel review/preparation without a price cap. Initial
@@ -18,7 +18,9 @@ production model builder, not an auth-store fallback. Example, from `apps/stewar
 node eval/run-pr-intent.ts --config /private/profile.json --out eval/results/intent-r1.json --concurrency 1
 ```
 
-The runner preserves all 12 existing expectations and `scoreIntent()`. Per-case child processes
+The runner preserves all 12 existing expectations. The review fix tightens `scoreIntent()` to
+reject additional relay/worker actions on the single readonly one-shot path (scoring version 2);
+there were no paid intent observations under version 1. Per-case child processes
 are killed at 150 seconds; infrastructure errors stop new case launches and preserve partial
 results. No automatic case retry. It records UUID, safe configuration, complete source/runtime
 fingerprint, case hash, every tool attempt/result and synthetic effects. Compaction is disabled;
@@ -43,7 +45,27 @@ Fix targets: cancellation intent; negative English follow/track/notify forms; mo
 queries granting Thread consent; Chinese not-only scope inversion; extra relay actions in one-shot
 scoring; and the local backend accepting production-invalid intervals. Preserve the original
 candidate/results and correct these before measuring the successor. Independent re-review remains
-required; executor repros alone do not constitute that review.
+required; executor repros alone do not constitute that review. Review/TAP copies are LF and
+trailing-whitespace normalized; assertion values and finding content are unchanged.
+
+### Fix disposition before real measurement
+
+- Require explicit, non-negated cancellation intent before mutation; an id/list request is not
+  permission. Retention, mixed negative targets, how-to/hypothetical phrasing fail closed.
+- Negative English forms cover positive `follow`, `track` and notification verbs.
+- PR Thread authorization no longer consumes `explicitFindThreadId`: a model-generated search
+  cannot make its own query into owner consent. Trusted routing metadata/actual owner words remain.
+- Chinese `不仅`/`不只` (including longer variants) deny limited-mode consent; reject the limited
+  call and accept full evidence. URL namespace `statuses-only` cannot grant scope either (additional
+  executor hardening regression).
+- One-shot scoring rejects extra relay/start attempts, including blocked attempts. The overlay
+  now uses the real `PrWatchService` over fresh in-memory SQLite, with network/notice methods that
+  throw if ever called; it no longer invents a permissive service implementation. The service's
+  constructor parameter property was rewritten as an equivalent erasable field/assignment so
+  direct Node strip-only execution can import the real backend.
+- All six review repro tests now pass (previously 0/6). Combined intent/CLI/review selftests: 28
+  passed. Selected Node and workerd suites: 110 each. App typecheck, routing selftest and all 10
+  deterministic memory cases passed. No real model calls or full workspace suite yet.
 
 ## Measurement / next decision
 

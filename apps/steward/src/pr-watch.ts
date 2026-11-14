@@ -25,7 +25,8 @@ const MAX_ACTIVE = 10;
 
 export class PrWatchService {
   private running?: Promise<void>;
-  constructor(private readonly deps: PrWatchDeps) {}
+  private readonly deps: PrWatchDeps;
+  constructor(deps: PrWatchDeps) { this.deps = deps; }
   private get sql(): SqlExecutor { return this.deps.sql; }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
   list(): PrWatchRow[] { return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch ORDER BY (status = 'active') DESC, createdAt DESC LIMIT 100`; }

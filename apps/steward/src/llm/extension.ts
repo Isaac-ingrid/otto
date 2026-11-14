@@ -31,7 +31,7 @@ import {
 import { describeSchedule, parseAtIso, type RoutineService, type RoutineSpecInput } from "../routines.ts";
 import { parsePrUrl, type PrEvidenceMode } from "../pr-evidence.ts";
 import type { PrWatchRow } from "../pr-watch.ts";
-import { hasExplicitPrWatchIntent, mentionsFullPrCi } from "../pr-watch-intent.ts";
+import { hasExplicitPrWatchIntent, hasExplicitPrCancelIntent, mentionsFullPrCi, withoutPrUrls } from "../pr-watch-intent.ts";
 import { MAX_CONCLUSION, MAX_DID_ITEM, MAX_DID_ITEMS, MAX_NEEDS_YOU, type Tone } from "../report-template.ts";
 
 /** What the tools may reach. Implemented by the Steward DO; faked nowhere else. */
@@ -1162,7 +1162,8 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     return { urls, invalid: raw.length > 0 && urls.length === 0 };
   };
   const explicitPrThread = (threadId: string, run: { routedThreadId: string | null }, text: string) => {
-    if (run.routedThreadId === threadId || explicitFindThreadId === threadId || text.includes(threadId)) return true;
+    // Lookup queries are model-generated; their explicit-match memo is not owner consent.
+    if (run.routedThreadId === threadId || text.includes(threadId)) return true;
     const named = ctx.ledger.threads.list().filter(thread => thread.title.length >= 4 && text.includes(thread.title));
     return named.length === 1 && named[0]!.threadId === threadId;
   };
@@ -1193,10 +1194,11 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       const linked = ctx.prWatches.threadsForUrl(url);
       if (!explicit && !(linked.length === 1 && linked[0] === args.threadId)) return err("refused: 所属 Thread 不明确，用 ask_user 确认事项。");
       if (owner.run.routedThreadId && owner.run.routedThreadId !== args.threadId) return err("refused: 不能把当前事项的跟进挂到另一个 Thread。");
-      const mentionsStatuses = /\bcommit\s+statuses?\b/i.test(owner.text);
-      const mentionsChecks = mentionsFullPrCi(owner.text);
-      const negatedLimit = /(?:不要|不能|不想|不是|别)\s*(?:(?:仅|只)(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)|statuses-only)|\b(?:not|no|never|don't|do not)\s+(?:only\s+commit\s+statuses?|statuses-only)\b/i.test(owner.text);
-      const limited = !negatedLimit && /\bstatuses-only\b|\bonly\s+commit\s+statuses?\b|(?:仅|只)(?:看|查|检查|跟进|验证|关注)?[^。\n]{0,12}(?:commit\s+statuses?|提交状态)/i.test(owner.text);
+      const scopeText = withoutPrUrls(owner.text);
+      const mentionsStatuses = /\bcommit\s+statuses?\b/i.test(scopeText);
+      const mentionsChecks = mentionsFullPrCi(scopeText);
+      const negatedLimit = /(?:不要|不能|不想|不是|别)\s*(?:(?:仅|只)(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)|statuses-only)|不(?:仅|只)(?:仅|是)?(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)|\b(?:not|no|never|don't|do not)\s+(?:only\s+commit\s+statuses?|statuses-only)\b/i.test(scopeText);
+      const limited = !negatedLimit && /\bstatuses-only\b|\bonly\s+commit\s+statuses?\b|(?:仅|只)(?:看|查|检查|跟进|验证|关注)?[^。\n]{0,12}(?:commit\s+statuses?|提交状态)/i.test(scopeText);
       if (mentionsStatuses && !limited && !mentionsChecks) return err("refused: 请用 ask_user 明确是仅 commit statuses，还是同时检查 check runs；不能替用户选范围。");
       if ((args.evidenceMode === "statuses-only") !== limited) return err("refused: 验证范围与用户原话不一致；仅看 commit statuses 需要明确说明，权限不足不能静默降级，用 ask_user 确认。");
       if (args.expiresInMinutes !== undefined && (!Number.isFinite(args.expiresInMinutes) || args.expiresInMinutes <= 0 || args.expiresInMinutes > 10080)) return err("refused: 到期时间须大于 0 且不超过 7 天。");
@@ -1239,12 +1241,14 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     execute: async args => ok(JSON.stringify(ctx.prWatches.list().filter(w => args.threadId === undefined || w.threadId === args.threadId))),
   });
   const cancelPrWatch = defineTool({
-    name: "cancel_pr_watch", description: "按用户明确要求取消一个 PR 跟进，编号从 list_pr_watches 获取。取消跟进不等于停止 worker、结束 turn 或取消其他定时任务；多个候选必须 ask_user。",
+    name: "cancel_pr_watch", description: "仅按用户明确取消要求取消一个 PR 跟进；查看、保留或不要取消不授权取消，编号本身不是授权。编号从 list_pr_watches 获取。取消跟进不等于停止 worker、结束 turn 或取消其他定时任务；多个候选必须 ask_user。",
     parameters: Type.Object({ watchId: Type.String(), basis: Type.Literal("user_explicit") }), replay: "safe",
     execute: async args => {
       const owner = await ownerPrTurn();
       if (!owner) return err("refused: 取消 PR 跟进只能由真实用户消息发起。");
+      if (!hasExplicitPrCancelIntent(owner.text)) return err("refused: 用户未明确授权取消 PR 跟进，或要求保留/不要取消；编号或查看请求不是取消授权，请用 ask_user 确认。");
       const all = ctx.prWatches.list();
+      if (all.filter(w => owner.text.includes(w.id)).length > 1) return err("refused: 消息涉及多个跟进编号，不能猜测取消范围，用 ask_user 逐个确认。");
       const watch = all.find(w => w.id === args.watchId);
       if (!watch) return err("refused: 未找到跟进，先用 list_pr_watches 查询。");
       if (watch.status !== "active") return ok(`跟进 ${watch.id} 已是 ${watch.status}，没有新的取消操作。`);

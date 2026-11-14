@@ -13,7 +13,7 @@ async function scripted(c: IntentCase, calls: Array<[string, Parameters<typeof f
 const fixture = (id: number) => structuredClone(INTENT_CASES.find(c => c.id === id)!);
 
 test('review P1-1: listing/retaining/negating cancellation cannot cancel an active watch', async () => {
-  for (const text of ['现在都在盯哪些 PR？', '不要取消 pw_x', '保留 pw_x，继续盯着', 'Do not cancel pw_x', 'Keep watch pw_x']) {
+  for (const text of ['现在都在盯哪些 PR？', '不要取消 pw_x', '保留 pw_x，继续盯着', 'Do not cancel pw_x', 'Keep watch pw_x', '取消那条，但不是 pw_x', 'Cancel that watch, not pw_x', '取消 pw_other，不要碰 pw_x']) {
     const c = { ...fixture(5), text };
     const result = await scripted(c, [['list_pr_watches', {}], ['cancel_pr_watch', { watchId: 'pw_x', basis: 'user_explicit' }]]);
     assert.equal(result.watches.find(w => w.id === 'pw_x')!.status, 'active', text);
@@ -46,6 +46,13 @@ test('review P1-4: Chinese not-only never authorizes limited evidence', async ()
     assert.equal(full.watches.filter(w => w.status === 'active').length, 1, prefix);
     assert.equal(full.watches.find(w => w.status === 'active')!.evidenceMode, 'checks-and-statuses');
   }
+  // URL namespace names are target data, never statuses-only consent.
+  const url = 'https://github.com/statuses-only/demo/pull/12';
+  const c = { ...fixture(1), text: `Watch ${url} for CI.`, associations: [{ threadId: THREAD, url }] };
+  const limited = await scripted(c, [['create_pr_watch', create({ url, evidenceMode: 'statuses-only' })]]);
+  assert.equal(limited.watches.filter(w => w.status === 'active').length, 0);
+  const full = await scripted(c, [['create_pr_watch', create({ url })]]);
+  assert.equal(full.watches.filter(w => w.status === 'active').length, 1);
 });
 
 test('review P2-5: readonly start followed by a write-mode relay is not a one-shot pass', async () => {

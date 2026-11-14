@@ -44,7 +44,7 @@ if (isWorker) {
 }
 
 const deadlineMs = 150_000;
-const configuration = { ...profile.safe, measurement: 'pr-tool-intent', scoringVersion: 1,
+const configuration = { ...profile.safe, measurement: 'pr-tool-intent', scoringVersion: 2,
   effectiveThinkingLevel: thinking, concurrency, deadlineMs, totalCaseCount: INTENT_CASES.length,
   caseIds: INTENT_CASES.map(c => c.id), caseHash: hash(canonical(INTENT_CASES)) };
 const provenance = captureProvenance(configuration);

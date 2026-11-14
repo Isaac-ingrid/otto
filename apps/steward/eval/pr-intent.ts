@@ -5,7 +5,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Harness, MemoryStorage, createRegistry, type ModelRef } from '@earendil-works/pi-durable';
 import { buildStewardExtension } from '../src/llm/extension.ts';
 import type { PrEvidenceMode } from '../src/pr-evidence.ts';
-import type { PrWatchRow } from '../src/pr-watch.ts';
+import { PrWatchService } from '../src/pr-watch.ts';
 import { buildEvalContext, openSeededLedger, type Observation } from './harness.ts';
 
 export const PR = 'https://github.com/example/otto-demo/pull/12';
@@ -86,8 +86,10 @@ export function scoreIntent(c: IntentCase, observation: IntentObservation): Inte
   const calls = observation.toolCalls;
   const success = (name: string) => calls.filter(t => t.name === name && t.result?.isError === false);
   if (c.expected.kind === 'one-shot') {
-    if (calls.some(t => !READS.has(t.name) && !['start_worker', 'send_to_worker', 'ask_user'].includes(t.name))) return 'unexpected_persistence';
-    if (calls.some(t => t.name === 'start_worker' && t.arguments.mode !== 'readonly')) return 'wrong_tool';
+    if (calls.some(t => t.name === 'send_to_worker')) return 'wrong_tool';
+    if (calls.some(t => !READS.has(t.name) && !['start_worker', 'ask_user'].includes(t.name))) return 'unexpected_persistence';
+    const starts = calls.filter(t => t.name === 'start_worker');
+    if (starts.length > 1 || starts.some(t => t.arguments.mode !== 'readonly')) return 'wrong_tool';
     // Only verifies the one-shot delegation boundary, NOT that real CI evidence was fetched.
     return success('start_worker').length === 1 ? 'pass' : 'not_verified';
   }
@@ -120,32 +122,31 @@ export function scoreIntent(c: IntentCase, observation: IntentObservation): Inte
 
 /** Explicit caller-supplied models only. No auth-store/env fallback, CLI or paid default. */
 export async function runIntentCase(c: IntentCase, models: Models, agent: { model: ModelRef; thinkingLevel: ModelThinkingLevel }) {
-  const { ledger } = openSeededLedger(Date.now());
+  const { ledger, sql } = openSeededLedger(Date.now());
   const effects: Observation = { asks: [], dispatches: [] };
   const ctx = buildEvalContext(ledger, 10_000 + c.id, effects);
-  const now = Date.now();
-  const watches: PrWatchRow[] = c.associations.map((a, i) => ({
-    id: a.activeId ?? `history_${i}`, threadId: a.threadId, url: a.url, evidenceMode: 'checks-and-statuses',
-    status: a.activeId ? 'active' : 'completed', createdAt: now, expiresAt: now + 86400000,
-    intervalMs: 900000, nextCheckAt: now, generation: 0, head: null, observedState: null,
-    checkedAt: null, lastError: null, checks: 0, failed: 0, pending: 0,
-  }));
+  // Use the REAL deterministic backend over the isolated in-memory ledger. No scheduler
+  // or tick is installed; any accidental network/notification attempt fails, never goes live.
+  const watches = new PrWatchService({ sql, tx: fn => fn(), threadExists: id => !!ledger.threads.get(id),
+    notify: async () => { throw new Error('eval forbids outbound notices'); },
+    read: async () => { throw new Error('eval forbids GitHub reads'); },
+  });
+  for (const [i, association] of c.associations.entries()) {
+    const id = association.activeId ?? `history_${i}`;
+    watches.create({ id, threadId: association.threadId, url: association.url, evidenceMode: 'checks-and-statuses' });
+    if (!association.activeId) sql`UPDATE sh_pr_watch SET status = 'completed' WHERE id = ${id}`;
+  }
   ctx.currentRun = async () => ({ operationId: `user:eval_${10_000 + c.id}`, kind: 'user', provenance: `user:eval_${10_000 + c.id}`, routedThreadId: c.routedThreadId });
   ctx.ownerMessageText = async () => c.text;
   ctx.prWatches = {
-    list: () => structuredClone(watches),
-    targetsForThread: id => [...new Set(watches.filter(w => w.threadId === id).map(w => w.url))],
-    threadsForUrl: url => [...new Set(watches.filter(w => w.url === url).map(w => w.threadId))],
+    list: () => watches.list(),
+    targetsForThread: id => watches.targetsForThread(id),
+    threadsForUrl: url => watches.threadsForUrl(url),
     create: async input => {
       if (c.failCreate) throw new Error('injected backend refusal');
-      const existing = watches.find(w => w.id === input.id);
-      if (existing) return existing;
-      const row: PrWatchRow = { ...input, status: 'active', createdAt: now, expiresAt: input.expiresAt ?? now + 86400000,
-        intervalMs: (input.intervalSeconds ?? 900) * 1000, nextCheckAt: now, generation: 0, head: null,
-        observedState: null, checkedAt: null, lastError: null, checks: 0, failed: 0, pending: 0 };
-      watches.push(row); return row;
+      return watches.create(input);
     },
-    cancel: id => { const row = watches.find(w => w.id === id); if (!row) return false; row.status = 'cancelled'; return true; },
+    cancel: id => watches.cancel(id),
   };
   const registry = createRegistry();
   registry.install(buildStewardExtension(ctx));
@@ -157,6 +158,6 @@ export async function runIntentCase(c: IntentCase, models: Models, agent: { mode
     const observation = observeIntentCalls(messages);
     if (settled.status !== 'done') observation.issues.push('submission did not finish');
     const reply = messages.filter(m => m.role === 'assistant').flatMap(m => m.content.flatMap(p => p.type === 'text' ? [p.text] : [])).join('\n');
-    return { caseId: c.id, observation, verdict: scoreIntent(c, observation), reply, watches: structuredClone(watches), effects };
+    return { caseId: c.id, observation, verdict: scoreIntent(c, observation), reply, watches: watches.list(), effects };
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }
