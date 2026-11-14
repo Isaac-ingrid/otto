@@ -251,7 +251,11 @@ describe("the dispatch service (Dispatcher.startWorker)", () => {
     expect(roCmd!.args).not.toHaveProperty("base"); // readonly never relays a branch
     expect(wrCmd!.args).toMatchObject({ mode: "write" });
     const snap = await ownerStub().debugSnapshot();
-    expect(snap.threads.map((t) => t.workers[0]!.mode)).toEqual(["readonly", "write"]);
+    // Thread views sort by lastActivityAt DESC (then id), not dispatch order. Check the
+    // actual Thread-to-mode association, including cardinality, rather than a timing tie.
+    expect(snap.threads).toHaveLength(2);
+    expect(snap.threads.find(t => t.title === '梳理认证')?.workers[0]?.mode).toBe('readonly');
+    expect(snap.threads.find(t => t.title === '修 bug')?.workers[0]?.mode).toBe('write');
     fake.close();
   });
 
