@@ -2,6 +2,7 @@
 
 Date: 2026-11-13. Parent: `cd08d1a`. Candidate branch: `feat/pr-watch-tools`.
 Status: candidate `60efdc8` passed one real-model routing gate; not merged or deployed.
+The boundary-fix successor is tracked in [0005](0005-pr-watch-intent-boundaries.md) and needs a new gate.
 No autonomous workflow or child agents were launched. Production remains on `9fc76c7`.
 
 ## Observed friction / outer-loop decision
@@ -155,6 +156,9 @@ owner's explicit authorization.
 
 ### B. Focused PR-tool intent acceptance (offline infrastructure implemented)
 
+Implementation/limitations below describe `2ea95f8`. Subsequent production-boundary fixes and
+updated scripted observations are recorded separately in [0005](0005-pr-watch-intent-boundaries.md).
+
 The routing corpus has no PR-follow utterances, so it says nothing about whether the model reaches
 for `create_pr_watch`/`list_pr_watches`/`cancel_pr_watch` instead of the old worker-poll plus
 follow-up path. This is a new measurement, not a routing-gate change; it needs owner authorization
@@ -229,9 +233,10 @@ runner. Independent review and real-model intent acceptance remain outstanding.
 
 ## Reviewer / next decision
 
-Executor self-review only; independent review pending. The candidate meets ADR-0001 decision 14
-on this recorded run; it has not been merged or deployed. Owner approval and focused natural-
+Executor self-review only; independent review pending. Candidate `60efdc8` meets ADR-0001 decision
+14 on this recorded run; that evidence does not transfer to the boundary-fix successor. Neither
+has been merged or deployed. Owner approval and focused natural-
 language acceptance remain separate decisions. Do not reinterpret the red baseline as green or
-claim a statistical improvement from one pair. The newly exposed #10/#11/#12 limitations must
-be resolved before deployment; the recorded routing pass does not clear them. Full workspace
+claim a statistical improvement from one pair. The #10/#11/#12 fixes in experiment 0005 require
+new validation before deployment; the old routing pass does not clear them. Full workspace
 tests were not run.

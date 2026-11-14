@@ -31,6 +31,7 @@ import {
 import { describeSchedule, parseAtIso, type RoutineService, type RoutineSpecInput } from "../routines.ts";
 import { parsePrUrl, type PrEvidenceMode } from "../pr-evidence.ts";
 import type { PrWatchRow } from "../pr-watch.ts";
+import { hasExplicitPrWatchIntent, mentionsFullPrCi } from "../pr-watch-intent.ts";
 import { MAX_CONCLUSION, MAX_DID_ITEM, MAX_DID_ITEMS, MAX_NEEDS_YOU, type Tone } from "../report-template.ts";
 
 /** What the tools may reach. Implemented by the Steward DO; faked nowhere else. */
@@ -1167,7 +1168,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   };
   const createPrWatch = defineTool({
     name: "create_pr_watch",
-    description: "按用户明确要求创建无模型的只读 PR 跟进，不派 worker、不设重复回看、不修改/重跑/合并。先用 get_thread 查看所属事项和已知 PR。url 可省略，但仅当明确事项下唯一 PR 时复用；有歧义用 ask_user。验证范围必须说清楚，statuses-only 需用户原话明确要求仅看 commit statuses。默认到期 24 小时。",
+    description: "仅按用户明确持续跟进要求创建无模型的只读 PR 跟进；一次性查询或不要持续跟进时禁止创建。不派 worker、不设重复回看、不修改/重跑/合并。先用 get_thread 查看所属事项和已知 PR。url 可省略，但仅当明确事项下唯一 PR 时复用；有歧义用 ask_user。验证范围必须说清楚，statuses-only 需用户原话明确要求仅看 commit statuses。默认到期 24 小时。",
     parameters: Type.Object({
       threadId: Type.String(), url: Type.Optional(Type.String()),
       evidenceMode: Type.Union([Type.Literal("checks-and-statuses"), Type.Literal("statuses-only")]),
@@ -1179,6 +1180,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     execute: async (args, api) => {
       const owner = await ownerPrTurn();
       if (!owner) return err("refused: PR 跟进只能由真实用户消息明确授权，事件/例行运行不能创建。");
+      if (!hasExplicitPrWatchIntent(owner.text)) return err("refused: 用户未明确授权持续 PR 跟进，或只要求查一次/不要持续跟进。不能创建或恢复 watch；意图不明确请用 ask_user 确认。");
       if (!ctx.ledger.threads.get(args.threadId)) return err("refused: Thread 不存在，先用 ask_user 确认所属事项；不要派 worker 代替创建跟进。");
       const supplied = args.url === undefined ? null : parsePrUrl(args.url);
       if (args.url !== undefined && !supplied) return err("refused: 需要规范的 GitHub PR 链接。");
@@ -1192,8 +1194,8 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (!explicit && !(linked.length === 1 && linked[0] === args.threadId)) return err("refused: 所属 Thread 不明确，用 ask_user 确认事项。");
       if (owner.run.routedThreadId && owner.run.routedThreadId !== args.threadId) return err("refused: 不能把当前事项的跟进挂到另一个 Thread。");
       const mentionsStatuses = /\bcommit\s+statuses?\b/i.test(owner.text);
-      const mentionsChecks = /check[ -]?runs?|\bchecks\b|\bactions\b|完整\s*CI|全部检查/i.test(owner.text);
-      const negatedLimit = /(?:不要|不能|不想|不是|别)\s*(?:仅|只)(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)/i.test(owner.text);
+      const mentionsChecks = mentionsFullPrCi(owner.text);
+      const negatedLimit = /(?:不要|不能|不想|不是|别)\s*(?:(?:仅|只)(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)|statuses-only)|\b(?:not|no|never|don't|do not)\s+(?:only\s+commit\s+statuses?|statuses-only)\b/i.test(owner.text);
       const limited = !negatedLimit && /\bstatuses-only\b|\bonly\s+commit\s+statuses?\b|(?:仅|只)(?:看|查|检查|跟进|验证|关注)?[^。\n]{0,12}(?:commit\s+statuses?|提交状态)/i.test(owner.text);
       if (mentionsStatuses && !limited && !mentionsChecks) return err("refused: 请用 ask_user 明确是仅 commit statuses，还是同时检查 check runs；不能替用户选范围。");
       if ((args.evidenceMode === "statuses-only") !== limited) return err("refused: 验证范围与用户原话不一致；仅看 commit statuses 需要明确说明，权限不足不能静默降级，用 ask_user 确认。");
@@ -1559,6 +1561,6 @@ const ROLE_PROMPT = `你是 Otto，用户的个人助手，负责调度用户机
 8. notify_user 的三段有硬性长度限制（结论 ≤80 字；做了什么 ≤4 条、每条 ≤100 字；需要你 ≤120 字），超长会被拒绝——压缩重写，不要截断。
 9. 永远不要替用户宣布「这件事完成了」；完成与否由汇报与事实说话。
 10. 例行任务与定时回看（spec §8）：用户表达周期性需求（「每个工作日 9 点汇总昨晚进展」）时，先把触发条件和要做的事复述给他确认，确认后用 create_routine（basis=user_explicit；digest=确定性汇总，instruction=按指令执行；cron 用 UTC）。你只是「察觉到重复模式」时，用 suggest_routine 发一张带按钮的建议卡——点按钮才会创建，绝不绕过按钮。给某个 Thread 设闹钟用 set_followup；管理用 list_schedules / pause_schedule / cancel_schedule（「暂停那个每天九点的」）。
-10b. 用户要求持续盯 PR 状态时，用 create_pr_watch，不要派 worker 轮询，也不要额外 set_followup/create_routine。首次最好给 PR 链接；只有当前明确 Thread 下唯一已知 PR 才能省略，有多个候选必须 ask_user。先用 get_thread 看 pullRequests 或 list_pr_watches；所属事项不明确也要问，不要为了跟进而派 worker。evidenceMode 必须与用户授权一致：用户明说只看 commit statuses 才选 statuses-only，并说明未验证 Checks/Actions；其余使用 checks-and-statuses，权限不足如实告知，绝不静默降级。只有工具返回成功才能说已创建；工具拒绝时不要用 worker/定时回看绕过。查看用 list_pr_watches，取消用 cancel_pr_watch；取消跟进不等于取消 turn 或停 worker。
+10b. 只有用户明确要求持续盯 PR 状态时才用 create_pr_watch；一次性查询或明确不要持续跟进，不能创建 watch 或追加日程，一次性查询如需 worker 仅可 readonly。持续跟进不要派 worker 轮询，也不要额外 set_followup/create_routine。首次最好给 PR 链接；只有当前明确 Thread 下唯一已知 PR 才能省略，有多个候选必须 ask_user。先用 get_thread 看 pullRequests 或 list_pr_watches；所属事项不明确也要问，不要为了跟进而派 worker。evidenceMode 必须与用户授权一致：用户明说只看 commit statuses 才选 statuses-only，并说明未验证 Checks/Actions；其余使用 checks-and-statuses，权限不足如实告知，绝不静默降级。只有工具返回成功才能说已创建；工具拒绝时不要用 worker/定时回看绕过。查看用 list_pr_watches，取消用 cancel_pr_watch；取消跟进不等于取消 turn 或停 worker。
 11. ⟦routine R⟧ 输入到达时按指令执行：要派发必须带 provenanceRef=routine:R（或指令里引用的真实用户消息），无事可做用 no_action 收尾——那是默认结局，不要为了「显得有用」而制造通知。⟦followup F⟧ 到期时同理：先看那个 Thread 的现状再决定。
 12. 记忆（notes_* 工具）：值得记的是「不知道它就会派错/多问/说错」的事——用户偏好与项目约定，不是闲聊内容。写入分两步：先 notes_propose 看查重/相似/腾挪候选（similar 只是字面相近，不能据此认定「同一件事」），再 notes_commit。两个意图必须分清：supersedes 用于旧事实已被取代（旧条目转为历史版本），evicts 只用于腾地方（旧条目仍成立）；相似不等于相同，改写一条已确认的记忆需要用户重新确认。信任规则是硬性的：常驻层永远要有 evidence=用户真正说过的消息 id（用户消息触发的轮次可省略，系统自动挂当轮消息；事件触发的轮次必须指明）；worker_reported / inferred 来源先写项目层（待确认），用户在对话里确认后（notes_confirm，evidenceRef=确认那条消息）才能提升常驻层；connector 来源永远只进项目层。每次写入系统会自动在下一条回复后附「记账」，正文不必复述。用户要看/置顶/删除记忆时用 notes_list / notes_pin / notes_remove。系统还会按运行史自动标注「可能已过时」：一条来自失败运行的环境结论，一旦同一机器/仓库后来跑成功，就会被标上（标注只提示，不会隐藏）；看到标注就该核实现状，确认仍成立时用 supersedes 记一条新的当前结论（旧条目转为历史版本），而不是继续引用旧的那条。`

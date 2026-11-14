@@ -16,8 +16,8 @@ async function scripted(id: number, calls: Array<[string, Parameters<typeof faux
   return runIntentCase(INTENT_CASES.find(c => c.id === id)!, built.models, { model: { provider: 'faux', modelId: 'faux-1' }, thinkingLevel: 'off' });
 }
 
-test('eleven intent fixtures have an offline acceptance path (known refusal #10 tested separately)', { timeout: 90000 }, async t => {
-  for (const c of INTENT_CASES.filter(c => c.id !== 10)) await t.test(`intent ${c.id}: ${c.expected.kind}`, async () => {
+test('all twelve intent fixtures have an offline acceptance path', { timeout: 90000 }, async t => {
+  for (const c of INTENT_CASES) await t.test(`intent ${c.id}: ${c.expected.kind}`, async () => {
     let calls: Array<[string, Parameters<typeof fauxToolCall>[1]]>;
     if (c.expected.kind === 'create') calls = [['get_thread', { threadId: THREAD }], ['create_pr_watch', { ...create(c.expected.mode), ...(c.id === 1 ? { url: PR } : {}) }]];
     else if (c.expected.kind === 'list') calls = [['list_pr_watches', {}]];
@@ -31,6 +31,7 @@ test('eleven intent fixtures have an offline acceptance path (known refusal #10 
     assert.deepEqual(result.observation.toolCalls.map(call => call.name), calls.map(([name]) => name));
     if (c.expected.kind === 'create') {
       assert.equal(result.watches.filter(w => w.status === 'active').length, 1);
+      assert.equal(result.watches.find(w => w.status === 'active')!.evidenceMode, c.expected.mode);
       assert.equal(result.effects.dispatches.length, 0, 'watch creation is not a worker dispatch in intent measurement');
       if (c.expected.mode === 'statuses-only') assert.match(result.observation.toolCalls.at(-1)!.result!.text, /未验证 Checks\/Actions/);
     }
@@ -55,15 +56,6 @@ test('rejected PR creation and policy-blocked fallbacks all appear as attempts',
   assert.equal(result.watches.filter(w => w.status === 'active').length, 0);
 });
 
-test('known production limitation #10 remains NOT VERIFIED, not relabelled as an ask', async () => {
-  const result = await scripted(10, [['get_thread', { threadId: THREAD }], ['create_pr_watch', create()]]);
-  assert.equal(INTENT_CASES.find(c => c.id === 10)!.expected.kind, 'create');
-  assert.equal(result.verdict, 'not_verified');
-  assert.equal(result.observation.toolCalls.at(-1)!.result!.isError, true);
-  assert.match(result.observation.toolCalls.at(-1)!.result!.text, /明确是仅 commit statuses/);
-  assert.equal(result.watches.filter(w => w.status === 'active').length, 0);
-});
-
 test('scope downgrade is detected even when production refuses the attempted call', async () => {
   const result = await scripted(10, [['create_pr_watch', create('statuses-only')]]);
   assert.equal(result.verdict, 'scope_mismatch');
@@ -77,13 +69,15 @@ test('ambiguous target must ask, not guess a watch even if the tool refuses', as
   assert.equal(result.observation.toolCalls[0]!.result!.isError, true);
 });
 
-test('one-shot requests expose unwanted watch creation; no deterministic intent guard is claimed', async () => {
+test('one-shot watch attempts remain selection failures but the tool prevents persistence', async () => {
   for (const id of [11, 12]) {
     const result = await scripted(id, [['create_pr_watch', create(id === 12 ? 'statuses-only' : 'checks-and-statuses')]]);
     assert.equal(result.verdict, 'unexpected_persistence');
-    // The existing production gate checks owner/target/scope, not the meaning of "one shot".
-    // A future REAL-model run must demonstrate that it chooses not to call this tool.
-    assert.equal(result.watches.filter(w => w.status === 'active').length, 1);
+    // The model chose wrongly, but the production guard must now reject the write.
+    // A REAL-model run must still demonstrate correct tool choice; refusal is not a pass.
+    assert.equal(result.observation.toolCalls[0]!.result!.isError, true);
+    assert.match(result.observation.toolCalls[0]!.result!.text, /未明确授权持续 PR 跟进/);
+    assert.equal(result.watches.filter(w => w.status === 'active').length, 0);
   }
 });
 

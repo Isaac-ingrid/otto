@@ -97,6 +97,49 @@ describe('owner-controlled PR watch tools', () => {
     expect((await active())[0]?.evidenceMode).toBe('checks-and-statuses');
   });
 
+  it('CI plus commit statuses requests full evidence, never a limited downgrade', async () => {
+    await call('create_pr_watch', { ...args, evidenceMode: 'checks-and-statuses' }, `持续盯住 ${URL} 的 CI 和 commit statuses，有变化提醒我。`);
+    expect(await active()).toHaveLength(1);
+    expect((await active())[0]!.evidenceMode).toBe('checks-and-statuses');
+    expect(await results()).toContain('已创建只读跟进');
+  });
+
+  it.each([
+    `帮我看下 ${URL} 的 CI。`,
+    `现在只查这一次 ${URL}，不要创建持续跟进。`,
+    `持续盯住 ${URL}，但只看一次 commit statuses。`,
+    `Check ${URL} only once; do not create a watch.`,
+    'https://github.com/watch/monitor/pull/42 帮我看下状态。',
+  ])('cannot create persistent work from absent/negated/one-shot intent: %s', async text => {
+    await call('create_pr_watch', args, text);
+    expect(await active()).toHaveLength(0);
+    expect(await results()).toContain('未明确授权持续 PR 跟进');
+  });
+
+  it.each(['not only commit statuses', 'no statuses-only'])('does not invert an English scope negation: %s', async negation => {
+    const text = `Watch ${URL} for full CI, ${negation}.`;
+    await call('create_pr_watch', args, text);
+    expect(await active()).toHaveLength(0);
+    expect(await results()).toContain('验证范围与用户原话不一致');
+    await call('create_pr_watch', { ...args, evidenceMode: 'checks-and-statuses' }, text);
+    expect(await active()).toHaveLength(1);
+    expect((await active())[0]!.evidenceMode).toBe('checks-and-statuses');
+  });
+
+  it('one-shot wording cannot re-arm an existing watch under the reuse path', async () => {
+    await call('create_pr_watch', args, `持续盯住 ${URL}，仅看 commit statuses。`);
+    const first = (await active())[0]!;
+    await call('create_pr_watch', args, `现在只看一次 ${URL} 的 commit statuses，不要持续跟进。`);
+    expect(await active()).toEqual([first]);
+    expect(await results()).toContain('未明确授权持续 PR 跟进');
+  });
+
+  it('negated CI does not authorize full scope without clarifying statuses-only', async () => {
+    await call('create_pr_watch', { ...args, evidenceMode: 'checks-and-statuses' }, `持续盯住 ${URL} 的 commit statuses，CI 不用管。`);
+    expect(await active()).toHaveLength(0);
+    expect(await results()).toContain('明确是仅 commit statuses');
+  });
+
   it('repeating an owner request reuses the active watch without extending expiry', async () => {
     await call('create_pr_watch', args, `盯住 ${URL}，仅看 commit statuses。`);
     const first = (await active())[0]!;

@@ -26,7 +26,12 @@ PR or Thread is ambiguous, ask the owner; do not dispatch a worker to invent an 
 `get_thread` includes `pullRequests` and `prWatches` to make those references inspectable.
 
 Creation and cancellation require an actual owner run; event/routine/follow-up runs cannot create
-a commission. Limited scope must be explicit in the owner's words. Repeating the same request
+a commission. Conversation-tool creation additionally requires explicit persistent intent; a URL
+or "check once" request is not enough. Explicit one-shot/negative or contradictory watch wording
+refuses creation before reuse/replay. This conservative lexical gate is not a general language
+parser: clarify ambiguous intent. "CI and commit statuses" means full evidence scope, while
+negated CI/Checks is not full-scope authorization. Limited scope must be explicit in the owner's
+words. Repeating the same request
 reuses the active watch and re-arms scheduling without extending expiry; conflicting scope or
 lifetime requires owner clarification. Once a PR-create tool has been attempted, the same turn
 cannot fall back to a worker or another routine/follow-up (and the reverse order is also blocked).
