@@ -1,6 +1,7 @@
 # ADR-0019: PR-watch changes require a bound owner confirmation
 
-Status: accepted for the candidate; deployment remains subject to ADR-0001 routing/acceptance gates.
+Status: accepted; implemented and deployed as source `4f66827` after ADR-0001 gates passed.
+See [experiment 0007](../research/experiments/0007-bound-pr-watch-confirmation.md) for evidence and limitations.
 
 ## Context
 

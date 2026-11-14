@@ -1,0 +1,61 @@
+{
+  "startedAt": "2026-11-14T23:30:25.568Z",
+  "status": "passed",
+  "stage": "post_cancel",
+  "synthetic": true,
+  "source": "4f66827",
+  "steps": [],
+  "proposals": [
+    "q_pwa_a26e55b2-e948-48e0-8513-a0e9d4dd2e89",
+    "q_pwa_3ba7b362-d699-4f55-b7a2-976bb789cbc9"
+  ],
+  "before": {
+    "sh_run": 61,
+    "sh_worker": 12,
+    "outbox": 23,
+    "sh_followup": 1,
+    "sh_routine": 2
+  },
+  "browserSession": true,
+  "createMessageId": "deploy-confirm-76d970c1-20b7-432f-98f2-54a9fe215303-create",
+  "createProposalId": "q_pwa_a26e55b2-e948-48e0-8513-a0e9d4dd2e89",
+  "createTuple": {
+    "action": "create",
+    "threadId": "t_01M72FJVV7GMGYT5FMHKADECSW",
+    "url": "https://github.com/Isaac-ingrid/otto-write-lab/pull/1",
+    "evidenceMode": "statuses-only",
+    "expiresInMinutes": 60,
+    "intervalSeconds": 60
+  },
+  "plainReplyDidNotAuthorize": true,
+  "pendingSurvivedRestart": true,
+  "createActionStatus": 202,
+  "watchId": "pw_a26e55b2-e948-48e0-8513-a0e9d4dd2e89",
+  "confirmationModelFree": true,
+  "staleReplayStatus": 409,
+  "firstCheckedAt": 1794699062329,
+  "observedHead": "88d4ce3f98bcc13fd3b1a21811a1c6ac3d04a852",
+  "recoveredCheckedAt": 1794699182353,
+  "pollingAndRecoveryModelFree": true,
+  "noDuplicateProgressNotice": true,
+  "listMessageId": "deploy-confirm-7e835aa5-8172-4aa4-b880-2e8270c9a5b9-list",
+  "cancelMessageId": "deploy-confirm-51bae5ff-20b3-41bd-8268-988b2d5a6c96-cancel",
+  "cancelProposalId": "q_pwa_3ba7b362-d699-4f55-b7a2-976bb789cbc9",
+  "cancelActionStatus": 202,
+  "after": {
+    "sh_run": 64,
+    "sh_worker": 12,
+    "outbox": 23,
+    "sh_followup": 1,
+    "sh_routine": 2
+  },
+  "noWorkerOrFollowup": true,
+  "modelRunsAdded": 3,
+  "activeTestWatches": 0,
+  "finishedAt": "2026-11-14T23:34:22.837Z",
+  "logoutStatus": 200,
+  "fixtureRestoredToSuccess": true,
+  "fixtureContext": "otto/watch-smoke-9fc76c7",
+  "postCancelEligibleWindowVerified": true,
+  "postCancelVerifiedAt": "2026-11-14T23:36:14.181Z"
+}

@@ -1,0 +1,18 @@
+{
+  "startedAt": "2026-11-14T23:26:50.145Z",
+  "status": "failed",
+  "stage": "setup",
+  "synthetic": true,
+  "source": "4f66827",
+  "steps": [],
+  "proposals": [],
+  "before": {
+    "sh_run": 61,
+    "sh_worker": 12,
+    "outbox": 23,
+    "sh_followup": 1,
+    "sh_routine": 2
+  },
+  "failureCode": "private_acceptance_failure",
+  "finishedAt": "2026-11-14T23:26:50.260Z"
+}

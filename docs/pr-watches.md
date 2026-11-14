@@ -6,18 +6,19 @@ PR to an existing Thread. Otto waits, checks external state, and reports meaning
 starting an LLM turn or worker. This is not automatic repair, review, branch protection verification,
 or permission to push/merge/re-run anything.
 
-## Natural-language tools (candidate; real-model routing gate pending)
+## Natural-language tools (deployed 2026-11-15)
 
 The source includes `create_pr_watch`, `list_pr_watches` and `cancel_pr_watch`. Creation/cancellation
 are now **two-phase** ([ADR-0019](adr/0019-pr-watch-owner-confirmation.md)): the model only proposes;
 the owner must press the dedicated server-rendered confirmation button before any watch change.
 The preview binds the operation, PR, Thread, evidence scope, interval and lifetime. Ordinary text,
 quoted agreement and generic ask buttons cannot authorize it. Confirmations expire after ten
-minutes and duplicate taps do not repeat or renew the effect. Do not assume
-these are live until this prompt/tool change passes ADR-0001 decision 14 and is deployed. The
-previously deployed version remains Owner-API-only.
+minutes and duplicate taps do not repeat or renew the effect. Source `4f66827` passed independent
+review, full Node/workerd app suites and the real-model routing/intent gates before deployment;
+see [experiment 0007](research/experiments/0007-bound-pr-watch-confirmation.md). The live lab smoke
+used authenticated workspace HTTP/CSRF actions and synthetic statuses, not real CI/phone push.
 
-Examples after deployment:
+Examples:
 
 - "Follow https://github.com/owner/repo/pull/42; only commit statuses, notify me when successful,
   do not modify code."
@@ -30,8 +31,8 @@ Known targets come from structured PR-consent/watch records, not arbitrary worke
 PR or Thread is ambiguous, ask the owner; do not dispatch a worker to invent an association.
 `get_thread` includes `pullRequests` and `prWatches` to make those references inspectable.
 
-Creation and cancellation require an actual owner run; event/routine/follow-up runs cannot create
-a commission. Conversation-tool creation additionally requires explicit persistent intent; a URL
+Creation and cancellation tool proposals require an actual owner run; event/routine/follow-up
+runs cannot propose a commission. Applying the owner's button decision does not invoke the model. Conversation-tool creation additionally requires explicit persistent intent; a URL
 or "check once" request is not enough. Explicit one-shot/negative or contradictory watch wording
 refuses creation before reuse/replay. This conservative lexical gate is not a general language
 parser: clarify ambiguous intent. "CI and commit statuses" means full evidence scope, while

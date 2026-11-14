@@ -1,8 +1,8 @@
 # Experiment 0007: Bound Owner Confirmation and Frozen Evaluation
 
 Date: 2026-11-14. Parent: `1bfe690`; production predecessor: rejected `be11d13`.
-Status: `4f66827` passed independent review and both required real-model gates; deployment preparation.
-Not yet deployed at this checkpoint.
+Status: accepted source `4f66827` deployed on 2026-11-15 (UTC+8), after independent review,
+full app suites and both required real-model gates passed. Live synthetic-lab acceptance passed.
 
 Owner authorization: fix boundaries/configuration, review and paid validation; deploy only if
 appropriate after all gates pass. Owner is currently not using Otto; this does not waive safety.
@@ -86,10 +86,51 @@ outside the production conversation ledger. Keys stayed on the VPS, profiles con
 private results were checked for known credential values before download. No live Thread, worker,
 schedule, GitHub status or production conversation was mutated by these isolated evals.
 
-The owner authorized deployment only when appropriate and is not currently using Otto. All
-pre-deploy gates now pass. Next: backup program/SQLite, deploy without changing credentials,
-and validate the real conversation/card-confirmation lifecycle on the existing private lab PR.
-Do not call that synthetic-status smoke a real CI or phone-push acceptance test.
-Do not treat simulated owner clicks as real UI acceptance. Preserve failing artifacts and never
-relax expectations to accommodate measured output. Production remains `9fc76c7` until an accepted
-candidate is backed up and deployed; model credentials must stay on the VPS.
+## Deployment and live acceptance
+
+The owner authorized deployment only when appropriate and was not currently using Otto. After
+all gates passed, local `main` fast-forwarded to integration commit `088d8d9`; no GitHub PR was
+merged and no commits were pushed. Production/evaluated code remains byte-identical to `4f66827`;
+only the dispatch test and evidence docs followed it.
+
+[Deployment receipt](0007-deployment-receipt.json): stopped the service with zero open runs,
+backed up the old program/map and SQLite under `/opt/otto/releases/4f66827/previous/`, verified
+backup integrity, installed the verified bundle and restarted. Migration 036 and current database
+integrity passed. Configuration, credentials, scopes and systemd unit were unchanged. Bundle SHA-256
+`b5e33f35fb9be008ca120fa40a76f2a25e31119df667e396a362f549851ecb6d`.
+
+[Live receipt](0007-live-acceptance.json), [operator driver](0007-live-acceptance-driver.mjs):
+
+- Real production model made a create proposal for the existing private lab PR/Thread, explicitly
+  `statuses-only`, 60-second interval / 60-minute lifetime. No watch existed before confirmation;
+  quoted ordinary agreement neither authorized it nor invoked the model.
+- Pending proposal survived a restart. An authenticated workspace HTTP session + CSRF action
+  confirmed the exact server-generated card (202); the card closed and a fresh stale tap got 409.
+- An actual GitHub read observed the known head and synthetic pending status. A second restart
+  recovered polling; a subsequent scheduled read advanced `checkedAt`, without duplicate notice
+  or model run. This exercises real service/SQL/cron/HTTP paths, not the evaluator's simulated owner.
+- List caused no proposal/mutation. A cancellation proposal left the watch active until another
+  authenticated workspace confirmation. Cancellation remained terminal through an eligible
+  subsequent cron window; checkedAt did not change.
+- Exactly three production owner model runs (create/list/cancel proposal); confirmation, quote
+  interception and polling added none. Worker count 12, outbox 23, follow-ups 1 and routines 2
+  stayed unchanged. No new worker commands or model-based follow-up were created.
+- Test watch cancelled, zero active test watches, browser session logged out (200). The existing
+  lab synthetic context `otto/watch-smoke-9fc76c7` was temporarily pending and restored to success.
+  No repo files, real CI runs or other watches were changed; all lab timeline/audit records remain.
+
+The first operator-driver setup attempt failed before model input/watch changes because its PR
+URL constant shadowed the native URL constructor; the controller used `globalThis.URL` and the
+same full lifecycle was then run. [Failed setup receipt](0007-live-setup-failure.json) retained.
+No deployed code, evaluation definition or threshold changed to make that attempt pass.
+
+[Health receipt](0007-health-receipt.json): default-trust public HTTPS 200, anonymous API 401,
+owner API 200; read-only doctor 0 failures. Local backup/timer, TLS expiry and queues passed.
+Encrypted offsite backup is still disabled (pre-existing, not silently presented as protected).
+Rollback: restore the previous program/map first, retain the compatible upgraded database;
+do not automatically restore the old SQLite snapshot and erase subsequent records.
+
+This was a synthetic-status lab smoke using a real authenticated workspace HTTP client, not an
+actual browser DOM click, phone-push test, full CI workflow or changed-head acceptance. Those and
+N>=5 same-input noise observations remain unmeasured. Preserve failing artifacts and never relax
+expectations to accommodate measured output. Model credentials stayed on the VPS.
