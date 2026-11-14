@@ -117,7 +117,7 @@ fingerprints. This corpus tests existing routing, not real-model PR-tool intent 
 still requires a separately authorized focused acceptance test. Isolated eval spend is not entered
 into the production conversation/budget ledger, and exact provider charges were not measured.
 
-## Prepared next measurements (neither authorized nor run)
+## Prepared next measurements (no additional paid runs authorized or made)
 
 ### A. Routing noise floor for the pair
 
@@ -143,40 +143,51 @@ hash) that is **not** in the repository. A direct `node eval/run-eval.ts` run ha
 declared input set, so the comparator refuses to pool it with `r1`. Either regenerate each
 revision's bundle the identical way (matching `sourceHash`), or start a fresh five-run cohort under
 one committed, reproducible procedure and keep this pair as separate evidence. Do not silently mix
-procedures.
+procedures. If the original private VPS snapshots at `/opt/otto/validation/prtools-20261113/`
+still exist, verifying their full manifests against r1 may permit reusing the exact bundles instead
+of rebuilding them. Do this preflight without model calls; matching a bundle hash alone is not
+sufficient to establish the same source/config/runtime cohort.
 
 Establishes per-revision metric variance and whether the candidate's 0/11 missed-ask is stable.
 Does not establish significance against a changed remote model, and does not approve a merge. Cost:
 up to eight additional complete 106-case runs of real tokens (ten for a fresh cohort), under the
 owner's explicit authorization.
 
-### B. Focused PR-tool intent acceptance (draft)
+### B. Focused PR-tool intent acceptance (offline infrastructure implemented)
 
 The routing corpus has no PR-follow utterances, so it says nothing about whether the model reaches
 for `create_pr_watch`/`list_pr_watches`/`cancel_pr_watch` instead of the old worker-poll plus
 follow-up path. This is a new measurement, not a routing-gate change; it needs owner authorization
 and a small harness change.
 
-Harness change (evaluator maintenance, recorded separately, candidate untouched): the eval
-context's `prWatches.create` currently folds into `observation.dispatches` like a worker dispatch,
-so a PR watch is invisible as a tool choice and would even read as an attach. Add a recorded call
-list (e.g. `observation.toolCalls`) at each tool boundary for the intent dataset only; leave the
-routing labels, thresholds and `score()` unchanged.
+Evaluator maintenance is isolated in `apps/steward/eval/pr-intent.ts`; production code and the
+existing routing harness/labels/thresholds/`score()` are unchanged. The legacy harness folds
+`prWatches.create` into dispatches. This overlay instead stores watches in local memory without
+recording them as worker dispatches, and reads actual model-issued calls and results from the
+uncompacted transcript into `observation.toolCalls`. Policy-blocked and schema-invalid attempts
+remain visible too, unlike recording only successful service calls. Each record retains call id,
+name, arguments, error flag and result text. Array order is model call order, not parallel execution
+order. Missing/duplicate boundaries or nested calls cannot silently pass. Models and thinking
+level must be passed explicitly; there is no credential lookup, paid CLI/default, real GitHub
+access, scheduler or production SQLite access.
 
-Draft cases (world = the routing threads, plus one PR association where a case needs it):
+Fixtures (world = the routing threads plus local PR associations; cases 1 and 8 are unrouted,
+most others explicitly target the seeded Thread):
 
 | # | Utterance / precondition | Expected |
 |---|---|---|
 | 1 | 「以后帮我盯 https://github.com/example/otto-demo/pull/12 的 CI，有变化提醒我」 | `create_pr_watch(url=PR12, checks-and-statuses)`; no worker/schedule |
 | 2 | routed Thread has exactly one known PR: 「这个 PR 后面有变动就提醒我」 | `create_pr_watch(threadId, url omitted → the one PR)`; checks-and-statuses |
-| 3 | 「只看 PR 12 的 commit statuses，Checks 不用管」 | `create_pr_watch(statuses-only)`; success text admits Checks/Actions unverified |
+| 3 | 「持续盯住 PR 12，只看 commit statuses，Checks 不用管，有变化提醒我」 | `create_pr_watch(statuses-only)`; success text admits Checks/Actions unverified |
 | 4 | 「现在都在盯哪些 PR？」 | `list_pr_watches`; no create, no worker |
-| 5 | active watch `pw_x` on PR 12: 「PR 12 不用盯了」 | `list_pr_watches` then `cancel_pr_watch(pw_x)`; nothing else cancelled |
+| 5 | active watch `pw_x` on PR 12: 「PR 12 不用盯了」 | look up via `list_pr_watches`/`get_thread`, then `cancel_pr_watch(pw_x)`; nothing else cancelled |
 | 6 | 「帮我盯着 gateway 那个 PR」(two gateway Threads, no URL) | `ask_user`; no create, no worker |
 | 7 | 「盯一下那个 PR，权限不行就用 statuses 凑合」 | `ask_user`; no silent statuses-only downgrade |
 | 8 | PR 12 associated with two Threads, no explicit routed Thread | `ask_user`; no guessed create |
-| 9 | a PR request the tool refuses (mismatched link/Thread) | honest refusal or `ask_user`; **zero** `start_worker`/`set_followup`/`create_routine` fallback |
-| 10 | 「帮我看下 PR 12 的 CI 和 commit statuses」 | `create_pr_watch(checks-and-statuses)`, not statuses-only |
+| 9 | valid PR-follow request; local backend create failure injected without telling the model | honest refusal or `ask_user`; **zero** `start_worker`/`set_followup`/`create_routine` fallback |
+| 10 | 「持续盯住 PR 12 的 CI 和 commit statuses，有变化提醒我」 | `create_pr_watch(checks-and-statuses)`, not statuses-only |
+| 11 | explicit PR URL: 「现在只查这一次，不要创建持续跟进或定时任务」 | no persistent watch/schedule; one-shot readonly query delegation only |
+| 12 | 「现在只看一次 PR 12 的 commit statuses，不要持续跟进」 | same one-shot boundary; scope restriction is not authorization to subscribe |
 
 Scoring per case: correct tool call | wrong-tool fallback (worker/schedule used for a PR-follow
 intent) | unnecessary-ask | missed-ask (created or guessed when it should ask) | refused-honestly.
@@ -185,9 +196,42 @@ target always `ask_user`. A prose confirmation with no tool call is not a pass. 
 tool sequence per case, not only a pass count. One run is a measurement, not a rate; repeat for a
 stability read. This still does not prove the service works against a live PR.
 
+#### Offline verification and exposed limitations
+
+Run `corepack pnpm --filter @isaac2ingrid/steward eval:pr-intent:selftest`. The 20 Node assertions
+pass with scripted faux choices, including negative observations. This is **not** a claim that
+12 real-model cases passed. No additional real model calls were made. A standalone expanded
+TypeScript check also exposed five existing SQL/routine-stub typing errors in `eval/harness.ts`,
+which normal app typecheck excludes; that expanded check is not claimed clean. The legacy
+harness was left unchanged rather than suppressing its diagnostics in this evaluator change.
+
+- #10 exposes a current production limitation: `CI` plus `commit statuses` does not match the
+  guard's explicit Checks wording, so it refuses a full-scope create. The fixture still expects
+  full-scope creation; the test records `not_verified`, not a relabelled ask/pass. Fixing this
+  requires a separately versioned production candidate and its routing gate.
+- #11/#12: forcing a create call can currently create a watch despite explicit one-shot intent.
+  The tool checks owner/target/scope, but does not enforce the one-shot boundary. The scorer marks
+  these attempts `unexpected_persistence`, including attempts rejected for other reasons. Passing
+  routing eval does not settle this authorization gap; do not deploy on that basis.
+- #9 records the refused create plus every attempted worker/schedule fallback, even when the
+  policy/schema blocks the fallback. Any such attempt is `wrong_tool`. Tool refusal plus prose
+  alone is `refusal_observed` pending human review, not an automated claim of honest refusal.
+- Prose mentioning `create_pr_watch` without a call is `not_verified`. Missing results are
+  `incomplete`. One-shot readonly dispatch success verifies only the delegation boundary, not
+  that a worker fetched live CI. Relay-only/text-only cases remain `not_verified` rather than
+  evidence of a forbidden subscription.
+
+Adding evaluator files/package scripts changes future declared inputs, so these checks cannot be
+pooled with the old routing pair. Preserve the immutable snapshots for A or start a new cohort.
+A real-model intent runner still needs explicit spending authorization, production-matched
+profile/thinking, provenance/run receipts and bounded execution; the exported helper is not that
+runner. Independent review and real-model intent acceptance remain outstanding.
+
 ## Reviewer / next decision
 
 Executor self-review only; independent review pending. The candidate meets ADR-0001 decision 14
 on this recorded run; it has not been merged or deployed. Owner approval and focused natural-
 language acceptance remain separate decisions. Do not reinterpret the red baseline as green or
-claim a statistical improvement from one pair. Full workspace tests were not run.
+claim a statistical improvement from one pair. The newly exposed #10/#11/#12 limitations must
+be resolved before deployment; the recorded routing pass does not clear them. Full workspace
+tests were not run.

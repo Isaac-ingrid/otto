@@ -36,6 +36,8 @@ jobs:
       - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts test/pr-evidence.test.ts test/pr-watch.test.ts test/pr-watch-api.test.ts test/pr-watch-tools.test.ts
       # Scripted faux model + real ledger; no credentials or network, any trust leak fails.
       - run: pnpm --filter @isaac2ingrid/steward eval:memory
+      # Evaluator-only PR intent observer/scorer; scripted choices, not a real-model pass.
+      - run: pnpm --filter @isaac2ingrid/steward eval:pr-intent:selftest
       # Issue #26: the connector must ship as a self-contained `@isaac2ingrid/otto` tarball —
       # bundled dist, bin wrapper, zero runtime dependencies (workspace deps stay in dev).
       # Fail the build if the layout regresses.
