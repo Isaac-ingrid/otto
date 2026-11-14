@@ -1,0 +1,80 @@
+{
+  "startedAt": "2026-11-14T07:26:04.528Z",
+  "status": "completed",
+  "runs": [
+    {
+      "role": "routing",
+      "revision": "be11d13215015ceab298662b57843ec80ebc1720",
+      "bundleSha256": "39af36f631166a7b3c14468f24237ebbdecb04bd1d3e68ecc273a1443c6ec221",
+      "concurrency": 2,
+      "status": "completed",
+      "startedAt": "2026-11-14T07:26:24.211Z",
+      "resultPath": "/opt/otto/validation/be11d13-20261114/candidate/apps/steward/eval/results/production-be11d13-routing-20261114.json",
+      "exitCode": 0,
+      "finishedAt": "2026-11-14T07:37:17.810Z",
+      "summary": {
+        "n": 106,
+        "pass": 95,
+        "passTextAsk": 1,
+        "wrongRoute": 0,
+        "missedAsk": 0,
+        "unnecessaryAsk": 10,
+        "errors": 0
+      },
+      "thresholds": {
+        "wrongRoute": 0.02,
+        "missedAsk": 0.03,
+        "unnecessaryAsk": 0.15
+      },
+      "runId": "ae21011c-c30b-43da-96bd-9b06460b801a",
+      "fingerprint": "622d621fe027b20bbc6bdf2dadc560fc7cd848a7c3e452bece2a67cbfadcac11",
+      "inputStable": true,
+      "gatePassed": true,
+      "complete": true
+    },
+    {
+      "role": "intent",
+      "revision": "be11d13215015ceab298662b57843ec80ebc1720",
+      "bundleSha256": "442816bb3632dcf050f79c9dba62e5bc73f5d43851dcf6d3053bef2f32443eb3",
+      "concurrency": 1,
+      "status": "completed",
+      "startedAt": "2026-11-14T07:26:24.257Z",
+      "resultPath": "/opt/otto/validation/be11d13-20261114/candidate/apps/steward/eval/results/production-be11d13-intent-20261114.json",
+      "exitCode": 1,
+      "finishedAt": "2026-11-14T07:28:59.042Z",
+      "summary": {
+        "n": 12,
+        "total": 12,
+        "counts": {
+          "pass": 10,
+          "missed_ask": 1,
+          "not_verified": 1
+        },
+        "errors": 0
+      },
+      "runId": "603c036c-e4ba-405f-994e-1bea33ef9195",
+      "fingerprint": "ea54eaa343115943cf0015dc0c0df31ee815142c69c7bf26b671edaf12ae1457",
+      "inputStable": true,
+      "gatePassed": false,
+      "complete": true
+    }
+  ],
+  "execution": "parallel-frozen-bundled-snapshot",
+  "memoryMaxMiB": 650,
+  "selection": {
+    "provider": "openai-compatible",
+    "modelId": "deepseek-v4.1-flash",
+    "thinkingLevel": "high",
+    "endpointHash": "068dbcaed6ddaab1f97b02decb446d89cd23ef81cbf341f231145c63929fa953",
+    "customHeaders": false,
+    "tcpMs": 1000
+  },
+  "snapshot": {
+    "revision": "be11d13215015ceab298662b57843ec80ebc1720",
+    "productionCandidate": "be11d13",
+    "execution": "bundled declared-source git archive",
+    "role": "candidate"
+  },
+  "helperSha256": "a4c5fa4781111782bda755f15f1bcfdcccb020e33fba8d43b94281ddb63cc228",
+  "finishedAt": "2026-11-14T07:37:17.813Z"
+}

@@ -1,7 +1,8 @@
 # Experiment 0006: Independent Review and Real-Model Validation
 
 Date: 2026-11-14. Production candidate: `eaacc48`; parent record: [0005](0005-pr-watch-intent-boundaries.md).
-Status: `eaacc48` rejected by independent review; successor fixes reproduced offline, re-review and paid runs pending.
+Status: `eaacc48` rejected; successor `be11d13` still blocked by independent re-review.
+Paid routing and intent measurements run on the frozen `be11d13` snapshot, not the changing worktree.
 No acceptance or deployment implied.
 
 The owner authorized paid validation and parallel review/preparation without a price cap. Initial
@@ -65,12 +66,100 @@ trailing-whitespace normalized; assertion values and finding content are unchang
   direct Node strip-only execution can import the real backend.
 - All six review repro tests now pass (previously 0/6). Combined intent/CLI/review selftests: 28
   passed. Selected Node and workerd suites: 110 each. App typecheck, routing selftest and all 10
-  deterministic memory cases passed. No real model calls or full workspace suite yet.
+  deterministic memory cases passed before follow-up repros. No full workspace suite was run.
+
+### Independent re-review disposition
+
+[Full re-review](0006-independent-rereview.md) confirms resolution of the original six exact repros,
+but still blocks merge: two P1 authorization classes and one P2 measurement-hardening gap remain.
+Three forced-call repros all fail against `be11d13`:
+[normalized red TAP](../../../apps/steward/eval/results/pr-review-be11d13-followup-offline.tap).
+
+1. `不要持续关注 PR` is accepted because negative Chinese verbs omit positive `关注`/`检查`.
+   An inventory question (`现在都在盯哪些 PR？`) also authorizes a forced create through bare `盯`.
+2. `停止 worker，继续盯这个 PR` authorizes a forced watch cancellation through unqualified `停止`.
+3. Child workers reread the mutable external profile; a changed profile is not detected by the
+   parent's original configuration receipt. No such change is observed in this controlled run:
+   the supervisor created one private root-owned profile and does not modify it. An intermediate
+   check confirmed its safe fields still match the frozen selection. Fix the general runner by
+   freezing the profile/environment or checking child effective receipts before future acceptance.
+
+The follow-up tests are included in `eval:pr-intent:selftest`, intentionally leaving that gate red
+until these defects are corrected. Do not drop them, relax their assertions or reinterpret the
+old 28 green assertions as a current all-green result. The measured snapshot remains immutable;
+working-tree test additions are not changes to its source manifest.
 
 ## Measurement / next decision
 
-Raw artifacts and server receipt will be linked after execution. Production credentials stay on
-the VPS in short-lived root-owned processes; profiles contain environment references, not keys.
-Isolated synthetic eval worlds must not create production messages, watches, workers or schedules.
-The production service/bundle remains unchanged. Preserve raw red results; never alter labels,
-thresholds or scorer after seeing outputs to manufacture acceptance.
+One routing run and one focused-intent run completed concurrently on a declared-source Git
+archive of `be11d13215015ceab298662b57843ec80ebc1720`. Bundles are hashed in the source manifest;
+there is no `.git` in the snapshot, so raw Git metadata is null and the separate receipt binds the
+revision/bundle/run UUID. Production-matched selection at start: `openai-compatible`,
+`deepseek-v4.1-flash`, effective thinking `high`, same gateway endpoint hash, no custom headers,
+Node v24.22.2/Linux. Routing concurrency 2; intent concurrency 1. The whole cgroup had a 650 MiB
+ceiling, lower CPU priority and root-only file permissions. Server path:
+`/opt/otto/validation/be11d13-20261114/`.
+
+| Measurement | Result | Decision |
+|---|---|---|
+| Routing pass incl. text-ask | 96/106 (one text-ask) | descriptive |
+| Wrong-route | 0/106 | <2%, pass |
+| Missed ask | 0/11 | <3%, pass |
+| Unnecessary ask | 10/95 (10.5%) | <15%, pass |
+| Routing errors | 0 | routing gate **pass** |
+| Intent verdicts | 10 pass, 1 missed-ask, 1 not-verified | intent gate **fail** |
+| Intent infrastructure errors | 0 | all 12 measured, not a truncated run |
+| Independent re-review | two P1 classes, one P2 gap | **block merge/deployment** |
+
+Artifacts (unmodified JSON; both `inputStable=true`):
+
+- [Routing raw result](../../../apps/steward/eval/results/production-be11d13-routing-20261114.json),
+  run `ae21011c-c30b-43da-96bd-9b06460b801a`.
+- [Intent raw result](../../../apps/steward/eval/results/production-be11d13-intent-20261114.json),
+  run `603c036c-e4ba-405f-994e-1bea33ef9195`.
+- [Server receipt](0006-validation-receipt.json) and [end-of-run profile check](0006-profile-check.json).
+
+Intent sequences below omit only read-only lookup calls; the raw artifact retains all calls:
+
+| Case | Relevant sequence | Recorded verdict |
+|---|---|---|
+| 1 | create full evidence | pass |
+| 2 | create full evidence | pass |
+| 3 | create statuses-only, disclose unverified Checks/Actions | pass |
+| 4 | list watches | pass (tool selection only; see prose limitation) |
+| 5 | list → cancel `pw_x`, preserve `pw_other` | pass |
+| 6 | ask for ambiguous gateway target | pass |
+| 7 | create full evidence without scope clarification | **missed_ask** |
+| 8 | ask for cross-Thread association ambiguity | pass |
+| 9 | create(error) → list → create(error), truthful failure report | **not_verified** |
+| 10 | create full evidence | pass |
+| 11 | one readonly worker for a one-shot query | pass (delegation boundary only) |
+| 12 | one readonly worker for one statuses-only query | pass (delegation boundary only) |
+
+#7 promised a future statuses-only fallback after a permission error instead of asking first.
+No actual mode downgrade occurred in this synthetic run, but the precommitted ask requirement
+was missed. #9 made two attempts; the fixed automatic criterion accepts one refused attempt plus
+an ask, or leaves prose-only refusal for manual review. Its error report appears honest and no
+worker/routine/follow-up fallback occurred; do not equate `not_verified` with a proved dishonest
+reply, and do not rewrite this criterion after seeing the result.
+
+Tool-choice pass is not full response/effect correctness. #1 chose the maximum seven-day expiry
+rather than leaving the default 24 hours, which requires separate parameter-consent review.
+#4 inferred expiry/absence of problems from a synthetic completed record without supporting
+check evidence. Prose truthfulness is not scored by this tool-choice corpus. #11/#12 verify only
+readonly delegation, not live CI retrieval or delivery to the phone.
+
+Keys stayed on the VPS; no key was downloaded or placed in profiles/results. Private logs were
+scrubbed for known credentials and JSON results were checked before copying. Both transient eval
+jobs finished; the production service remained active and its bundle was not replaced. Isolated
+eval spending does not enter the production conversation/budget ledger; exact provider charges
+were not measured. Model requests within one case may include multiple tool turns/SDK retries;
+118 cases does not mean exactly 118 billable API calls.
+
+**Final decision: reject `be11d13` for merge/deployment.** This one-per-kind measurement is not a
+noise estimate or statistical improvement claim. No selective reruns or label/threshold changes
+were made after results. The next candidate must resolve the remaining authorization classes
+(not just make the happy-path model choose correctly), freeze/check worker configuration, and
+preserve the red review tests. Then independently review and rerun complete routing plus focused
+acceptance under the owner's existing paid-validation authorization. Deployment still needs a
+separate acceptance decision.

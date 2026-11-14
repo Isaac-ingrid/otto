@@ -1,0 +1,8 @@
+{
+  "checkedAt": "2026-11-14T07:38:13.037Z",
+  "profileMatchesSelection": true,
+  "profileSha256": "d2cd9d86e2ff77ab9c55a810b4126a482f6cbebf22d635e4b977d28d74802b54",
+  "profileMode": "600",
+  "rootOwned": true,
+  "note": "End-of-run check; not a per-worker frozen-profile receipt."
+}

@@ -1,0 +1,66 @@
+✖ follow-up P1: explicit Chinese refusal cannot create a watch (71.241ms)
+✖ follow-up P1: inventory question cannot create a watch (38.5162ms)
+✖ follow-up P1: stopping a worker is not cancelling its PR watch (48.3359ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 0
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1065.0048
+
+✖ failing tests:
+
+test at eval\pr-review-followup.test.ts:15:1
+✖ follow-up P1: explicit Chinese refusal cannot create a watch (71.241ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+  1 !== 0
+
+      at TestContext.<anonymous> (file:///D:/project/otto/apps/steward/eval/pr-review-followup.test.ts:17:10)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at eval\pr-review-followup.test.ts:19:1
+✖ follow-up P1: inventory question cannot create a watch (38.5162ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+  1 !== 0
+
+      at TestContext.<anonymous> (file:///D:/project/otto/apps/steward/eval/pr-review-followup.test.ts:22:10)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at eval\pr-review-followup.test.ts:24:1
+✖ follow-up P1: stopping a worker is not cancelling its PR watch (48.3359ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+
+  + 'cancelled'
+  - 'active'
+
+      at TestContext.<anonymous> (file:///D:/project/otto/apps/steward/eval/pr-review-followup.test.ts:26:10)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'cancelled',
+    expected: 'active',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
