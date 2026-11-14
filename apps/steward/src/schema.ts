@@ -1064,4 +1064,14 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`ALTER TABLE sh_pr_watch ADD COLUMN evidenceMode TEXT NOT NULL DEFAULT 'checks-and-statuses'`;
     },
   },
+  {
+    id: '036_pr_watch_approvals',
+    up: sql => {
+      sql`CREATE TABLE sh_pr_watch_approval (
+        id TEXT PRIMARY KEY, sourceRef TEXT NOT NULL UNIQUE, taskId TEXT NOT NULL,
+        request TEXT NOT NULL, command TEXT NOT NULL, status TEXT NOT NULL,
+        createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, decidedBy TEXT, decidedAt INTEGER
+      )`;
+    },
+  },
 ];

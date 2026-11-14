@@ -207,6 +207,11 @@ interface CardRow {
  *  offered. The same answer gates the action endpoint. */
 export function cardOpen(ledger: Ledger, row: Pick<CardRow, "id" | "questionId">, view: CardView): boolean {
   const { id } = row;
+  if (id.startsWith('prwatchapproval:')) {
+    const qid = id.slice('prwatchapproval:'.length), q = ledger.questions.get(qid);
+    return q?.status === 'open' && q.askedAt + 600000 > Date.now()
+      && view.buttons.some(b => b.action === `prwatch:${qid}:confirm`);
+  }
   if (id.startsWith("offer:")) return ledger.offers.get(id.slice("offer:".length))?.status === "offered";
   if (id.startsWith("offline:")) return ledger.offlineDispatches.get(id.slice("offline:".length))?.status === "offered";
   if (id.startsWith("switch:")) return ledger.offlineDispatches.get(id.slice("switch:".length))?.status === "switching";

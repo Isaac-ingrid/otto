@@ -172,19 +172,9 @@ export function buildEvalContext(ledger: Ledger, caseId: number, observation: Ob
       list: () => prWatches,
       targetsForThread: threadId => [...new Set(prWatches.filter(w => w.threadId === threadId).map(w => w.url))],
       threadsForUrl: url => [...new Set(prWatches.filter(w => w.url === url).map(w => w.threadId))],
-      create: async input => {
-        const existing = prWatches.find(w => w.id === input.id);
-        if (existing) return existing;
-        const now = Date.now();
-        const row: import("../src/pr-watch.ts").PrWatchRow = { ...input, status: "active", createdAt: now,
-          expiresAt: input.expiresAt ?? now + 86400000, intervalMs: (input.intervalSeconds ?? 900) * 1000,
-          nextCheckAt: now, generation: 0, head: null, observedState: null, checkedAt: null, lastError: null,
-          checks: 0, failed: 0, pending: 0 };
-        prWatches.push(row);
-        observation.dispatches.push({ threadId: input.threadId, isNew: false });
-        return row;
-      },
-      cancel: id => { const row = prWatches.find(w => w.id === id); if (!row) return false; row.status = "cancelled"; return true; },
+      // Routing fixtures have no owner confirmation phase. Never turn a proposal into a
+      // dispatch; the separate focused harness measures the explicit two-phase protocol.
+      request: async () => { throw new Error('routing world has no PR approval decisions'); },
     },
     // The proactive-behavior service (issue #20): a minimal in-memory stand-in. The real
     // RoutineService needs the Agents SDK scheduler + outbound queue; the eval only needs

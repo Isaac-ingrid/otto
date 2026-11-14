@@ -1,11 +1,11 @@
 // Scripted model tests exercise tool boundaries, not real-model intent recognition.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { runInDurableObject } from 'cloudflare:test';
+import { SELF, runInDurableObject } from 'cloudflare:test';
 import { fauxAssistantMessage, fauxText, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import type { Ledger } from '../src/ledger.ts';
 import { buildStewardExtension, type StewardExtensionContext } from '../src/llm/extension.ts';
 import type { PrWatchService, PrWatchDeps, PrWatchRow } from '../src/pr-watch.ts';
-import { configureAndBind, messageEvent, modelRequests, ownerStub, postEvent, resetLedgerState, scriptModel, waitRunsSettled } from './helpers.ts';
+import { configureAndBind, messageEvent, modelRequests, ownerStub, postEvent, resetLedgerState, scriptModel, waitRunsSettled, waitWhileOutboundPending, llmState } from './helpers.ts';
 
 const THREAD = 't_watch_tools';
 const URL = 'https://github.com/example/project/pull/42';
@@ -23,13 +23,25 @@ async function history(id: string, url = URL, threadId = THREAD) {
   });
 }
 async function call(name: string, parameters: Parameters<typeof fauxToolCall>[1], text: string) {
-  await scriptModel(fauxAssistantMessage([fauxToolCall(name, parameters)], { stopReason: 'toolUse' }), fauxAssistantMessage([fauxText('已处理。')]));
+  await scriptModel(fauxAssistantMessage([fauxToolCall(name, parameters)], { stopReason: 'toolUse' }),
+    ...(['create_pr_watch', 'cancel_pr_watch'].includes(name) ? [] : [fauxAssistantMessage([fauxText('已处理。')])]));
   const response = await postEvent(messageEvent({ text }));
   expect(response.status).toBe(200);
   await waitRunsSettled();
 }
 async function active(): Promise<PrWatchRow[]> { return inside((_ledger, watches) => watches.list().filter(w => w.status === 'active')); }
-async function results() { return (await modelRequests()).map(r => r.lastToolResult).join('\n'); }
+async function results() { return JSON.stringify((await llmState()).raw) + (await modelRequests()).map(r => r.lastToolResult).join('\n'); }
+async function confirmLatest(mode = 'statuses-only') {
+  await waitWhileOutboundPending();
+  const rows = (await ownerStub().outboundRows(100)).filter(row => row.id.startsWith('prwatchapproval:'));
+  let card: (typeof rows)[number] | undefined;
+  for (const row of rows) if (await inside(ledger => ledger.questions.get(row.questionId ?? '')?.status === 'open')) { card = row; break; }
+  expect(card).toBeDefined();
+  if (!card) throw new Error('missing approval card');
+  expect(JSON.parse(card.payload).card.text).toContain(mode === 'statuses-only' ? '仅 commit statuses' : 'check runs + commit statuses');
+  const response = await SELF.fetch('https://example.com/api/actions', { method: 'POST', headers: { authorization: 'Bearer test-server-key-not-a-secret', 'content-type': 'application/json' }, body: JSON.stringify({ cardMsgId: card.providerMsgId, action: JSON.parse(card.payload).card.buttons[0].action }) });
+  expect(response.status).toBe(200);
+}
 
 beforeEach(async () => {
   await resetLedgerState(); await configureAndBind('ou_owner');
@@ -43,6 +55,7 @@ beforeEach(async () => {
 describe('owner-controlled PR watch tools', () => {
   it('creates via explicit owner URL and unique stored association, no worker or follow-up', async () => {
     await call('create_pr_watch', args, `帮我盯住 ${URL}，仅看 commit statuses，通过后通知，不要改代码。`);
+    expect(await active()).toHaveLength(0); await confirmLatest();
     expect(await active()).toHaveLength(1);
     expect((await active())[0]).toMatchObject({ threadId: THREAD, url: URL, evidenceMode: 'statuses-only' });
     const snap = await ownerStub().debugSnapshot();
@@ -54,6 +67,7 @@ describe('owner-controlled PR watch tools', () => {
   it('reuses the unique PR of an explicitly named Thread without a URL', async () => {
     const { url, ...withoutUrl } = args;
     await call('create_pr_watch', withoutUrl, '盯住测试事项甲乙的这个 PR，仅看 commit statuses。');
+    await confirmLatest();
     expect(await active()).toHaveLength(1);
     expect((await active())[0]?.url).toBe(URL);
   });
@@ -93,15 +107,17 @@ describe('owner-controlled PR watch tools', () => {
     await call('create_pr_watch', args, `盯住 ${URL} 的完整 CI。`);
     expect(await active()).toHaveLength(0);
     await call('create_pr_watch', { ...args, evidenceMode: 'checks-and-statuses' }, `盯住 ${URL} 的 check runs 和 commit statuses。`);
+    await confirmLatest('checks-and-statuses');
     expect(await active()).toHaveLength(1);
     expect((await active())[0]?.evidenceMode).toBe('checks-and-statuses');
   });
 
   it('CI plus commit statuses requests full evidence, never a limited downgrade', async () => {
     await call('create_pr_watch', { ...args, evidenceMode: 'checks-and-statuses' }, `持续盯住 ${URL} 的 CI 和 commit statuses，有变化提醒我。`);
+    await confirmLatest('checks-and-statuses');
     expect(await active()).toHaveLength(1);
     expect((await active())[0]!.evidenceMode).toBe('checks-and-statuses');
-    expect(await results()).toContain('已创建只读跟进');
+    expect(await results()).toContain('等待用户点击专用确认卡');
   });
 
   it.each([
@@ -122,15 +138,18 @@ describe('owner-controlled PR watch tools', () => {
     expect(await active()).toHaveLength(0);
     expect(await results()).toContain('验证范围与用户原话不一致');
     await call('create_pr_watch', { ...args, evidenceMode: 'checks-and-statuses' }, text);
+    await confirmLatest('checks-and-statuses');
     expect(await active()).toHaveLength(1);
     expect((await active())[0]!.evidenceMode).toBe('checks-and-statuses');
   });
 
   it('one-shot wording cannot re-arm an existing watch under the reuse path', async () => {
     await call('create_pr_watch', args, `持续盯住 ${URL}，仅看 commit statuses。`);
+    await confirmLatest();
     const first = (await active())[0]!;
     await call('create_pr_watch', args, `现在只看一次 ${URL} 的 commit statuses，不要持续跟进。`);
-    expect(await active()).toEqual([first]);
+    expect(await active()).toHaveLength(1);
+    expect((await active())[0]).toMatchObject({ id: first.id, expiresAt: first.expiresAt, status: 'active', intervalMs: first.intervalMs });
     expect(await results()).toContain('未明确授权持续 PR 跟进');
   });
 
@@ -142,14 +161,16 @@ describe('owner-controlled PR watch tools', () => {
 
   it('repeating an owner request reuses the active watch without extending expiry', async () => {
     await call('create_pr_watch', args, `盯住 ${URL}，仅看 commit statuses。`);
+    await confirmLatest();
     const first = (await active())[0]!;
     await call('create_pr_watch', args, `继续盯住 ${URL}，仅看 commit statuses。`);
+    await confirmLatest();
     expect(await active()).toHaveLength(1);
     expect((await active())[0]).toMatchObject({ id: first.id, expiresAt: first.expiresAt });
-    expect(await results()).toContain('不重复创建');
+    expect(await results()).toContain('不会创建第二条');
   });
 
-  it('replaying a tool task with relative expiry neither renews it nor resurrects cancellation', async () => {
+  it('forged context provenance cannot replace the recorded owner turn for a proposal', async () => {
     await runInDurableObject(ownerStub(), async raw => {
       const instance = raw as unknown as { stewardToolContext(): StewardExtensionContext; prWatches: PrWatchService };
       const extension = buildStewardExtension({ ...instance.stewardToolContext(),
@@ -161,14 +182,8 @@ describe('owner-controlled PR watch tools', () => {
         execute(args: Record<string, unknown>, api: { taskId: string }): Promise<{ isError?: boolean }>;
       };
       const input = { ...args, expiresInMinutes: 60 };
-      expect((await tool.execute(input, { taskId: 'replay_fixture' })).isError).not.toBe(true);
-      const first = instance.prWatches.list().find(w => w.id === 'pw_replay_fixture')!;
-      await new Promise(resolve => setTimeout(resolve, 10));
-      expect((await tool.execute(input, { taskId: 'replay_fixture' })).isError).not.toBe(true);
-      expect(instance.prWatches.list().find(w => w.id === first.id)!.expiresAt).toBe(first.expiresAt);
-      instance.prWatches.cancel(first.id);
-      await tool.execute(input, { taskId: 'replay_fixture' });
-      expect(instance.prWatches.list().find(w => w.id === first.id)!.status).toBe('cancelled');
+      expect((await tool.execute(input, { taskId: 'replay_fixture' })).isError).toBe(true);
+      expect(instance.prWatches.list().filter(w => w.status === 'active')).toHaveLength(0);
     });
   });
 
@@ -182,24 +197,30 @@ describe('owner-controlled PR watch tools', () => {
 
   it('cancels exactly one owner-selected watch, but does not guess among multiple matches', async () => {
     await call('create_pr_watch', args, `盯住 ${URL}，仅看 commit statuses。`);
+    await confirmLatest();
     const first = (await active())[0]!;
     await inside((_ledger, watches) => { watches.create({ id: 'another', url: URL, threadId: THREAD, evidenceMode: 'statuses-only' }); });
     await call('cancel_pr_watch', { watchId: first.id, basis: 'user_explicit' }, `不用盯住 ${URL} 了。`);
     expect(await active()).toHaveLength(2);
     expect(await results()).toContain('ask_user');
     await call('cancel_pr_watch', { watchId: first.id, basis: 'user_explicit' }, `取消跟进 ${first.id}`);
+    expect(await active()).toHaveLength(2);
+    await confirmLatest();
     expect((await active()).map(w => w.id)).toEqual(['another']);
   });
 
   it('a PR attempt cannot be followed by a worker or duplicate scheduled fallback in the same turn', async () => {
     await scriptModel(
-      fauxAssistantMessage([fauxToolCall('create_pr_watch', args)], { stopReason: 'toolUse' }),
-      fauxAssistantMessage([fauxToolCall('set_followup', { threadId: THREAD, afterMinutes: 30, reason: 'unwanted duplicate' })], { stopReason: 'toolUse' }),
-      fauxAssistantMessage([fauxToolCall('start_worker', { repoRef: 'repo-a', newTitle: 'unwanted fallback', prompt: 'poll PR', basis: 'user_explicit', mode: 'readonly' })], { stopReason: 'toolUse' }),
-      fauxAssistantMessage([fauxText('结束。')]),
+      fauxAssistantMessage([
+        fauxToolCall('create_pr_watch', args),
+        fauxToolCall('set_followup', { threadId: THREAD, afterMinutes: 30, reason: 'unwanted duplicate' }),
+        fauxToolCall('start_worker', { repoRef: 'repo-a', newTitle: 'unwanted fallback', prompt: 'poll PR', basis: 'user_explicit', mode: 'readonly' }),
+      ], { stopReason: 'toolUse' }),
     );
     await postEvent(messageEvent({ text: `盯住 ${URL}，仅看 commit statuses。` }));
     await waitRunsSettled();
+    expect(await active()).toHaveLength(0);
+    await confirmLatest();
     expect(await active()).toHaveLength(1);
     const snap = await ownerStub().debugSnapshot();
     expect(snap.followups).toHaveLength(0);

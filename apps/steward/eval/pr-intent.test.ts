@@ -3,17 +3,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage, fauxText, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import { buildStewardModels } from '../src/llm/models.ts';
-import { INTENT_CASES, PR, THREAD, observeIntentCalls, runIntentCase, scoreIntent } from './pr-intent.ts';
+import { INTENT_CASES, PR, THREAD, observeIntentCalls, runIntentCase, scoreIntent, type OwnerApprovalPlan } from './pr-intent.ts';
 
 const create = (mode = 'checks-and-statuses') => ({ threadId: THREAD, evidenceMode: mode, basis: 'user_explicit' });
 const ask = { question: '请确认要跟进哪个 PR、所属事项及验证范围？', candidates: [] };
-async function scripted(id: number, calls: Array<[string, Parameters<typeof fauxToolCall>[1]]>, reply = '工具执行结果如上。') {
+async function scripted(id: number, calls: Array<[string, Parameters<typeof fauxToolCall>[1]]>, reply = '工具执行结果如上。', oneRound = false, approvals?: OwnerApprovalPlan[]) {
   const built = buildStewardModels({ provider: 'faux', modelId: 'faux-1', explicit: true }, undefined);
   built.faux!.setSteps([
-    ...calls.map(([name, args]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: 'toolUse' })),
+    ...(oneRound ? [fauxAssistantMessage(calls.map(([name, args]) => fauxToolCall(name, args)), { stopReason: 'toolUse' })] : calls.map(([name, args]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: 'toolUse' }))),
     fauxAssistantMessage([fauxText(reply)]),
   ]);
-  return runIntentCase(INTENT_CASES.find(c => c.id === id)!, built.models, { model: { provider: 'faux', modelId: 'faux-1' }, thinkingLevel: 'off' });
+  const c = INTENT_CASES.find(c => c.id === id)!;
+  return runIntentCase(c, built.models, { model: { provider: 'faux', modelId: 'faux-1' }, thinkingLevel: 'off' }, approvals ?? c.ownerApprovals);
 }
 
 test('all twelve intent fixtures have an offline acceptance path', { timeout: 90000 }, async t => {
@@ -23,7 +24,7 @@ test('all twelve intent fixtures have an offline acceptance path', { timeout: 90
     else if (c.expected.kind === 'list') calls = [['list_pr_watches', {}]];
     else if (c.expected.kind === 'cancel') calls = [['list_pr_watches', {}], ['cancel_pr_watch', { watchId: 'pw_x', basis: 'user_explicit' }]];
     else if (c.expected.kind === 'ask') calls = [['ask_user', ask]];
-    else if (c.expected.kind === 'refusal') calls = [['create_pr_watch', { ...create(), url: PR }], ['ask_user', ask]];
+    else if (c.expected.kind === 'refusal') calls = [['create_pr_watch', { ...create(), url: PR }]];
     else calls = [['start_worker', { threadId: THREAD, repoRef: 'repo-eval', mode: 'readonly', basis: 'user_explicit', prompt: '只读查询这个 PR 当前状态，只查一次，不写代码、不创建定时任务。' }]];
     const result = await scripted(c.id, calls);
     assert.equal(result.verdict, 'pass', JSON.stringify(result.observation));
@@ -48,12 +49,23 @@ test('rejected PR creation and policy-blocked fallbacks all appear as attempts',
     ['start_worker', { threadId: THREAD, repoRef: 'repo-eval', mode: 'readonly', basis: 'user_explicit', prompt: 'poll PR' }],
     ['set_followup', { threadId: THREAD, afterMinutes: 30, reason: 'fallback' }],
     ['create_routine', { instruction: 'poll PR', scheduleKind: 'interval' }],
-  ]);
+  ], 'pending owner approval', true);
   assert.equal(result.verdict, 'wrong_tool');
   assert.equal(result.observation.toolCalls.length, 4);
-  assert.ok(result.observation.toolCalls.every(call => call.result?.isError === true));
+  assert.equal(result.observation.toolCalls[0]!.result?.isError, false, 'proposal is not execution');
+  assert.ok(result.observation.toolCalls.slice(1).every(call => call.result?.isError === true));
   assert.equal(result.effects.dispatches.length, 0);
   assert.equal(result.watches.filter(w => w.status === 'active').length, 0);
+});
+
+test('a cancel proposal cannot stop a worker in the same assistant round', async () => {
+  const result = await scripted(5, [
+    ['cancel_pr_watch', { watchId: 'pw_x', basis: 'user_explicit' }],
+    ['interrupt_worker', { workerId: 'w_gw_refactor', basis: 'user_explicit' }],
+  ], 'pending', true);
+  assert.equal(result.verdict, 'wrong_tool');
+  assert.equal(result.observation.toolCalls[1]!.result!.isError, true);
+  assert.match(result.observation.toolCalls[1]!.result!.text, /不能再派 worker/);
 });
 
 test('scope downgrade is detected even when production refuses the attempted call', async () => {
@@ -87,9 +99,17 @@ test('prose mentioning tools is not a tool call or functional pass', async () =>
   assert.deepEqual(result.observation.toolCalls, []);
 });
 
-test('refusal without ask remains explicitly pending human prose review', async () => {
-  const result = await scripted(9, [['create_pr_watch', { ...create(), url: PR }]], '未创建，服务暂时不可用。');
-  assert.equal(result.verdict, 'refusal_observed');
+test('a proposal cannot pass or execute without the separately scripted owner decision', async () => {
+  const result = await scripted(1, [['create_pr_watch', { ...create(), url: PR }]], 'pending', false, []);
+  assert.equal(result.verdict, 'pending_confirmation');
+  assert.equal(result.watches.filter(w => w.status === 'active').length, 0);
+  assert.equal(result.ownerDecisions[0]!.status, 'not_approved');
+});
+
+test('the owner script does not approve a model-invented seven-day lifetime', async () => {
+  const result = await scripted(1, [['create_pr_watch', { ...create(), url: PR, expiresInMinutes: 10080 }]]);
+  assert.equal(result.verdict, 'pending_confirmation');
+  assert.equal(result.watches.filter(w => w.status === 'active').length, 0);
 });
 
 test('missing and duplicate result boundaries cannot become a passing measurement', () => {

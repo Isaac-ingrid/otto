@@ -8,7 +8,12 @@ or permission to push/merge/re-run anything.
 
 ## Natural-language tools (candidate; real-model routing gate pending)
 
-The source now includes `create_pr_watch`, `list_pr_watches` and `cancel_pr_watch`. Do not assume
+The source includes `create_pr_watch`, `list_pr_watches` and `cancel_pr_watch`. Creation/cancellation
+are now **two-phase** ([ADR-0019](adr/0019-pr-watch-owner-confirmation.md)): the model only proposes;
+the owner must press the dedicated server-rendered confirmation button before any watch change.
+The preview binds the operation, PR, Thread, evidence scope, interval and lifetime. Ordinary text,
+quoted agreement and generic ask buttons cannot authorize it. Confirmations expire after ten
+minutes and duplicate taps do not repeat or renew the effect. Do not assume
 these are live until this prompt/tool change passes ADR-0001 decision 14 and is deployed. The
 previously deployed version remains Owner-API-only.
 
@@ -31,8 +36,9 @@ or "check once" request is not enough. Explicit one-shot/negative or contradicto
 refuses creation before reuse/replay. This conservative lexical gate is not a general language
 parser: clarify ambiguous intent. "CI and commit statuses" means full evidence scope, while
 negated CI/Checks is not full-scope authorization. Limited scope must be explicit in the owner's
-words. Repeating the same request
-reuses the active watch and re-arms scheduling without extending expiry; conflicting scope or
+words. The explicit confirmation, not keyword matching, is the mutation authority. A repeated
+request proposes reuse of an active watch; only confirmation can re-arm it, without extending
+expiry. Replays of an already applied proposal do not re-arm it again. Conflicting scope or
 lifetime requires owner clarification. Once a PR-create tool has been attempted, the same turn
 cannot fall back to a worker or another routine/follow-up (and the reverse order is also blocked).
 An unrelated later owner turn is unaffected. These are deterministic boundary tests; scripted
@@ -40,8 +46,9 @@ model tests do not prove a real model will select the right tool.
 
 ## Create, inspect, cancel via Owner API
 
-This first version uses the optional explicit-SERVER_KEY [Owner API](../CONTEXT.md); it is not yet a
-conversation tool or a workspace management page. Browser-only installations do not need to enable
+This programmatic surface uses the optional explicit-SERVER_KEY [Owner API](../CONTEXT.md).
+Its authenticated typed create/cancel commands remain direct; the confirmation protocol above
+applies to model-generated conversational proposals. Browser-only installations do not need to enable
 this API unless they want the pilot. Use your deployment's HTTPS origin and keep credentials out
 of committed scripts or shell history.
 

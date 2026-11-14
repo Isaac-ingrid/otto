@@ -6,6 +6,7 @@ import { Harness, MemoryStorage, createRegistry, type ModelRef } from '@earendil
 import { buildStewardExtension } from '../src/llm/extension.ts';
 import type { PrEvidenceMode } from '../src/pr-evidence.ts';
 import { PrWatchService } from '../src/pr-watch.ts';
+import { PrWatchApprovals, PR_WATCH_APPROVAL_FAILURE, type PrWatchApproval, type PrWatchDecision } from '../src/pr-watch-approval.ts';
 import { buildEvalContext, openSeededLedger, type Observation } from './harness.ts';
 
 export const PR = 'https://github.com/example/otto-demo/pull/12';
@@ -16,6 +17,14 @@ type Expected =
   | { kind: 'create'; mode: PrEvidenceMode }
   | { kind: 'list' } | { kind: 'cancel' } | { kind: 'ask' }
   | { kind: 'refusal' } | { kind: 'one-shot' };
+export type OwnerApprovalPlan =
+  | { action: 'create'; threadId: string; url: string; evidenceMode: PrEvidenceMode; expiresInMinutes: number; intervalSeconds: number }
+  | { action: 'cancel'; watchId: string };
+// Prospectively declared human actions, not inferred from the model's selected tool or reply.
+const OWNER_APPROVALS: Record<number, OwnerApprovalPlan[]> = Object.fromEntries([1, 2, 3, 9, 10].map(id => [id,
+  [{ action: 'create', threadId: THREAD, url: PR, evidenceMode: id === 3 ? 'statuses-only' : 'checks-and-statuses', expiresInMinutes: 1440, intervalSeconds: 900 }],
+]));
+OWNER_APPROVALS[5] = [{ action: 'cancel', watchId: 'pw_x' }];
 export interface IntentCase {
   id: number;
   text: string;
@@ -23,6 +32,7 @@ export interface IntentCase {
   associations: Association[];
   expected: Expected;
   failCreate?: boolean;
+  ownerApprovals?: OwnerApprovalPlan[];
 }
 const linked: Association[] = [{ threadId: THREAD, url: PR }];
 export const INTENT_CASES: IntentCase[] = [
@@ -39,7 +49,7 @@ export const INTENT_CASES: IntentCase[] = [
   { id: 10, text: '持续盯住 PR 12 的 CI 和 commit statuses，有变化提醒我。', expected: { kind: 'create', mode: 'checks-and-statuses' } },
   { id: 11, text: `现在帮我看下 ${PR} 的 CI，只查这一次，不要创建持续跟进或定时任务。`, expected: { kind: 'one-shot' } },
   { id: 12, text: '现在只看一次 PR 12 的 commit statuses，不要持续跟进。', expected: { kind: 'one-shot' } },
-].map(c => ({ routedThreadId: THREAD, associations: linked, ...c }) as IntentCase);
+].map(c => ({ routedThreadId: THREAD, associations: linked, ownerApprovals: OWNER_APPROVALS[c.id] ?? [], ...c }) as IntentCase);
 
 export interface ToolObservation {
   id: string;
@@ -78,7 +88,7 @@ export function observeIntentCalls(messages: readonly Message[]): IntentObservat
   return { toolCalls, issues };
 }
 
-export type IntentVerdict = 'pass' | 'wrong_tool' | 'missed_ask' | 'unnecessary_ask' | 'scope_mismatch' | 'unexpected_persistence' | 'not_verified' | 'refusal_observed' | 'incomplete';
+export type IntentVerdict = 'pass' | 'wrong_tool' | 'missed_ask' | 'unnecessary_ask' | 'scope_mismatch' | 'unexpected_persistence' | 'not_verified' | 'refusal_observed' | 'incomplete' | 'pending_confirmation';
 const READS = new Set(['situation', 'find_threads', 'get_thread', 'list_pr_watches']);
 const FALLBACK = new Set(['start_worker', 'send_to_worker', 'set_followup', 'create_routine', 'suggest_routine']);
 export function scoreIntent(c: IntentCase, observation: IntentObservation): IntentVerdict {
@@ -120,8 +130,29 @@ export function scoreIntent(c: IntentCase, observation: IntentObservation): Inte
   return args.threadId === THREAD && (args.url === undefined || args.url === PR) ? 'pass' : 'wrong_tool';
 }
 
-/** Explicit caller-supplied models only. No auth-store/env fallback, CLI or paid default. */
-export async function runIntentCase(c: IntentCase, models: Models, agent: { model: ModelRef; thinkingLevel: ModelThinkingLevel }) {
+export interface OwnerDecisionObservation {
+  proposalId: string; command: PrWatchDecision; status: 'applied' | 'failed' | 'not_approved'; response?: string;
+}
+/** Protocol v3: tool choice plus a separately scripted OWNER decision. No proposal is a grant. */
+export function scoreConfirmedIntent(c: IntentCase, observation: IntentObservation, decisions: OwnerDecisionObservation[]): IntentVerdict {
+  if (!['create', 'cancel', 'refusal'].includes(c.expected.kind)) return scoreIntent(c, observation);
+  if (observation.issues.length || observation.toolCalls.some(t => !t.result)) return 'incomplete';
+  const calls = observation.toolCalls;
+  if (calls.some(t => FALLBACK.has(t.name))) return 'wrong_tool';
+  const name = c.expected.kind === 'cancel' ? 'cancel_pr_watch' : 'create_pr_watch';
+  if (calls.some(t => !READS.has(t.name) && ![name, 'ask_user'].includes(t.name))) return 'wrong_tool';
+  if (calls.some(t => t.name === 'ask_user' && !t.result?.isError)) return 'unnecessary_ask';
+  const attempts = calls.filter(t => t.name === name);
+  const mode = c.expected.kind === 'create' ? c.expected.mode : 'checks-and-statuses';
+  if (name === 'create_pr_watch' && attempts.some(t => t.arguments.evidenceMode !== mode)) return 'scope_mismatch';
+  if (attempts.length !== 1 || attempts[0]!.result?.isError) return 'not_verified';
+  const applied = decisions.filter(d => d.status === 'applied');
+  if (c.expected.kind === 'refusal') return decisions.length === 1 && decisions[0]!.status === 'failed' && decisions[0]!.response === PR_WATCH_APPROVAL_FAILURE ? 'pass' : 'not_verified';
+  return applied.length === 1 ? 'pass' : 'pending_confirmation';
+}
+
+/** Explicit caller-supplied models and explicit human script only; default is NO approval. */
+export async function runIntentCase(c: IntentCase, models: Models, agent: { model: ModelRef; thinkingLevel: ModelThinkingLevel }, ownerPlans: readonly OwnerApprovalPlan[] = []) {
   const { ledger, sql } = openSeededLedger(Date.now());
   const effects: Observation = { asks: [], dispatches: [] };
   const ctx = buildEvalContext(ledger, 10_000 + c.id, effects);
@@ -138,15 +169,25 @@ export async function runIntentCase(c: IntentCase, models: Models, agent: { mode
   }
   ctx.currentRun = async () => ({ operationId: `user:eval_${10_000 + c.id}`, kind: 'user', provenance: `user:eval_${10_000 + c.id}`, routedThreadId: c.routedThreadId });
   ctx.ownerMessageText = async () => c.text;
-  ctx.prWatches = {
-    list: () => watches.list(),
-    targetsForThread: id => watches.targetsForThread(id),
-    threadsForUrl: url => watches.threadsForUrl(url),
-    create: async input => {
+  const pending = new Map<string, PrWatchApproval>();
+  const approvals = new PrWatchApprovals({ sql, ledger,
+    tx: fn => { sql`BEGIN`; try { const value = fn(); sql`COMMIT`; return value; } catch (error) { sql`ROLLBACK`; throw error; } },
+    watches: { list: () => watches.list(), cancel: id => watches.cancel(id), create: input => {
       if (c.failCreate) throw new Error('injected backend refusal');
       return watches.create(input);
+    } },
+  });
+  // Cancellation plans bind the identity from the initial world, never one selected by the model.
+  const planned = ownerPlans.map(plan => plan.action === 'create' ? plan : {
+    action: 'cancel' as const, watch: watches.list().filter(w => w.id === plan.watchId).map(w => ({ id: w.id, threadId: w.threadId, url: w.url,
+      evidenceMode: w.evidenceMode, createdAt: w.createdAt, expiresAt: w.expiresAt, intervalMs: w.intervalMs }))[0],
+  });
+  ctx.prWatches = {
+    list: () => watches.list(), targetsForThread: id => watches.targetsForThread(id), threadsForUrl: url => watches.threadsForUrl(url),
+    request: async (input, taskId) => {
+      const proposal = approvals.propose(input, `user:eval_${10_000 + c.id}`, taskId);
+      pending.set(proposal.id, proposal); return proposal;
     },
-    cancel: id => watches.cancel(id),
   };
   const registry = createRegistry();
   registry.install(buildStewardExtension(ctx));
@@ -158,6 +199,17 @@ export async function runIntentCase(c: IntentCase, models: Models, agent: { mode
     const observation = observeIntentCalls(messages);
     if (settled.status !== 'done') observation.issues.push('submission did not finish');
     const reply = messages.filter(m => m.role === 'assistant').flatMap(m => m.content.flatMap(p => p.type === 'text' ? [p.text] : [])).join('\n');
-    return { caseId: c.id, observation, verdict: scoreIntent(c, observation), reply, watches: watches.list(), effects };
+    const ownerDecisions: OwnerDecisionObservation[] = [];
+    for (const proposal of pending.values()) {
+      const command = JSON.parse(proposal.command) as PrWatchDecision;
+      const authorized = planned.some(plan => JSON.stringify(plan) === JSON.stringify(command));
+      if (!authorized) { ownerDecisions.push({ proposalId: proposal.id, command, status: 'not_approved' }); continue; }
+      try {
+        const result = approvals.decide(proposal.id, true, `user:simulated-owner-click-${c.id}`);
+        ownerDecisions.push({ proposalId: proposal.id, command, status: result.status === 'applied' ? 'applied' : 'not_approved' });
+      } catch { ownerDecisions.push({ proposalId: proposal.id, command, status: 'failed', response: PR_WATCH_APPROVAL_FAILURE }); }
+    }
+    return { caseId: c.id, observation, verdict: scoreConfirmedIntent(c, observation, ownerDecisions), reply, watches: watches.list(), effects,
+      proposals: [...pending.values()], ownerDecisions };
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }

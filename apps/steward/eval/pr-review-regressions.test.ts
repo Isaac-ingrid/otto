@@ -3,12 +3,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage, fauxText, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import { buildStewardModels } from '../src/llm/models.ts';
-import { INTENT_CASES, PR, THREAD, runIntentCase, type IntentCase } from './pr-intent.ts';
+import { INTENT_CASES, PR, THREAD, runIntentCase, type IntentCase, type OwnerApprovalPlan } from './pr-intent.ts';
 const create = (extra = {}) => ({ threadId: THREAD, url: PR, evidenceMode: 'checks-and-statuses', basis: 'user_explicit', ...extra });
-async function scripted(c: IntentCase, calls: Array<[string, Parameters<typeof fauxToolCall>[1]]>) {
+async function scripted(c: IntentCase, calls: Array<[string, Parameters<typeof fauxToolCall>[1]]>, ownerPlans: readonly OwnerApprovalPlan[] = []) {
   const built = buildStewardModels({ provider: 'faux', modelId: 'faux-1', explicit: true }, undefined);
   built.faux!.setSteps([...calls.map(([name, args]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: 'toolUse' })), fauxAssistantMessage([fauxText('Done.')])]);
-  return runIntentCase(c, built.models, { model: { provider: 'faux', modelId: 'faux-1' }, thinkingLevel: 'off' });
+  return runIntentCase(c, built.models, { model: { provider: 'faux', modelId: 'faux-1' }, thinkingLevel: 'off' }, ownerPlans);
 }
 const fixture = (id: number) => structuredClone(INTENT_CASES.find(c => c.id === id)!);
 
@@ -42,7 +42,7 @@ test('review P1-4: Chinese not-only never authorizes limited evidence', async ()
     const c = { ...fixture(10), text: `持续盯住 ${PR}，${prefix} commit statuses，也要看 CI。` };
     const limited = await scripted(c, [['create_pr_watch', create({ evidenceMode: 'statuses-only' })]]);
     assert.equal(limited.watches.filter(w => w.status === 'active').length, 0, prefix);
-    const full = await scripted(c, [['create_pr_watch', create()]]);
+    const full = await scripted(c, [['create_pr_watch', create()]], c.ownerApprovals);
     assert.equal(full.watches.filter(w => w.status === 'active').length, 1, prefix);
     assert.equal(full.watches.find(w => w.status === 'active')!.evidenceMode, 'checks-and-statuses');
   }
@@ -51,7 +51,7 @@ test('review P1-4: Chinese not-only never authorizes limited evidence', async ()
   const c = { ...fixture(1), text: `Watch ${url} for CI.`, associations: [{ threadId: THREAD, url }] };
   const limited = await scripted(c, [['create_pr_watch', create({ url, evidenceMode: 'statuses-only' })]]);
   assert.equal(limited.watches.filter(w => w.status === 'active').length, 0);
-  const full = await scripted(c, [['create_pr_watch', create({ url })]]);
+  const full = await scripted(c, [['create_pr_watch', create({ url })]], [{ action: 'create', threadId: THREAD, url, evidenceMode: 'checks-and-statuses', expiresInMinutes: 1440, intervalSeconds: 900 }]);
   assert.equal(full.watches.filter(w => w.status === 'active').length, 1);
 });
 

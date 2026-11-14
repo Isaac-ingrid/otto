@@ -31,6 +31,7 @@ import {
 import { describeSchedule, parseAtIso, type RoutineService, type RoutineSpecInput } from "../routines.ts";
 import { parsePrUrl, type PrEvidenceMode } from "../pr-evidence.ts";
 import type { PrWatchRow } from "../pr-watch.ts";
+import { approvalText, type PrWatchRequest, type PrWatchApproval } from "../pr-watch-approval.ts";
 import { hasExplicitPrWatchIntent, hasExplicitPrCancelIntent, mentionsFullPrCi, withoutPrUrls } from "../pr-watch-intent.ts";
 import { MAX_CONCLUSION, MAX_DID_ITEM, MAX_DID_ITEMS, MAX_NEEDS_YOU, type Tone } from "../report-template.ts";
 
@@ -99,8 +100,7 @@ export interface StewardExtensionContext {
     list(): PrWatchRow[];
     targetsForThread(threadId: string): string[];
     threadsForUrl(url: string): string[];
-    create(input: { id: string; threadId: string; url: string; evidenceMode: PrEvidenceMode; expiresAt?: number; intervalSeconds?: number }): Promise<PrWatchRow>;
-    cancel(id: string): boolean;
+    request(input: PrWatchRequest, taskId: string): Promise<PrWatchApproval>;
   };
   /** Records an explicit in-run outcome (no_action) on the firing routine/follow-up (§8.6). */
   recordProactiveOutcome(operationId: string, outcome: string): void;
@@ -175,7 +175,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   let actionAttemptedOperationId: string | undefined;
   let prWatchAttemptedOperationId: string | undefined;
   let prAlternativeAttemptedOperationId: string | undefined;
-  const prAlternatives = new Set(["start_worker", "send_to_worker", "set_followup", "create_routine", "suggest_routine"]);
+  const prAlternatives = new Set(["start_worker", "send_to_worker", "interrupt_worker", "set_followup", "create_routine", "suggest_routine"]);
   const externalActionTools = new Set([
     "start_worker", "send_to_worker", "interrupt_worker", "update_thread", "answer_worker",
     "notes_propose", "notes_commit", "notes_confirm", "notes_pin", "notes_remove",
@@ -1167,13 +1167,20 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     const named = ctx.ledger.threads.list().filter(thread => thread.title.length >= 4 && text.includes(thread.title));
     return named.length === 1 && named[0]!.threadId === threadId;
   };
+  const requestPrApproval = async (input: PrWatchRequest, taskId: string) => {
+    try {
+      const proposal = await ctx.prWatches.request(input, taskId);
+      const text = proposal.status === 'pending' ? `等待用户点击专用确认卡；尚未执行。${approvalText(JSON.parse(proposal.command))}` : `确认提案已是 ${proposal.status}，不重复执行。`;
+      return { output: [{ type: 'text' as const, text }], control: { terminate: true as const } };
+    } catch { return err('refused: 无法生成确认提案（已有冲突、参数无效或目标已变化）；请用 ask_user 澄清，不要派 worker 或设置计划绕过。'); }
+  };
   const createPrWatch = defineTool({
     name: "create_pr_watch",
-    description: "仅按用户明确持续跟进要求创建无模型的只读 PR 跟进；一次性查询或不要持续跟进时禁止创建。不派 worker、不设重复回看、不修改/重跑/合并。先用 get_thread 查看所属事项和已知 PR。url 可省略，但仅当明确事项下唯一 PR 时复用；有歧义用 ask_user。验证范围必须说清楚，statuses-only 需用户原话明确要求仅看 commit statuses。默认到期 24 小时。",
+    description: "仅按用户明确持续跟进要求生成只读 PR 跟进确认提案，必须用户点击专用卡后才执行；一次性查询或不要持续跟进时禁止创建。不派 worker、不设重复回看、不修改/重跑/合并。先用 get_thread 查看所属事项和已知 PR。url 可省略，但仅当明确事项下唯一 PR 时复用；有歧义用 ask_user。验证范围必须说清楚，statuses-only 需用户原话明确要求仅看 commit statuses。默认到期 24 小时。",
     parameters: Type.Object({
       threadId: Type.String(), url: Type.Optional(Type.String()),
       evidenceMode: Type.Union([Type.Literal("checks-and-statuses"), Type.Literal("statuses-only")]),
-      expiresInMinutes: Type.Optional(Type.Number({ description: "到期分钟数，>0 且至多 10080；不是检查间隔" })),
+      expiresInMinutes: Type.Optional(Type.Number({ description: "仅在用户指定时长时填写；否则省略（默认1440分钟），不要自行选7天上限。>0且至多10080分钟。" })),
       intervalSeconds: Type.Optional(Type.Number({ description: "检查间隔 60–3600 秒；默认 900 秒" })),
       basis: Type.Literal("user_explicit"),
     }),
@@ -1195,6 +1202,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (!explicit && !(linked.length === 1 && linked[0] === args.threadId)) return err("refused: 所属 Thread 不明确，用 ask_user 确认事项。");
       if (owner.run.routedThreadId && owner.run.routedThreadId !== args.threadId) return err("refused: 不能把当前事项的跟进挂到另一个 Thread。");
       const scopeText = withoutPrUrls(owner.text);
+      if (/权限[^。\n]{0,30}(?:statuses|提交状态)|\b(?:permission|access)\b[^.\n]{0,40}\bstatuses\b/i.test(scopeText)) return err('refused: 条件降级不是单一验证范围，请先用 ask_user 确认本次只看 commit statuses 还是完整 Checks+statuses；不能默认创建或自动降级。');
       const mentionsStatuses = /\bcommit\s+statuses?\b/i.test(scopeText);
       const mentionsChecks = mentionsFullPrCi(scopeText);
       const negatedLimit = /(?:不要|不能|不想|不是|别)\s*(?:(?:仅|只)(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)|statuses-only)|不(?:仅|只)(?:仅|是)?(?:看|查|检查|跟进|验证|关注)?\s*(?:commit\s+statuses?|提交状态)|\b(?:not|no|never|don't|do not)\s+(?:only\s+commit\s+statuses?|statuses-only)\b/i.test(scopeText);
@@ -1202,37 +1210,10 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (mentionsStatuses && !limited && !mentionsChecks) return err("refused: 请用 ask_user 明确是仅 commit statuses，还是同时检查 check runs；不能替用户选范围。");
       if ((args.evidenceMode === "statuses-only") !== limited) return err("refused: 验证范围与用户原话不一致；仅看 commit statuses 需要明确说明，权限不足不能静默降级，用 ask_user 确认。");
       if (args.expiresInMinutes !== undefined && (!Number.isFinite(args.expiresInMinutes) || args.expiresInMinutes <= 0 || args.expiresInMinutes > 10080)) return err("refused: 到期时间须大于 0 且不超过 7 天。");
-      const taskId = `pw_${api.taskId}`;
-      const watches = ctx.prWatches.list();
-      const replayed = watches.find(w => w.id === taskId);
-      if (replayed) {
-        if (replayed.threadId !== args.threadId || replayed.url !== url || replayed.evidenceMode !== args.evidenceMode) return err("refused: 工具重放的目标或范围冲突。");
-        if (replayed.status !== "active") return ok(`跟进 ${replayed.id} 已是 ${replayed.status}，不重新激活。`);
-        try {
-          const row = await ctx.prWatches.create({ id: taskId, threadId: replayed.threadId, url: replayed.url,
-            evidenceMode: replayed.evidenceMode, expiresAt: replayed.expiresAt, intervalSeconds: replayed.intervalMs / 1000 });
-          return ok(`已恢复同一次工具调用的跟进，不延长到期时间：${JSON.stringify(row)}`);
-        } catch { return err("refused: 同一次工具调用的调度尚未确认，请稍后重试。"); }
-      }
-      const active = watches.filter(w => w.threadId === args.threadId && w.url === url && w.status === "active");
-      if (active.length) {
-        if (active.length === 1 && active[0]!.evidenceMode === args.evidenceMode && args.expiresInMinutes === undefined &&
-            (args.intervalSeconds === undefined || args.intervalSeconds * 1000 === active[0]!.intervalMs)) {
-          const current = active[0]!;
-          try {
-            const repaired = await ctx.prWatches.create({ id: current.id, threadId: current.threadId, url: current.url,
-              evidenceMode: current.evidenceMode, expiresAt: current.expiresAt, intervalSeconds: current.intervalMs / 1000 });
-            return ok(`已有跟进，不重复创建、不延长到期时间：${JSON.stringify(repaired)}`);
-          } catch { return err("refused: 已有跟进但调度尚未确认，请稍后重试同一请求，不要派 worker 绕过。"); }
-        }
-        return err(`refused: 已有跟进 ${active.map(w => w.id).join(",")}；不要重叠创建或改范围，请先让用户选择保留或取消。`);
-      }
-      try {
-        const row = await ctx.prWatches.create({ id: taskId, threadId: args.threadId, url, evidenceMode: args.evidenceMode,
-          ...(args.expiresInMinutes !== undefined ? { expiresAt: Date.now() + args.expiresInMinutes * 60_000 } : {}),
-          ...(args.intervalSeconds !== undefined ? { intervalSeconds: args.intervalSeconds } : {}) });
-        return ok(`已创建只读跟进；${row.evidenceMode === "statuses-only" ? "仅验证 commit statuses，未验证 Checks/Actions。" : "检查 check runs 和 commit statuses，不等于需求验收。"}${JSON.stringify(row)}`);
-      } catch { return err("refused: 跟进未确认创建成功。先用 list_pr_watches 检查；不要派 worker 或 set_followup 绕过。"); }
+      return requestPrApproval({ action: 'create', threadId: args.threadId, url, evidenceMode: args.evidenceMode,
+        ...(args.expiresInMinutes !== undefined ? { expiresInMinutes: args.expiresInMinutes } : {}),
+        ...(args.intervalSeconds !== undefined ? { intervalSeconds: args.intervalSeconds } : {}),
+      }, String(api.taskId));
     },
   });
   const listPrWatches = defineTool({
@@ -1241,9 +1222,9 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     execute: async args => ok(JSON.stringify(ctx.prWatches.list().filter(w => args.threadId === undefined || w.threadId === args.threadId))),
   });
   const cancelPrWatch = defineTool({
-    name: "cancel_pr_watch", description: "仅按用户明确取消要求取消一个 PR 跟进；查看、保留或不要取消不授权取消，编号本身不是授权。编号从 list_pr_watches 获取。取消跟进不等于停止 worker、结束 turn 或取消其他定时任务；多个候选必须 ask_user。",
+    name: "cancel_pr_watch", description: "仅按用户明确取消要求生成单个 PR 跟进的取消确认提案，必须用户点击专用卡后才取消；查看、保留或不要取消不授权取消，编号本身不是授权。编号从 list_pr_watches 获取。取消跟进不等于停止 worker、结束 turn 或取消其他定时任务；多个候选必须 ask_user。",
     parameters: Type.Object({ watchId: Type.String(), basis: Type.Literal("user_explicit") }), replay: "safe",
-    execute: async args => {
+    execute: async (args, api) => {
       const owner = await ownerPrTurn();
       if (!owner) return err("refused: 取消 PR 跟进只能由真实用户消息发起。");
       if (!hasExplicitPrCancelIntent(owner.text)) return err("refused: 用户未明确授权取消 PR 跟进，或要求保留/不要取消；编号或查看请求不是取消授权，请用 ask_user 确认。");
@@ -1256,7 +1237,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       if (refs.invalid || refs.urls.length > 1 || (refs.urls.length === 1 && refs.urls[0] !== watch.url)) return err("refused: 取消目标不明确或与用户链接不一致，用 ask_user 确认。");
       const candidates = all.filter(w => w.status === "active" && (refs.urls.length ? w.url === refs.urls[0] : explicitPrThread(w.threadId, owner.run, owner.text)));
       if (!owner.text.includes(watch.id) && !(candidates.length === 1 && candidates[0]!.id === watch.id)) return err("refused: 存在多个或没有明确取消目标，用 ask_user 选择编号，不能猜。");
-      return ctx.prWatches.cancel(watch.id) ? ok(`已取消跟进 ${watch.id}；已交给发送队列的消息不能撤回。`) : err("refused: 未取消，请刷新列表。");
+      return requestPrApproval({ action: 'cancel', watchId: watch.id }, String(api.taskId));
     },
   });
 
@@ -1346,7 +1327,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           if (prWatchAttemptedOperationId === run.operationId) return { block: "本轮已尝试专用 PR 跟进，不能再派 worker 或设置另一条计划兜底；请如实说明或 ask_user。" };
           prAlternativeAttemptedOperationId = run.operationId;
         }
-        if (run && call.name === "create_pr_watch") {
+        if (run && (call.name === "create_pr_watch" || call.name === "cancel_pr_watch")) {
           if (prAlternativeAttemptedOperationId === run.operationId) return { block: "本轮已尝试派工或设置计划，不能重叠创建 PR 跟进；请下一轮确认保留哪条路径。" };
           prWatchAttemptedOperationId = run.operationId;
         }
@@ -1565,6 +1546,6 @@ const ROLE_PROMPT = `你是 Otto，用户的个人助手，负责调度用户机
 8. notify_user 的三段有硬性长度限制（结论 ≤80 字；做了什么 ≤4 条、每条 ≤100 字；需要你 ≤120 字），超长会被拒绝——压缩重写，不要截断。
 9. 永远不要替用户宣布「这件事完成了」；完成与否由汇报与事实说话。
 10. 例行任务与定时回看（spec §8）：用户表达周期性需求（「每个工作日 9 点汇总昨晚进展」）时，先把触发条件和要做的事复述给他确认，确认后用 create_routine（basis=user_explicit；digest=确定性汇总，instruction=按指令执行；cron 用 UTC）。你只是「察觉到重复模式」时，用 suggest_routine 发一张带按钮的建议卡——点按钮才会创建，绝不绕过按钮。给某个 Thread 设闹钟用 set_followup；管理用 list_schedules / pause_schedule / cancel_schedule（「暂停那个每天九点的」）。
-10b. 只有用户明确要求持续盯 PR 状态时才用 create_pr_watch；一次性查询或明确不要持续跟进，不能创建 watch 或追加日程，一次性查询如需 worker 仅可 readonly。持续跟进不要派 worker 轮询，也不要额外 set_followup/create_routine。首次最好给 PR 链接；只有当前明确 Thread 下唯一已知 PR 才能省略，有多个候选必须 ask_user。先用 get_thread 看 pullRequests 或 list_pr_watches；所属事项不明确也要问，不要为了跟进而派 worker。evidenceMode 必须与用户授权一致：用户明说只看 commit statuses 才选 statuses-only，并说明未验证 Checks/Actions；其余使用 checks-and-statuses，权限不足如实告知，绝不静默降级。只有工具返回成功才能说已创建；工具拒绝时不要用 worker/定时回看绕过。查看用 list_pr_watches，取消用 cancel_pr_watch；取消跟进不等于取消 turn 或停 worker。
+10b. 只有用户明确要求持续盯 PR 状态时才用 create_pr_watch；一次性查询或明确不要持续跟进，不能创建 watch 或追加日程，一次性查询如需 worker 仅可 readonly。持续跟进不要派 worker 轮询，也不要额外 set_followup/create_routine。首次最好给 PR 链接；只有当前明确 Thread 下唯一已知 PR 才能省略，有多个候选必须 ask_user。先用 get_thread 看 pullRequests 或 list_pr_watches；所属事项不明确也要问，不要为了跟进而派 worker。遇到条件降级请求（如权限不行就用 statuses）必须先 ask_user 明确本次范围，不能先提完整范围的创建方案。evidenceMode 必须与用户授权一致：用户明说只看 commit statuses 才选 statuses-only，并说明未验证 Checks/Actions；其余使用 checks-and-statuses，权限不足如实告知，绝不静默降级。create_pr_watch/cancel_pr_watch 只生成绑定目标、范围、期限的专用确认卡并结束本轮；确认前不能说已创建或已取消，不能代替用户确认，也不能用 ask_user 普通选项/文字同意代替专用按钮。用户确认后由确定性处理器执行，不再派模型。权限不足如实报告，不自动切换范围。工具拒绝时不要用 worker/定时回看绕过。查看用 list_pr_watches，取消用 cancel_pr_watch；取消跟进不等于取消 turn 或停 worker。
 11. ⟦routine R⟧ 输入到达时按指令执行：要派发必须带 provenanceRef=routine:R（或指令里引用的真实用户消息），无事可做用 no_action 收尾——那是默认结局，不要为了「显得有用」而制造通知。⟦followup F⟧ 到期时同理：先看那个 Thread 的现状再决定。
 12. 记忆（notes_* 工具）：值得记的是「不知道它就会派错/多问/说错」的事——用户偏好与项目约定，不是闲聊内容。写入分两步：先 notes_propose 看查重/相似/腾挪候选（similar 只是字面相近，不能据此认定「同一件事」），再 notes_commit。两个意图必须分清：supersedes 用于旧事实已被取代（旧条目转为历史版本），evicts 只用于腾地方（旧条目仍成立）；相似不等于相同，改写一条已确认的记忆需要用户重新确认。信任规则是硬性的：常驻层永远要有 evidence=用户真正说过的消息 id（用户消息触发的轮次可省略，系统自动挂当轮消息；事件触发的轮次必须指明）；worker_reported / inferred 来源先写项目层（待确认），用户在对话里确认后（notes_confirm，evidenceRef=确认那条消息）才能提升常驻层；connector 来源永远只进项目层。每次写入系统会自动在下一条回复后附「记账」，正文不必复述。用户要看/置顶/删除记忆时用 notes_list / notes_pin / notes_remove。系统还会按运行史自动标注「可能已过时」：一条来自失败运行的环境结论，一旦同一机器/仓库后来跑成功，就会被标上（标注只提示，不会隐藏）；看到标注就该核实现状，确认仍成立时用 supersedes 记一条新的当前结论（旧条目转为历史版本），而不是继续引用旧的那条。`

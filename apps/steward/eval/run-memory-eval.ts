@@ -132,8 +132,7 @@ function buildContext(ledger: Ledger, relays: string[], input: string): StewardE
     recordProactiveOutcome: () => {},
     prWatches: {
       list: () => [], targetsForThread: () => [], threadsForUrl: () => [],
-      create: async () => { throw new Error("memory eval does not create PR watches"); },
-      cancel: () => false,
+      request: async () => { throw new Error('memory eval does not authorize PR decisions'); },
     },
     routines: {
       create: async () => ({ ok: false as const, reason: "not in the memory eval" }),

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,4 +36,32 @@ test('focused runner preserves a complete red faux observation without secrets o
     assert.doesNotMatch(raw, /fixture-no-network-key|OTTO_INTENT_TEST_KEY/);
     assert.ok(result.results.every((r: { verdict: string }) => r.verdict !== 'pass'), 'faux prose cannot manufacture success');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workers use a private frozen profile and attest it despite external profile changes', { timeout: 90000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-intent-freeze-test-'));
+  const config = join(dir, 'profile.json'), out = join(dir, 'result.json');
+  writeFileSync(config, JSON.stringify({ provider: 'faux', modelId: 'faux-1', thinkingLevel: 'off', apiKeyEnv: 'OTTO_INTENT_TEST_KEY', label: 'frozen-original' }));
+  const child = spawn(process.execPath, [runner, '--config', config, '--out', out, '--concurrency', '2'], { env: { ...process.env, OTTO_INTENT_TEST_KEY: 'fixture-no-network-key' }, stdio: 'ignore' });
+  const exited = new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
+  try {
+    for (let i = 0; i < 2500; i++) {
+      if (existsSync(out)) {
+        const progress = JSON.parse(readFileSync(out, 'utf8'));
+        if (progress.summary.n > 0) { assert.ok(progress.summary.n < 12, 'mutate while later workers are still queued'); break; }
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+      if (i === 2499) throw new Error('no partial result');
+    }
+    writeFileSync(config, 'invalid external profile after first completed case');
+    assert.equal(await exited, 1);
+    const result = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(result.summary.n, 12);
+    assert.equal(result.summary.errors, 0);
+    assert.equal(result.inputStable, true);
+    for (const row of result.results) assert.deepEqual(row.workerConfiguration, {
+      mode: 'production-builder', label: 'frozen-original', provider: 'faux', modelId: 'faux-1',
+      requestedThinkingLevel: 'off', effectiveThinkingLevel: 'off', endpointHash: null, customHeaders: false,
+    });
+  } finally { child.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); }
 });

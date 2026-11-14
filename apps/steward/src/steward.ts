@@ -68,6 +68,7 @@ import {
 } from "@isaac2ingrid/protocol";
 import { bearer, resolveKeySecrets } from "./auth.ts";
 import { PrWatchInputError, PrWatchService } from "./pr-watch.ts";
+import { PrWatchApprovals, approvalText, approvalThread, PR_WATCH_APPROVAL_FAILURE, type PrWatchRequest, type PrWatchDecision } from './pr-watch-approval.ts';
 import { readPrEvidence } from "./pr-evidence.ts";
 import {
   formatUsd,
@@ -1124,12 +1125,7 @@ export class Steward extends Agent<Env> {
         list: () => this.prWatches.list(),
         targetsForThread: id => this.prWatches.targetsForThread(id),
         threadsForUrl: url => this.prWatches.threadsForUrl(url),
-        create: async input => {
-          const row = this.prWatches.create(input);
-          await this.armPrWatches();
-          return row;
-        },
-        cancel: id => this.prWatches.cancel(id),
+        request: (input, taskId) => this.requestPrWatchApproval(input, taskId),
       },
       /** §4.3/§7.2 (issue #10): whether a user-message evidence ref is one the bound owner
        *  actually sent — the one check answer_worker's hook cannot do for itself. */
@@ -3633,6 +3629,61 @@ export class Steward extends Agent<Env> {
     });
   }
 
+  private prWatchApprovals_?: PrWatchApprovals;
+  private get prWatchApprovals(): PrWatchApprovals {
+    return this.prWatchApprovals_ ??= new PrWatchApprovals({
+      sql: this.sql.bind(this), tx: fn => this.ctx.storage.transactionSync(fn), ledger: this.ledger,
+      // decide() owns the outer transaction: workerd forbids nested transactionSync.
+      watches: new PrWatchService({ sql: this.sql.bind(this), tx: fn => fn(),
+        threadExists: id => this.ledger.threads.get(id) !== null,
+        record: (id, text, data) => { this.ledger.timeline.add(id, 'note', text, data); },
+        notify: async () => { throw new Error('approval_backend_cannot_poll'); },
+        read: async () => { throw new Error('approval_backend_cannot_read_github'); },
+      }),
+    });
+  }
+  private async requestPrWatchApproval(input: PrWatchRequest, taskId: string) {
+    const run = await this.currentRunBinding();
+    if (!run || run.kind !== 'user' || !run.provenance.startsWith('user:') || this.ownerMessageRef(run.provenance.slice(5)) === null) throw new Error('owner_turn_required');
+    const proposal = this.prWatchApprovals.propose(input, run.provenance, taskId);
+    if (proposal.status !== 'pending') return proposal;
+    const owner = this.ownerOpenIdSync(); if (!owner) throw new Error('owner_not_ready');
+    const command = JSON.parse(proposal.command) as PrWatchDecision;
+    await this.enqueueOutbound({ id: `prwatchapproval:${proposal.id}`, kind: 'card', to: owner,
+      threadId: approvalThread(command), questionId: proposal.id, urgency: 'push',
+      card: askUserCard({ question: `${approvalText(command)}\n此确认 10 分钟内有效；普通文字回复不会执行。`, buttons: [
+        { label: command.action === 'cancel' ? '确认取消此跟进' : command.action === 'reuse' ? '确认复用并恢复调度' : '确认创建此跟进', action: `prwatch:${proposal.id}:confirm`, primary: true },
+        { label: '不执行', action: `prwatch:${proposal.id}:decline` },
+      ] }),
+    });
+    await this.markRunNotified();
+    return proposal;
+  }
+  private async handlePrWatchApprovalAction(msgId: string, action: string, cardMsgId: string): Promise<void> {
+    const match = /^prwatch:(q_pwa_[a-f0-9-]+):(confirm|decline)$/.exec(action);
+    const inbound = this.sql`SELECT 1 AS ok FROM sh_inbound WHERE channel = 'local' AND msgId = ${msgId} AND ownerAuthorized = 1 AND eventType = 'action'`;
+    if (!match || inbound.length !== 1) return;
+    const row = this.ledger.outbound.rowForProviderMsg(cardMsgId);
+    if (!row || row.id !== `prwatchapproval:${match[1]}`) return;
+    const card = this.ledger.outbound.row(row.id);
+    if (card?.kind !== 'card' || !cardView((JSON.parse(String(card.payload)) as { card?: unknown }).card).buttons.some(b => b.action === action)) return;
+    try {
+      const result = this.prWatchApprovals.decide(match[1]!, match[2] === 'confirm', `user:${msgId}`);
+      const threadId = approvalThread(result.command);
+      this.ledger.ownerInputs.record('local', msgId, match[2] === 'confirm' ? '确认此 PR 跟进操作' : '不执行此 PR 跟进操作', threadId);
+      let text = result.status === 'applied' ? (result.command.action === 'cancel' ? '已确认取消此 PR 跟进；不影响 worker、turn 或其他计划。' : '已确认此 PR 跟进；范围和期限按确认卡执行。') : result.status === 'declined' ? '未执行此 PR 跟进操作。' : '确认已过期，请重新发起提案。';
+      if (result.appliedNow && result.command.action === 'cancel' && result.watch) text += ` 编号：${result.watch.id}。`;
+      if (result.appliedNow && result.command.action !== 'cancel' && result.watch) text += ` 编号：${result.watch.id}；到期：${new Date(result.watch.expiresAt).toISOString()}。${result.watch.evidenceMode === 'statuses-only' ? '仅验证 commit statuses，未验证 Checks/Actions。' : '验证 check runs 和 commit statuses，不代表需求验收。'}`;
+      if (result.status === 'applied' && !result.appliedNow) text = `该确认已处理，不重复执行；当前跟进状态：${result.watch?.status ?? '不存在'}。`;
+      if (result.appliedNow && result.command.action !== 'cancel' && result.watch?.status === 'active') {
+        try { await this.armPrWatches(); } catch { text = 'PR 跟进已保存，但调度尚未确认；请管理员检查或重启恢复，不代表已经开始轮询。'; this.logChannel('pr_watch_schedule', 'approval_rearm_failed'); }
+      }
+      await this.dispatcher.replyToCard(cardMsgId, text, threadId);
+    } catch {
+      await this.dispatcher.replyToCard(cardMsgId, PR_WATCH_APPROVAL_FAILURE);
+    }
+  }
+
   private async armPrWatches(): Promise<void> {
     // One idempotent cron, not an LLM heartbeat or a self-extending one-shot chain.
     await this.schedule("* * * * *", "pollPrWatches");
@@ -3820,6 +3871,10 @@ export class Steward extends Agent<Env> {
     // typed message, a card choice, or an answer to a worker, with the Thread it landed on.
     // Idempotent on (channel, msgId); the COALESCE keeps a row already inserted without text.
     this.ledger.ownerInputs.record("local", input.msgId, input.text, routedThread?.threadId ?? null);
+    if (routedRow?.questionId && this.prWatchApprovals.get(routedRow.questionId)) {
+      await this.dispatcher.replyToCard(input.parentId!, '此 PR 操作尚未因文字回复执行；请使用该消息上的专用确认/不执行按钮。其他提问与 worker 不受影响。', routedThread?.threadId);
+      return;
+    }
     if (routedThread && input.parentId) {
       this.ledger.threads.markRead(routedThread.threadId); // a reply means the report was seen (§6.5)
       // Review #7: a reply routed to a Thread with an open question IS the answer — close it
@@ -4441,6 +4496,10 @@ export class Steward extends Agent<Env> {
    *  the card's providerMsgId — in the local channel, the outbound row / merged-group id. */
   private async dispatchCardAction(input: { msgId: string; action: string; cardMsgId: string }): Promise<void> {
     const action = input.action;
+    if (action.startsWith('prwatch:')) {
+      await this.handlePrWatchApprovalAction(input.msgId, action, input.cardMsgId);
+      return;
+    }
     if (action.startsWith("ask:") || action.startsWith("asknew:")) {
       await this.handleAskCardAction(input.msgId, action, input.cardMsgId);
       return;
@@ -4614,6 +4673,10 @@ export class Steward extends Agent<Env> {
   private async handleAskCardAction(msgId: string, action: string, cardMsgId: string): Promise<void> {
     const [verb, qid, idxRaw] = action.split(":");
     const question = this.ledger.questions.get(qid ?? "");
+    if (qid && this.prWatchApprovals.get(qid)) {
+      await this.dispatcher.replyToCard(cardMsgId, '此操作只能使用专用 PR 确认按钮，普通选项不能授权执行。');
+      return;
+    }
     if (!question) {
       await this.dispatcher.replyToCard(cardMsgId, "这张提问卡片关联的问题已不存在。");
       return;
@@ -5009,6 +5072,8 @@ export class Steward extends Agent<Env> {
     this.ctx.storage.sql.exec("DELETE FROM sh_followup");
     this.ctx.storage.sql.exec("DELETE FROM sh_routine_offer");
     this.routineService_ = undefined;
+    this.ctx.storage.sql.exec('DELETE FROM sh_pr_watch_approval');
+    this.prWatchApprovals_ = undefined;
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_notice");
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch");
     this.prWatches_ = undefined;
