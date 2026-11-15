@@ -41,6 +41,17 @@ jobs:
       - run: pnpm --filter @isaac2ingrid/steward eval:routing:selftest
       # Evaluator-only PR intent observer/scorer; scripted choices, not a real-model pass.
       - run: pnpm --filter @isaac2ingrid/steward eval:pr-intent:selftest
+      # Browser smoke suite against local Node steward + scripted faux model + isolated SQLite.
+      - run: pnpm --filter @isaac2ingrid/steward exec playwright install --with-deps chromium
+      - run: pnpm --filter @isaac2ingrid/steward test:browser
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: steward-browser-smoke-artifacts
+          path: |
+            apps/steward/test-results/
+            apps/steward/playwright-report/
+          if-no-files-found: ignore
       # Issue #26: the connector must ship as a self-contained `@isaac2ingrid/otto` tarball —
       # bundled dist, bin wrapper, zero runtime dependencies (workspace deps stay in dev).
       # Fail the build if the layout regresses.

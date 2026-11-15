@@ -9,5 +9,5 @@
       "cloudflare:workers": ["../../node_modules/.pnpm/*/node_modules/@cloudflare/workers-types/index.d.ts"]
     }
   },
-  "include": ["node-host", "src", "worker-configuration.d.ts"]
+  "include": ["node-host", "e2e", "playwright.config.ts", "src", "worker-configuration.d.ts"]
 }
