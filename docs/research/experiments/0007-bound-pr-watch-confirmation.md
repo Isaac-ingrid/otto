@@ -158,3 +158,13 @@ PR Answer action and retained ordinary-question answers. Temporary test browser 
 out, database integrity passed, public HTTPS 200 / anonymous API 401, doctor 0 failures (existing
 offsite-backup warning remains). No model input, watch/status mutation or later-plan tests were
 performed by this deployment check. A page refresh is needed to load the new browser modules.
+
+The owner subsequently exercised cancellation while the lab synthetic context was pending.
+[Server receipt](0007-owner-cancel-acceptance.json): before the click the watch was active/waiting
+and cancellation proposal pending; after the owner clicked the dedicated button the proposal was
+applied and watch cancelled. Its checkedAt stayed unchanged beyond an eligible subsequent cron
+window. Zero active lab watches remained and the synthetic context was restored to success.
+However the owner's screenshot still showed `Answer`, despite the corrected new footer: visual
+acceptance of button hiding is **not passed**, cause unestablished (a page not reloaded is only a
+hypothesis). No additional code change or restart was performed for this test. Background push,
+real CI and changed-head acceptance remain unmeasured.

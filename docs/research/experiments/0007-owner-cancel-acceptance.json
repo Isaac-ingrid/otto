@@ -1,0 +1,22 @@
+{
+  "verifiedAt": "2026-11-15T00:14:07.420Z",
+  "watch": {
+    "id": "pw_da6b101f-5ae2-4067-b8da-853004d3d604",
+    "status": "cancelled",
+    "checkedAt": 1794701522376,
+    "nextCheckAt": 1794701582376,
+    "observedState": "waiting"
+  },
+  "proposalId": "q_pwa_1b337fe2-4520-49bd-9243-4c56bb105808",
+  "proposalStatus": "applied",
+  "confirmedActiveBeforeOwnerClick": true,
+  "postCancelEligibleWindowPassed": true,
+  "checkedAtUnchanged": true,
+  "syntheticStatusRestored": "success",
+  "uiAnswerVisibility": "failed owner visual acceptance; still shown, cause not established",
+  "notTested": [
+    "background phone push",
+    "real CI",
+    "changed head"
+  ]
+}
