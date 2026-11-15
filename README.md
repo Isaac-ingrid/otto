@@ -50,7 +50,13 @@ Rather than copying a product wholesale, Otto [tested three ideas](docs/plan/sel
 - **Live Thread following:** the workspace subscribes to Thread events and state over WebSocket, with a timeline cursor for resuming, instead of relying solely on polling.
 - **No speculative parallel turns:** starting a second answer before the first settles risks missing conversation context or dispatching the same intent twice. Otto instead keeps turns serial, durable and stoppable.
 
-Otto is not a general-purpose cloud browser. Optional read-only web search (Tavily basic or Brave Search API) is off until the owner configures a separate key; it returns bounded snippets and source URLs, not verified full pages or a live weather tool. Coding work needs an online connector; the cloud steward can still converse, remember and schedule while your computers are asleep.
+### Bounded web search (optional)
+
+Otto is not a general-purpose cloud browser. Configure `TAVILY_API_KEY` for Tavily basic search, or `BRAVE_SEARCH_API_KEY` for Brave; search stays off without either key. If both are configured, Tavily takes precedence, with no automatic fallback request to another provider. Tavily requests use basic search, at most five results, no automatic parameter upgrades, generated answer or raw page content.
+
+Search is limited to one request per owner turn, using a query drawn from the owner's message. Results include source URLs and retrieval time, but remain **untrusted snippets, not verified full pages**; old or irrelevant results can still appear. Search and action tools cannot run in the same turn: web content cannot authorize worker dispatch, commands or memory changes. This is not a live weather tool. Coding work needs an online connector; the cloud steward can still converse, remember and schedule while your computers are asleep.
+
+Basic search limits request cost, **not account billing**. Provider free quotas and pricing may change; keep pay-as-you-go/automatic recharge disabled and set account limits in the provider dashboard. See [search configuration](docs/self-hosted.md#optional-web-search).
 
 Optional **Web Push** works on supported desktop and mobile browsers. It stays off until the server has VAPID keys and each device opts in. Open **Account / Settings → Phone notifications → Enable on this device**, then allow browser notifications; the section also offers a test notification. Alerts contain generic prompts for decisions and completed work, never task text. Quiet hours default to 22:00–08:00 in that device's time zone. Delivery also depends on browser/OS permissions and its push service; a queued test is not proof of receipt. The in-app pending list remains the fallback. On iPhone, add Otto to the Home Screen and open it there first. See the [self-hosted guide](docs/self-hosted.md#web-push-optional).
 
@@ -109,6 +115,14 @@ Try asking:
 > “Continue the previous task, and use pnpm this time.”
 
 The workspace brings together messages, task threads, decisions, connected machines and session records. Replies stream as they are written; a message sent mid-answer waits its turn.
+
+### Search without granting action authority
+
+After configuring a search key in the server's protected `.dev.vars` and restarting Otto, try:
+
+> “Search for the latest Node.js security announcements. Include source URLs and retrieval time.”
+
+The owner has exercised this path with Tavily on the self-hosted Node deployment. That validates the basic query/response flow, not the accuracy or freshness of every result. Check publication dates and official sources before relying on a security claim; the retrieval time is not a publication date. Search does not open the full pages. Any follow-up action needs a separate owner turn, not authorization inferred from a snippet. Keep search keys out of chat, Git and shell history; they are separate from the model key.
 
 ### Follow a PR without starting a worker
 
