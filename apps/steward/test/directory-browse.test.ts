@@ -46,7 +46,7 @@ async function outboxCount(): Promise<number> {
 
 async function shortenBrowseTimeout(ms: number): Promise<void> {
   await runInDurableObject(ownerStub(), (instance: Steward) => {
-    (instance as unknown as { directoryBrowseTimeoutMs: number }).directoryBrowseTimeoutMs = ms;
+    (instance as unknown as { connectorProto: { setDirectoryBrowseTimeoutForTest(ms: number): void } }).connectorProto.setDirectoryBrowseTimeoutForTest(ms);
   });
 }
 

@@ -244,7 +244,7 @@ Node 22/24 并非必须统一版本的缺陷；目标是验证承诺支持的运
 
 - [ ] 阶段 1 顺带提取消息校验、准入与幂等职责。（阶段 1 实施时未顺带提取，行为已在 b3837c2 中就地统一；后续可作为独立批次补提取。）
 - [x] 后续独立提取模型设置和连接测试。（已完成：提取为 `apps/steward/src/model-config.ts` 的 `ModelConfigStore`，13 个方法迁移，事务边界与恢复顺序不变；55 项模型测试通过。）
-- [ ] 再考虑协议处理、历史读取和订阅管理。（子批 A 已完成：历史中继与订阅管理提取为 `apps/steward/src/history-subscriptions.ts` 的 `HistorySubscriptions`，19 个方法 + 2 个清理钩子迁移，`ConnState` 类型导出共用，`sweepHistoryRelays` 保留为委托；109 项相关测试通过。子批 B 连接器协议处理待做。）
+- [x] 再考虑协议处理、历史读取和订阅管理。（子批 A：历史中继与订阅管理提取为 `apps/steward/src/history-subscriptions.ts` 的 `HistorySubscriptions`，19 个方法 + 2 个清理钩子。子批 B：连接器协议处理提取为 `apps/steward/src/connector-protocol.ts` 的 `ConnectorProtocol`，16 个方法迁移 + 目录读取状态，`OutboxRow` 提取到共享 `steward-types.ts`；77 项测试通过，typecheck/typecheck:node-host 干净。）
 - [ ] 最后评估轮次及调度编排是否仍有拆分必要。
 
 
