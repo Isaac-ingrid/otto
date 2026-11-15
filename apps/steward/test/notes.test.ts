@@ -594,6 +594,34 @@ describe("notes unit: FTS search and the change relay", () => {
     });
   });
 
+  it("recalls all matching notes for multi-short-term and mixed short+long queries", async () => {
+    await inNotesDo((n) => {
+      const login = n.commit({ text: "登录需要携带 token", kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      const deploy = n.commit({ text: "部署前先跑构建", kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      if (!login.ok || !deploy.ok) throw new Error("fixtures failed");
+
+      const ab = n.search("登录 部署").map((h) => h.noteId);
+      const ba = n.search("部署 登录").map((h) => h.noteId);
+      expect(ab).toContain(login.note.noteId);
+      expect(ab).toContain(deploy.note.noteId);
+      expect(new Set(ab)).toEqual(new Set(ba));
+
+      const mixed = n.search("nonexistent 登录").map((h) => h.noteId);
+      expect(mixed).toContain(login.note.noteId);
+
+      // Duplicate terms, special characters (%, _, quotes), repo scoping, and removed exclusion.
+      const quoted = n.commit({ text: '保留 "token_v2" 50% 阈值', kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-b" });
+      const removed = n.commit({ text: "登录已废弃草稿", kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });
+      if (!quoted.ok || !removed.ok) throw new Error("fixtures failed");
+      n.remove(removed.note.noteId);
+
+      expect(n.search("登录 登录 部署").map((h) => h.noteId)).toEqual(ab);
+      expect(n.search('_ "token_v2" 50%').map((h) => h.noteId)).toEqual([quoted.note.noteId]);
+      expect(n.search("登录", { repoIds: ["repo-b"] }).map((h) => h.noteId)).toEqual([]);
+      expect(n.search("登录").map((h) => h.noteId)).not.toContain(removed.note.noteId);
+    });
+  });
+
   it("search skips an oversized next hit so a later short hit still fits the budget", async () => {
     await inNotesDo((n) => {
       const short = n.commit({ text: "命令测试简短", kind: "fact", source: "user_said", layer: "project", scopeRepoId: "repo-a" });

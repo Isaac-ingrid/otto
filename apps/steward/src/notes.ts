@@ -997,25 +997,32 @@ export function createNotes(deps: NotesDeps) {
    *  spec §10.2 — but a reader that wants action evidence must check `status` (the
    *  answer_worker gate does). Bounded: at most SEARCH_MAX_ITEMS rows / ~SEARCH_MAX_CHARS
    *  characters, so no query can flood the context (memory-trust review). */
+  const SEARCH_MAX_TERMS = 12;
+
   const search = (q: string, opts: { layers?: NoteLayer[]; repoIds?: string[] } = {}): NoteRow[] => {
-    const terms = [...new Set(q.split(/\s+/).map((t) => t.trim()).filter((t) => t.length > 0))];
+    const terms = [...new Set(q.split(/\s+/).map((t) => t.trim()).filter((t) => t.length > 0))].slice(0, SEARCH_MAX_TERMS);
     if (terms.length === 0) return [];
-    // Terms of <3 characters cannot be matched by the trigram tokenizer; a query made of
-    // only such terms falls back to LIKE with % _ ! escaped (ESCAPE '!') so "1%" cannot
-    // match the world (review finding 6).
+    // Terms of <3 characters cannot be matched by the trigram tokenizer; long terms use FTS
+    // and every short term participates in OR recall via LIKE with % _ ! escaped (ESCAPE '!').
     const longTerms = terms.filter((t) => t.length >= 3);
-    const rows =
-      longTerms.length > 0
-        ? sql<Record<string, unknown>>`
-            SELECT n.* FROM sh_note_fts f JOIN sh_note n ON n.rowid = f.rowid
-            WHERE sh_note_fts MATCH ${longTerms.map((t) => `"${t.replaceAll('"', '""')}"`).join(" OR ")}
-              AND n.status != 'removed'
-          `
-        : sql<Record<string, unknown>>`
-            SELECT * FROM sh_note WHERE status != 'removed'
-              AND text LIKE ${`%${terms[0]!.replace(/[!%_]/g, (m) => `!${m}`)}%`} ESCAPE '!'
-          `;
-    const ranked = rows
+    const shortTerms = terms.filter((t) => t.length < 3);
+    const byId = new Map<string, Record<string, unknown>>();
+    if (longTerms.length > 0) {
+      const ftsRows = sql<Record<string, unknown>>`
+        SELECT n.* FROM sh_note_fts f JOIN sh_note n ON n.rowid = f.rowid
+        WHERE sh_note_fts MATCH ${longTerms.map((t) => `"${t.replaceAll('"', '""')}"`).join(" OR ")}
+          AND n.status != 'removed'
+      `;
+      for (const row of ftsRows) byId.set(row.noteId as string, row);
+    }
+    for (const term of shortTerms) {
+      const likeRows = sql<Record<string, unknown>>`
+        SELECT * FROM sh_note WHERE status != 'removed'
+          AND text LIKE ${`%${term.replace(/[!%_]/g, (m) => `!${m}`)}%`} ESCAPE '!'
+      `;
+      for (const row of likeRows) byId.set(row.noteId as string, row);
+    }
+    const ranked = [...byId.values()]
       .map(viewNote)
       .filter((n) => (opts.layers && opts.layers.length > 0 ? opts.layers.includes(n.layer) : true))
       .filter((n) =>
