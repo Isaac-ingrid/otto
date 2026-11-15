@@ -242,10 +242,10 @@ Node 22/24 并非必须统一版本的缺陷；目标是验证承诺支持的运
 
 ### 建议顺序
 
-- [ ] 阶段 1 顺带提取消息校验、准入与幂等职责。（阶段 1 实施时未顺带提取，行为已在 b3837c2 中就地统一；后续可作为独立批次补提取。）
+- [x] 阶段 1 顺带提取消息校验、准入与幂等职责。（评估后不拆分：校验层 `parseApiMessage`/`readJson`/`MAX_BODY_BYTES`/`MAX_MESSAGE_CHARS` 已在 `workspace-api.ts`；`admitMessageRequest` 仅 15 行，深度耦合 `ctx.storage.transactionSync` + `ledger.webRequests` + `ledger.runs`，提取后需注入 DO 存储原语与 ledger 闭包，无独立职责边界；`webInputs` Map 被 `handleApiMessage`/`submitWorkspaceMessage`/`stopTurn`/`submitWorkspaceAction`/`recoverWorkspaceInputs` 五处核心编排共用，移出反而增加间接层。行为已在 b3837c2 就地统一，维持现状。）
 - [x] 后续独立提取模型设置和连接测试。（已完成：提取为 `apps/steward/src/model-config.ts` 的 `ModelConfigStore`，13 个方法迁移，事务边界与恢复顺序不变；55 项模型测试通过。）
 - [x] 再考虑协议处理、历史读取和订阅管理。（子批 A：历史中继与订阅管理提取为 `apps/steward/src/history-subscriptions.ts` 的 `HistorySubscriptions`，19 个方法 + 2 个清理钩子。子批 B：连接器协议处理提取为 `apps/steward/src/connector-protocol.ts` 的 `ConnectorProtocol`，16 个方法迁移 + 目录读取状态，`OutboxRow` 提取到共享 `steward-types.ts`；77 项测试通过，typecheck/typecheck:node-host 干净。）
-- [ ] 最后评估轮次及调度编排是否仍有拆分必要。
+- [x] 最后评估轮次及调度编排是否仍有拆分必要。（评估后不拆分：`pollRuns`/`drainWakes` 是 Agents SDK 闹钟回调（按名字字符串由 `this.schedule()` 触发），`stopTurn` 是 RPC 方法，测试直接调用 `ownerStub().pollRuns()`/`.drainWakes()`/`.stopTurn()`；三者互相调用（`drainWakes→pollRuns→settleRun→queueVerifyRun`、`stopTurn→pollRuns`），触及 10+ ledger 子系统与 DO 原语（`schedule`/`cancelSchedule`/`ctx.storage`），是 DO 不可还原的核心编排循环——提取后将需 15+ 闭包回调且模块内仍互相循环调用，只增间接层无独立职责可分。维持现状。）
 
 
 ### 每批验收标准
