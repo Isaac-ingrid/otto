@@ -102,7 +102,7 @@ async function runOneUserMessage(text: string, reply: string, msgId: string): Pr
 
 describe("the counter agrees with pi's own ledger without anyone asking it to sync", () => {
   it("after a run settles, today's tokens equal pi.usage's total — once, not twice", async () => {
-    await runOneUserMessage("你好", "第一句。", "om_eq_1");
+    await runOneUserMessage("你好", "第一句。", "om_eq_001");
     const pi = await ownerStub().piUsageForTest();
     expect(pi.tokens).toBeGreaterThan(0);
     expect(await persistedTokens()).toBe(pi.tokens);
@@ -112,7 +112,7 @@ describe("the counter agrees with pi's own ledger without anyone asking it to sy
   }, 30_000);
 
   it("keeps agreeing after pi is reopened — what an evicted-and-restarted isolate does", async () => {
-    await runOneUserMessage("你好", "第一句。", "om_re_1");
+    await runOneUserMessage("你好", "第一句。", "om_re_001");
     const afterFirst = await ownerStub().piUsageForTest();
     expect(await persistedTokens()).toBe(afterFirst.tokens);
 
@@ -120,7 +120,7 @@ describe("the counter agrees with pi's own ledger without anyone asking it to sy
     // exists in storage, so reopening does NOT create it again.
     await runInDurableObject(ownerStub(), (instance: Steward) => instance.piHarness.dispose());
 
-    await runOneUserMessage("再说一句", "第二句。", "om_re_2");
+    await runOneUserMessage("再说一句", "第二句。", "om_re_002");
     const afterSecond = await ownerStub().piUsageForTest();
     expect(afterSecond.tokens).toBeGreaterThan(afterFirst.tokens);
     expect(await persistedTokens()).toBe(afterSecond.tokens);
@@ -130,7 +130,7 @@ describe("the counter agrees with pi's own ledger without anyone asking it to sy
 describe("usage accumulation from pi usage data (steward.md §12)", () => {
   it("counts the model's tokens per day, monotonically and idempotently", async () => {
     await scriptModel(fauxAssistantMessage([fauxText("第一句。")]));
-    await dm("你好", "om_b1");
+    await dm("你好", "om_b_0001");
     await waitRunsSettled();
     const first = await waitFor(() => ownerStub().budgetStatus(), (s) => s.tokens > 0);
     expect(first.day).toBe(budgetDay(Date.now()));
@@ -138,7 +138,7 @@ describe("usage accumulation from pi usage data (steward.md §12)", () => {
     expect(first.costUsd).toBe(0); // faux's price is $0 — tokens only
 
     await scriptModel(fauxAssistantMessage([fauxText("第二句。")]));
-    await dm("再说一句", "om_b2");
+    await dm("再说一句", "om_b_0002");
     await waitRunsSettled();
     const second = await waitFor(() => ownerStub().budgetStatus(), (s) => s.tokens > first.tokens);
     expect(second.costUsd).toBe(0);

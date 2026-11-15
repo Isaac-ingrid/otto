@@ -236,7 +236,7 @@ describe("review #7: a routed reply closes the thread's open question", () => {
       fauxAssistantMessage([fauxToolCall("start_worker", { prompt: "干件大事", repoRef: "repo-a", newTitle: "干件大事", basis: "user_explicit" })], { stopReason: "toolUse" }),
       fauxAssistantMessage([fauxText("已派发。")]),
     );
-    await dm("干件大事", "om_q_1");
+    await dm("干件大事", "om_q_0001");
     const [cmd] = await fake.waitForCmds(1);
     const workerId = String((cmd!.args as Record<string, unknown>).workerId);
     fake.send({ t: "cmd_ack", re: cmd!.id, status: "accepted" });
@@ -249,7 +249,7 @@ describe("review #7: a routed reply closes the thread's open question", () => {
 
     // Phase 2: the model asks about that thread (with its id, as the brief would supply).
     await scriptModel(fauxAssistantMessage([fauxToolCall("ask_user", { question: "用哪个方案？", options: ["A", "B"], threadId })], { stopReason: "toolUse" }));
-    await dm("那个方案怎么样", "om_q_1b");
+    await dm("那个方案怎么样", "om_q_001b");
     await waitRunsSettled();
     await waitWhileOutboundPending();
     let snap = await ownerStub().debugSnapshot();
@@ -260,7 +260,7 @@ describe("review #7: a routed reply closes the thread's open question", () => {
 
     // The user answers by quoting the ask; the answer is "算了" — no dispatch involved.
     await scriptModel(fauxAssistantMessage([fauxText("好，那就先这样。")]));
-    await postEvent(messageEvent({ msgId: "om_q_2", text: "算了", parentId: askRow!.providerMsgId! }));
+    await postEvent(messageEvent({ msgId: "om_q_0002", text: "算了", parentId: askRow!.providerMsgId! }));
     await waitRunsSettled();
     await waitWhileOutboundPending();
 

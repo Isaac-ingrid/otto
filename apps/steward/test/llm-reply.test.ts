@@ -363,7 +363,7 @@ describe("the tools (steward.md §4.3)", () => {
       fauxAssistantMessage([fauxToolCall("update_thread", { threadId, summary: "合法摘要" })], { stopReason: "toolUse" }),
       fauxAssistantMessage([fauxText("记好了。")]),
     );
-    await dm("记一下账", "om_gt_1");
+    await dm("记一下账", "om_gt_0001");
     await waitRunsSettled();
     const requests = await modelRequests();
     const results = requests.map((r) => r.lastToolResult).filter((r) => r.length > 0);

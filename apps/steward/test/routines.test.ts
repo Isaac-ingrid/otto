@@ -441,7 +441,7 @@ describe("follow-ups: set_followup with sourceRef; due ones submit ⟦followup F
       // The ⟦followup⟧ run's step: nothing to do yet.
       fauxAssistantMessage([fauxToolCall("no_action", { reason: "worker 还在跑" })], { stopReason: "toolUse" }),
     );
-    await dm("过一会儿帮我看看修好没", "om_fu_1");
+    await dm("过一会儿帮我看看修好没", "om_fu_0001");
     await waitRunsSettled();
 
     let snap = await snapshot();
@@ -449,7 +449,7 @@ describe("follow-ups: set_followup with sourceRef; due ones submit ⟦followup F
     expect(snap.followups[0]).toMatchObject({
       threadId,
       createdBy: "user",
-      sourceRef: "user:om_fu_1", // §8.3: traceable to something the owner said
+      sourceRef: "user:om_fu_0001", // §8.3: traceable to something the owner said
       status: "open",
     });
 

@@ -1,5 +1,11 @@
 import { defineConfig } from "@playwright/test";
 
+// Playwright 1.64+ uses module.registerHooks() on Node 22.15+, which conflicts
+// with dynamic import() of .ts modules and custom node:module register() loaders
+// (https://github.com/microsoft/playwright/issues/43939). The async loader path
+// avoids the bug. Set early so it applies before Playwright registers hooks.
+process.env.PLAYWRIGHT_FORCE_ASYNC_LOADER ??= "1";
+
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
