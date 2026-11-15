@@ -14,7 +14,8 @@
 - **One conversation across machines.** Tasks, decisions, follow-ups and progress stay together.
 - **Your code stays on your machines.** A connector runs pi (or an installed Claude Code) locally; full coding-agent session records stay there.
 - **Memory with boundaries.** Otto keeps preferences and project conventions separately from conversation history. It tracks their source and confirmation, and distinguishes replacing an outdated fact from merely making room.
-- **You stay in control.** The workspace shows active work and decisions that need you; you can stop an in-progress reply.
+- **Read-only PR follow-up.** Bind a GitHub PR to an existing task Thread and let the server monitor external status without keeping a coding agent running. Conversational create/cancel requests require your confirmation on a dedicated card.
+- **You stay in control.** The workspace shows active work and decisions that need you; you can stop an in-progress reply. Stopping a reply, stopping a worker and cancelling a PR watch are separate operations.
 
 ## Architecture
 
@@ -51,7 +52,7 @@ Rather than copying a product wholesale, Otto [tested three ideas](docs/plan/sel
 
 Otto is not a general-purpose cloud browser. Optional read-only web search (Tavily basic or Brave Search API) is off until the owner configures a separate key; it returns bounded snippets and source URLs, not verified full pages or a live weather tool. Coding work needs an online connector; the cloud steward can still converse, remember and schedule while your computers are asleep.
 
-Optional **Web Push** is also off until VAPID keys are configured and each phone opts in under Settings. It sends generic alerts for decisions and completed work, never task text, with 22:00–08:00 local quiet hours by default. The in-app pending list remains the fallback; iPhones require installation to the Home Screen first. See the [self-hosted guide](docs/self-hosted.md#web-push-optional).
+Optional **Web Push** works on supported desktop and mobile browsers. It stays off until the server has VAPID keys and each device opts in. Open **Account / Settings → Phone notifications → Enable on this device**, then allow browser notifications; the section also offers a test notification. Alerts contain generic prompts for decisions and completed work, never task text. Quiet hours default to 22:00–08:00 in that device's time zone. Delivery also depends on browser/OS permissions and its push service; a queued test is not proof of receipt. The in-app pending list remains the fallback. On iPhone, add Otto to the Home Screen and open it there first. See the [self-hosted guide](docs/self-hosted.md#web-push-optional).
 
 ## Get started
 
@@ -69,6 +70,8 @@ cp -R apps/steward/ui/. apps/steward/dist/ui/
 ```
 
 Then follow the [cloud-server runbook](docs/self-hosted.md) to install **`apps/steward/dist/node/steward-node.mjs`, `dist/ui/` and the `ws` runtime dependency** on the server. Set a unique `LOGIN_PASSWORD` of at least 15 characters and `OTTO_PUBLIC_ORIGIN=https://<your-address>` in its protected `.dev.vars`; set `OTTO_CONFIG_DIR` and `OTTO_DB_PATH` explicitly. Run the process under systemd (automatic restart), bind it to loopback, and put an HTTPS reverse proxy with WebSocket forwarding in front. Keep the VPS and its persistent disk running **24/7**; back up the live SQLite database with SQLite's online backup, not a plain copy while WAL is active. Do not commit secrets or send them through chat.
+
+Local snapshots help recover from a bad upgrade or accidental changes, but copies on the same VPS disk do not survive losing that disk or instance. For experiments with replaceable data, local backups can be a starting point; add encrypted offsite backups and a restore check as you accumulate important, unique history. See [backups](docs/self-hosted.md#backups).
 
 Open **your server's HTTPS address**, sign in and enter the steward's model API key in **Settings**. Optionally configure `TAVILY_API_KEY` (or `BRAVE_SEARCH_API_KEY`) in the protected server environment for read-only, owner-turn web search; it is separate from the model key and disabled when unset. The server must be reachable from every computer you want to connect; an SSH tunnel to a loopback-only address is useful for private access, but not a public connector endpoint.
 
@@ -107,11 +110,25 @@ Try asking:
 
 The workspace brings together messages, task threads, decisions, connected machines and session records. Replies stream as they are written; a message sent mid-answer waits its turn.
 
+### Follow a PR without starting a worker
+
+In an existing task Thread, ask:
+
+> “Keep following https://github.com/owner/repo/pull/42 in this Thread. Only commit statuses, check every 15 minutes for one hour, and notify me when successful. Show a confirmation card first; do not start a worker.”
+
+Check the card's PR, Thread, evidence scope, interval and lifetime, then use its **dedicated confirm button**. The model only proposes the watch; typing “yes”, quoting agreement or answering an ordinary question cannot authorize it. A confirmation expires after ten minutes. Ask “Which PRs are being followed?” to inspect watches, or “Cancel PR watch `<watch-id>`” to get a cancellation card; cancelling also needs its dedicated confirmation.
+
+Polling, status-change notices and restart recovery run without an LLM turn or connector. The server must be able to read the target repository through GitHub's API; private repositories need suitable credentials kept on the server. **Commit statuses are not Checks/Actions:** `statuses-only` always discloses the missing coverage, and Otto does not silently downgrade full-scope requests when permissions fail. A green status is not requirements acceptance. Watches do not modify code, re-run CI or merge PRs. See [PR follow-up](docs/pr-watches.md) for scope, limits and the explicit authenticated Owner API.
+
+The pilot has exercised confirmation, active-watch cancellation, recovery and a synthetic status-to-background-notification path. That is not evidence of a real CI workflow or changed-head acceptance; those remain separate validation work.
+
 ## Documentation
 
 - [Cloud-server runbook](docs/self-hosted.md) — service, reverse proxy, TLS, upgrades and backups.
 - [Connector runbook](docs/agent-connect.md) — pairing, directories, proxies and diagnostics.
 - [Usage and API](docs/usage.md) — owner API, local agent behavior and session viewing.
+- [PR follow-up](docs/pr-watches.md) — confirmation cards, GitHub evidence scopes and persistent read-only watches.
+- [Supervised improvement](docs/design/otto-improvement.md) — retained experiments, evaluation gates and human acceptance; not autonomous production self-modification.
 - [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Routing eval](docs/routing-eval.md) · [Memory eval](docs/memory-eval.md) — for contributors.
 
 ## License
