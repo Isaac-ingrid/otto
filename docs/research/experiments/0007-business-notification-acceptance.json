@@ -1,0 +1,30 @@
+{
+  "checkedAt": "2026-11-15T00:29:44.032Z",
+  "synthetic": true,
+  "fixtureStatus": "success",
+  "watch": {
+    "id": "pw_41eaa5de-cd05-4255-bc81-eae9925cc24a",
+    "status": "completed",
+    "checkedAt": 1794702542248,
+    "observedState": "success",
+    "lastError": null
+  },
+  "notices": [
+    {
+      "id": "pr-watch:pw_41eaa5de-cd05-4255-bc81-eae9925cc24a:88d4ce3f98bcc13fd3b1a21811a1c6ac3d04a852:success",
+      "deliveredAt": 1794702542251
+    }
+  ],
+  "push": {
+    "jobs": 2,
+    "accepted": 2,
+    "maxAttempts": 0,
+    "earliestDueAt": 1794702542250
+  },
+  "deviceDelivery": "owner reports received with no duplicate popup",
+  "operatorReadProbeNote": "Initial read-only probe referenced nonexistent notice.sentAt; corrected to deliveredAt. No production mutation or new test run.",
+  "ownerReportedAt": "2026-11-15T00:33:57.623Z",
+  "activeLabWatches": 0,
+  "unexpiredPendingLabApprovals": 0,
+  "additionalOwnerObservation": "Repeated request produced an ordinary clarification question. Model asserted global same-parameter pending-card uniqueness, which source does not guarantee (sourceRef uniqueness is per owner turn). Generic Answer on this ordinary question is expected."
+}

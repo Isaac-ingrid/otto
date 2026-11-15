@@ -168,3 +168,28 @@ However the owner's screenshot still showed `Answer`, despite the corrected new 
 acceptance of button hiding is **not passed**, cause unestablished (a page not reloaded is only a
 hypothesis). No additional code change or restart was performed for this test. Background push,
 real CI and changed-head acceptance remain unmeasured.
+
+## Final business-notification smoke and stop point
+
+The owner later reported the PR Answer action absent after reloading, and a test notification
+actually received. For the separately authorized final business smoke, the existing lab synthetic
+context was pending while the owner created/confirmed watch
+`pw_41eaa5de-cd05-4255-bc81-eae9925cc24a` and put Otto in the background. Server inspection showed
+active/waiting without errors before changing that context to success. The next eligible poll
+completed the watch and generated one completion notice, with two device push records marked sent.
+The owner reported actual notification receipt without duplicate popups. This is bounded evidence
+of the business event-to-push path, not a reliability percentage or real CI workflow acceptance.
+[Receipt](0007-business-notification-acceptance.json). The initial operator read-only query used
+notice.sentAt instead of deliveredAt; it was corrected without production mutation or a new run.
+
+Two subsequent repeated owner requests produced an ordinary clarification question. Its generic
+Answer button is expected: it is not a dedicated PR confirmation card and cannot authorize a watch
+effect. The model's claim that same-parameter pending confirmation cards can only ever exist once
+is too strong: source enforces immutable per-owner-turn sourceRef uniqueness, not global tuple
+uniqueness across turns. Record as a nonblocking prose-accuracy finding, not proof of global
+pending-card deduplication. No prompt/tool change was made to pursue this finding during acceptance.
+
+At the final inspection there were zero active lab watches and zero unexpired lab proposals; the
+fixture remained success. Stop acceptance here as agreed with the owner; normal use follows.
+Real CI, changed-head handling and N>=5 noise observations remain unmeasured; offsite backup
+remains an independent operational follow-up.
