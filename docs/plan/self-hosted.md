@@ -98,6 +98,17 @@ Real behaviour observed on the VPS that is not what a reader would assume:
 
 ## Log
 
+- **2026-11-15 (owner acceptance: bounded search)** — Tavily basic search (`25d28e3`)
+  is deployed on the Node host; the owner configured the key privately and supplied a real
+  workspace response to the Node.js security-announcement query. The response included source
+  URLs, retrieval time, and an explicit snippets-only/no-full-page-verification caveat.
+  **Basic acceptance passed**, not factual verification of the cited announcements. An old
+  2021 advisory appeared alongside recent results: freshness/relevance remains an observation
+  item. Keep observing search quality, notification latency and health-check false positives;
+  do not broaden extension authority yet. Brave remains optional, no fallback request is made,
+  and provider billing/free-quota settings remain the owner's responsibility. No secrets are
+  recorded here.
+
 - **2026-11-10 (docs pass)** — **The docs caught up with the code, and the dead CSS is gone.**
   Everything since P1 had been recorded in this plan and in ADRs but not where a reader starts:
 
