@@ -42,6 +42,7 @@ export async function loadVars(options: { cwd: string; devVarsPath?: string }): 
     "LOGIN_PASSWORD",
     "MODEL_KEY",
     "BRAVE_SEARCH_API_KEY",
+    "TAVILY_API_KEY",
     "VAPID_PUBLIC_KEY",
     "VAPID_PRIVATE_KEY",
     "VAPID_SUBJECT",

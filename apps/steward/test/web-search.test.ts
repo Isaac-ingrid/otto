@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ToolTask } from "@earendil-works/pi-durable";
 import { buildStewardExtension, type StewardExtensionContext } from "../src/llm/extension.ts";
-import { searchBrave } from "../src/llm/web-search.ts";
+import { configuredWebSearch, searchBrave, searchTavily } from "../src/llm/web-search.ts";
 
 const sample = { web: { results: [
   { title: "A", url: "https://example.com/story", description: "A short snippet" },
@@ -35,6 +35,44 @@ describe("bounded Brave search", () => {
     await expect(searchBrave("x".repeat(161), "secret", fetcher as typeof fetch)).rejects.toThrow("160");
     expect(fetcher).not.toHaveBeenCalled();
     await expect(searchBrave("天气", "secret", fetcher as typeof fetch)).rejects.toThrow("过大");
+  });
+});
+
+describe("bounded Tavily search", () => {
+  it("uses a fixed authenticated POST with basic-only cost controls and maps snippets", async () => {
+    const fetcher = vi.fn(async () => Response.json({ results: [
+      { title: "A", url: "https://example.com/news", content: "x".repeat(500) },
+      { title: "bad", url: "https://user:secret@example.com", content: "ignore" },
+    ], answer: "not trusted", raw_content: "not used" }));
+    const result = await searchTavily(" 新闻 ", "private-key", fetcher as typeof fetch);
+    const [url, options] = fetcher.mock.calls[0]! as unknown as [URL, RequestInit];
+    expect(url.href).toBe("https://api.tavily.com/search");
+    expect(options).toMatchObject({ method: "POST", redirect: "error", headers: { Authorization: "Bearer private-key" } });
+    expect(JSON.parse(String(options.body))).toEqual({ query: "新闻", search_depth: "basic", auto_parameters: false,
+      max_results: 5, include_answer: false, include_raw_content: false, include_images: false });
+    expect(result.results).toEqual([{ title: "A", url: "https://example.com/news", snippet: "x".repeat(350) }]);
+    expect(JSON.stringify(result)).not.toContain("private-key");
+  });
+
+  it("rejects unbounded input, malformed data, provider errors and oversized bodies", async () => {
+    const fetcher = vi.fn(async () => Response.json({ results: [] }));
+    await expect(searchTavily("x".repeat(161), "secret", fetcher as typeof fetch)).rejects.toThrow("160");
+    expect(fetcher).not.toHaveBeenCalled();
+    for (const [body, status, expected] of [["{}", 200, "无效的结果格式"], ["bad", 200, "无效的 JSON"],
+      ["secret provider detail", 429, "HTTP 429"], ["x".repeat(128 * 1024 + 1), 200, "过大"]] as const) {
+      await expect(searchTavily("新闻", "secret", (async () => new Response(body, { status })) as typeof fetch)).rejects.toThrow(expected);
+    }
+  });
+
+  it("stays disabled without keys and prefers Tavily without a paid fallback", async () => {
+    expect(configuredWebSearch({})).toBeUndefined();
+    expect(configuredWebSearch({ TAVILY_API_KEY: " " })).toBeUndefined();
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("private provider error", { status: 401 }));
+    try {
+      await expect(configuredWebSearch({ TAVILY_API_KEY: "tavily", BRAVE_SEARCH_API_KEY: "brave" })!("新闻")).rejects.toThrow("HTTP 401");
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(String(fetcher.mock.calls[0]![0])).toBe("https://api.tavily.com/search");
+    } finally { fetcher.mockRestore(); }
   });
 });
 

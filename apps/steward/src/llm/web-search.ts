@@ -2,6 +2,7 @@
 // Results are untrusted data: the extension keeps them out of autonomous wakes and blocks
 // action tools in the same owner turn after a search. No full-page fetching or arbitrary HTTP.
 const ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 const MAX_RESPONSE_BYTES = 128 * 1024;
 
 export interface WebSearchResult {
@@ -9,7 +10,22 @@ export interface WebSearchResult {
   results: Array<{ title: string; url: string; snippet: string }>;
 }
 
-export async function searchBrave(query: string, apiKey: string, fetcher: typeof fetch = fetch): Promise<WebSearchResult> {
+export function searchBrave(query: string, apiKey: string, fetcher: typeof fetch = fetch): Promise<WebSearchResult> {
+  return search(query, apiKey, "brave", fetcher);
+}
+
+export function searchTavily(query: string, apiKey: string, fetcher: typeof fetch = fetch): Promise<WebSearchResult> {
+  return search(query, apiKey, "tavily", fetcher);
+}
+
+/** Prefer Tavily if both keys exist; never fall back silently and incur a second charge. */
+export function configuredWebSearch(env: { TAVILY_API_KEY?: string; BRAVE_SEARCH_API_KEY?: string }): ((query: string) => Promise<WebSearchResult>) | undefined {
+  const tavily = env.TAVILY_API_KEY?.trim();
+  const brave = env.BRAVE_SEARCH_API_KEY?.trim();
+  return tavily ? (query) => searchTavily(query, tavily) : brave ? (query) => searchBrave(query, brave) : undefined;
+}
+
+async function search(query: string, apiKey: string, provider: "brave" | "tavily", fetcher: typeof fetch): Promise<WebSearchResult> {
   const term = query.trim();
   if (!term || term.length > 160) throw new Error("搜索词不能为空或超过 160 字。");
   const url = new URL(ENDPOINT);
@@ -18,9 +34,15 @@ export async function searchBrave(query: string, apiKey: string, fetcher: typeof
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetcher(url, {
-      method: "GET",
-      headers: { "X-Subscription-Token": apiKey, Accept: "application/json" },
+    const response = await fetcher(provider === "tavily" ? new URL(TAVILY_ENDPOINT) : url, {
+      method: provider === "tavily" ? "POST" : "GET",
+      headers: provider === "tavily"
+        ? { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" }
+        : { "X-Subscription-Token": apiKey, Accept: "application/json" },
+      ...(provider === "tavily" ? { body: JSON.stringify({
+        query: term, search_depth: "basic", auto_parameters: false, max_results: 5,
+        include_answer: false, include_raw_content: false, include_images: false,
+      }) } : {}),
       redirect: "error",
       signal: controller.signal,
     });
@@ -43,7 +65,7 @@ export async function searchBrave(query: string, apiKey: string, fetcher: typeof
     text += decoder.decode();
     let data: unknown;
     try { data = JSON.parse(text); } catch { throw new Error("搜索服务返回无效的 JSON。"); }
-    const web = data && typeof data === "object" && "web" in data ? data.web : null;
+    const web = provider === "tavily" ? data : data && typeof data === "object" && "web" in data ? data.web : null;
     if (!web || typeof web !== "object" || !("results" in web) || !Array.isArray(web.results)) {
       throw new Error("搜索服务返回无效的结果格式。");
     }
@@ -57,7 +79,8 @@ export async function searchBrave(query: string, apiKey: string, fetcher: typeof
       results.push({
         title: typeof entry.title === "string" ? entry.title.slice(0, 160) : "",
         url: page.href.slice(0, 2048),
-        snippet: typeof entry.description === "string" ? entry.description.slice(0, 350) : "",
+        snippet: typeof (provider === "tavily" ? entry.content : entry.description) === "string"
+          ? String(provider === "tavily" ? entry.content : entry.description).slice(0, 350) : "",
       });
     }
     return { searchedAt: new Date().toISOString(), results };

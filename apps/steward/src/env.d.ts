@@ -23,6 +23,7 @@ interface Env {
   SERVER_KEY_PREVIOUS?: string;
   MODEL_KEY?: string;
   BRAVE_SEARCH_API_KEY?: string;
+  TAVILY_API_KEY?: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;
@@ -54,6 +55,7 @@ declare namespace Cloudflare {
     SERVER_KEY_PREVIOUS?: string;
     MODEL_KEY?: string;
     BRAVE_SEARCH_API_KEY?: string;
+    TAVILY_API_KEY?: string;
     VAPID_PUBLIC_KEY?: string;
     VAPID_PRIVATE_KEY?: string;
     VAPID_SUBJECT?: string;

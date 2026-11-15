@@ -56,7 +56,8 @@ a deployment that only uses the browser never needs to set it.
 | `SERVER_KEY` | Bearer token for the owner API, `/api/pairing`, `/api/login-link`. Optional. |
 | `SERVER_KEY_PREVIOUS` | Accepted alongside `SERVER_KEY` during a rotation window. See below. |
 | `MODEL_KEY` | Model provider key. The workspace **Settings** page writes the same thing at runtime. |
-| `BRAVE_SEARCH_API_KEY` | Optional Brave Search API key for owner-initiated read-only web snippets. Disabled when unset; never a model key. |
+| `TAVILY_API_KEY` | Optional Tavily key for basic-only read-only web search. Takes precedence over Brave; never a model key. |
+| `BRAVE_SEARCH_API_KEY` | Optional alternative Brave Search API key. Search is disabled when neither key is set. |
 | `STEWARD_MODEL` | JSON: `{"provider","modelId","baseUrl","thinkingLevel"}` for an OpenAI-compatible gateway. |
 | `DAILY_BUDGET_USD` | Cap on model spend per day. |
 | `WATCHDOG_LLM` | `1` lets the model take one look at a run that has gone quiet, before the deterministic verdict. Off unless set. |
@@ -177,13 +178,23 @@ release notes mention migrations.
 
 ## Optional web search
 
-Optional web search uses Brave's fixed HTTPS search endpoint. Only user-initiated turns can query
+Optional web search uses Tavily's or Brave's fixed HTTPS search endpoint. Only user-initiated turns can query
 it, at most once per turn, using text from the user's message; the steward cannot fetch arbitrary
 URLs or treat snippets as authorization to dispatch work or change memory in that turn. Results
 include source links and a retrieval time but are **not** verified full-page research. Keep the
-Brave key only in the protected `.dev.vars` file, restart `otto` after setting it, and remember
-that search queries go to the chosen provider. Cloudflare deployments can set the same value as a
-Worker secret instead. Do not send keys through chat.
+search key only in the protected `.dev.vars` file, restart `otto` after setting it, and remember
+that search queries go to the chosen provider. Set `TAVILY_API_KEY` for Tavily or
+`BRAVE_SEARCH_API_KEY` for Brave. If both are set, Tavily wins; failures do not trigger a second
+provider request. Tavily is fixed to `basic`, five results, no automatic parameter selection,
+no generated answer and no raw page content. This controls request cost, **not** account billing:
+keep pay-as-you-go/automatic recharge disabled in the provider dashboard and set account limits.
+Free quotas and pricing are provider policy and may change.
+
+On Node, edit `sudo nano /etc/otto/.dev.vars`, add `TAVILY_API_KEY=YOUR_KEY` without removing
+other settings, save, then run `sudo systemctl restart otto`. Never put a real key in shell
+history or chat. If using `deploy/apply-env.sh`, retain the variable in the local untracked
+`deploy/aliyun.env` too (the script replaces the remote configuration). Cloudflare deployments
+can set the same name as a Worker secret instead. Do not send keys through chat.
 
 ## Web Push (optional)
 
