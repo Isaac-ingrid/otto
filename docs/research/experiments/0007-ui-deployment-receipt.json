@@ -1,0 +1,17 @@
+{
+  "revision": "1ba6a710692f307a93caaedf06f68b726cfd185e",
+  "startedAt": "2026-11-15T00:05:09.688Z",
+  "backupIntegrity": "ok",
+  "backupSha256": "ddfb5cca41c6a712d1a97623b97d4a6d3af66b3aa0aa2bf861c116dd69aa0795",
+  "previousProgramSha256": "b5e33f35fb9be008ca120fa40a76f2a25e31119df667e396a362f549851ecb6d",
+  "programSha256": "a5b85888521582bca41d649583115529b94b7c61feae865aff24692ba669a216",
+  "scope": "presentation-only; no tool/prompt/authority/schema/config changes",
+  "status": "deployed",
+  "finishedAt": "2026-11-15T00:05:11.460Z",
+  "ownerApiStatus": 200,
+  "servedUiHashesMatch": true,
+  "prCardComposerAnswerHidden": true,
+  "ordinaryQuestionAnswerUnchanged": true,
+  "browserSessionLogout": 200,
+  "databaseIntegrity": "ok"
+}

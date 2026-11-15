@@ -134,3 +134,27 @@ This was a synthetic-status lab smoke using a real authenticated workspace HTTP 
 actual browser DOM click, phone-push test, full CI workflow or changed-head acceptance. Those and
 N>=5 same-input noise observations remain unmeasured. Preserve failing artifacts and never relax
 expectations to accommodate measured output. Model credentials stayed on the VPS.
+
+## Owner feedback and presentation-only follow-up
+
+Owner-provided screenshots subsequently showed ordinary quoted agreement being refused, dedicated
+confirmation creating the watch, listing reporting `completed` from synthetic success, and a later
+cancel request correctly leaving that terminal watch unchanged. This does not cover active-watch
+cancellation on the owner's device, background push, real CI or changed-head handling.
+
+The screenshots also exposed misleading generic reply guidance and an `Answer` button on PR
+confirmation cards. Commit `1ba6a71` removes that composer action by durable PR-card identity
+(including older saved cards) and gives new PR cards button-only guidance. Ordinary questions keep
+their reply hint and Answer button. Existing card text is not rewritten in the audit log.
+No model prompt, tool schema/selection, approval authority, configuration or database schema changed;
+this is not a new real-model gate observation. Typecheck passed; Node/workerd each passed all
+80 selected UI/template/approval/workspace-card tests.
+
+After separate owner permission, [presentation deployment](0007-ui-deployment-receipt.json)
+backed up program/map, the complete UI and SQLite under `/opt/otto/releases/1ba6a71/previous/`.
+There were no open turns at stop time. Installed the bundle and the two changed UI files, then
+restarted. Authenticated HTTPS asset bytes matched disk; the shipped pure helper suppressed the
+PR Answer action and retained ordinary-question answers. Temporary test browser session logged
+out, database integrity passed, public HTTPS 200 / anonymous API 401, doctor 0 failures (existing
+offsite-backup warning remains). No model input, watch/status mutation or later-plan tests were
+performed by this deployment check. A page refresh is needed to load the new browser modules.
