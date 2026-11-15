@@ -139,12 +139,14 @@ import { openSecret, sealSecret } from "./secretbox.ts";
 import { PushService } from "./push.ts";
 import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText, wakeOwnerNotified, watchdogWakeText } from "./wake-text.ts";
 import { WorkspaceError, cardOpen, cardView, type WorkspaceActionInput, type WorkspaceInput } from "./workspace.ts";
-import type { MachineDirectoryBrowseInput, MachineDirectoryInput, MachineDirectoryResult } from "./workspace-api.ts";
+import { MAX_BODY_BYTES, parseApiMessage, readJson, type MachineDirectoryBrowseInput, type MachineDirectoryInput, type MachineDirectoryResult } from "./workspace-api.ts";
 import { WorkspaceStream } from "./workspace-stream.ts";
 import { WebApp, linkTargetForThread, loginLinkPolicyFromEnv, parseSessionCookie, verifyLinkToken } from "./web.ts";
 
 /** Messages the workspace will queue before telling the owner to wait for the steward to catch up. */
 const MAX_OPEN_USER_RUNS = 10;
+/** Matches welcome.limits.maxMessageBytes (protocol §3.6 / §6.6). */
+const MAX_WS_MESSAGE_BYTES = 262_144;
 /** ADR-0017: what the workspace is told after the owner stops a turn. `cancelled` lists the run
  *  operation ids that ended cancelled, so the caller can tell "nothing was running" from "one turn
  *  and its queue went away". */
@@ -1502,7 +1504,14 @@ export class Steward extends Agent<Env> {
   }
 
   async onMessage(connection: Connection, raw: WSMessage): Promise<void> {
-    if (typeof raw !== "string") return;
+    if (typeof raw !== "string") {
+      if (raw.byteLength > MAX_WS_MESSAGE_BYTES) this.sendError(connection, "bad_request", "message too large");
+      return;
+    }
+    if (raw.length * 3 > MAX_WS_MESSAGE_BYTES && new TextEncoder().encode(raw).byteLength > MAX_WS_MESSAGE_BYTES) {
+      this.sendError(connection, "bad_request", "message too large");
+      return;
+    }
     let message: unknown;
     try {
       message = JSON.parse(raw);
@@ -3736,36 +3745,79 @@ export class Steward extends Agent<Env> {
    *  outbound row id / merged group id), which routes deterministically before the model ever
    *  sees the text (§3.1 signal 1). Idempotent on the client-chosen `id`. */
   private async handleApiMessage(request: Request): Promise<Response> {
-    let body: { text?: unknown; id?: unknown; replyTo?: unknown };
+    let parsed: { id?: string; text: string; replyTo?: string };
     try {
-      body = (await request.json()) as typeof body;
-    } catch {
+      parsed = parseApiMessage(await readJson(request, MAX_BODY_BYTES));
+    } catch (error) {
+      if (error instanceof WorkspaceError) return Response.json({ error: error.code }, { status: error.status });
       return Response.json({ error: "bad_request" }, { status: 400 });
     }
-    if (typeof body.text !== "string" || body.text.trim().length === 0) {
-      return Response.json({ error: "bad_request" }, { status: 400 });
-    }
-    const id = typeof body.id === "string" && body.id.length > 0 ? body.id : ulid();
-    const replyTo = typeof body.replyTo === "string" && body.replyTo.length > 0 ? body.replyTo : undefined;
-    // Persist before 200 (the old webhook path's rule, kept): the dedup insert is the durable
-    // record; everything after it is sync SQL or a void-fired chain.
-    if (this.sql`SELECT 1 AS one FROM sh_inbound WHERE channel = 'local' AND msgId = ${id}`.length > 0) {
+    const id = parsed.id ?? ulid();
+    const key = `api:${id}`;
+    const payload = JSON.stringify({ text: parsed.text, ...(parsed.replyTo ? { replyTo: parsed.replyTo } : {}) });
+    const previous = this.ledger.webRequests.get(key);
+    if (previous && previous.payload !== payload) return Response.json({ error: "id_conflict" }, { status: 409 });
+    if (previous?.status === "done") return Response.json({ id, deduped: true });
+    const inflight = this.webInputs.get(key);
+    if (inflight) {
+      await inflight;
       return Response.json({ id, deduped: true });
     }
-    this.sql`
-      INSERT INTO sh_inbound (channel, msgId, eventId, eventType, receivedAt, ownerAuthorized, text)
-      VALUES ('local', ${id}, NULL, 'api', ${Date.now()}, 1, ${body.text})
-    `;
-    // The spend readout stays deterministic (issue #28): it must answer with the model gone.
-    const command = parseOwnerCommand(body.text);
+    const existingInbound = this.sql<{ text: string | null }>`
+      SELECT text FROM sh_inbound WHERE channel = 'local' AND msgId = ${id}
+    `[0];
+    if (existingInbound) {
+      if (existingInbound.text !== parsed.text) return Response.json({ error: "id_conflict" }, { status: 409 });
+      return Response.json({ id, deduped: true });
+    }
+    // The spend readout stays deterministic (issue #28): it must answer with the model gone and
+    // must not be blocked by the user-turn queue limit.
+    const command = parseOwnerCommand(parsed.text);
     if (command) {
+      this.sql`
+        INSERT INTO sh_inbound (channel, msgId, eventId, eventType, receivedAt, ownerAuthorized, text)
+        VALUES ('local', ${id}, NULL, 'api', ${Date.now()}, 1, ${parsed.text})
+      `;
       this.logChannel("owner_command", `${id} ${command.kind}`);
       await this.dispatcher.handleOwnerCommand(command);
       return Response.json({ id });
     }
-    this.logChannel("owner_message", `${id} replyTo=${replyTo ?? "-"} ${body.text}`.slice(0, 500));
-    await this.submitUserMessage({ msgId: id, text: body.text, parentId: replyTo });
+    try {
+      const admitted = this.admitMessageRequest(key, payload, () => {
+        this.sql`
+          INSERT INTO sh_inbound (channel, msgId, eventId, eventType, receivedAt, ownerAuthorized, text)
+          VALUES ('local', ${id}, NULL, 'api', ${Date.now()}, 1, ${parsed.text})
+        `;
+      });
+      if (admitted === "duplicate") return Response.json({ id, deduped: true });
+    } catch (error) {
+      if (error instanceof WorkspaceError) return Response.json({ error: error.code }, { status: error.status });
+      throw error;
+    }
+    this.logChannel("owner_message", `${id} replyTo=${parsed.replyTo ?? "-"} ${parsed.text}`.slice(0, 500));
+    const work = this.submitUserMessage({ msgId: id, text: parsed.text, parentId: parsed.replyTo })
+      .then(() => { this.ledger.webRequests.complete(key); })
+      .finally(() => { this.webInputs.delete(key); });
+    this.webInputs.set(key, work);
+    await work;
     return Response.json({ id });
+  }
+
+  /** Shared atomic queue-admission gate for both workspace and Owner API user turns. */
+  private admitMessageRequest(key: string, payload: string, onAdmit?: () => void): "admitted" | "duplicate" {
+    return this.ctx.storage.transactionSync(() => {
+      const previous = this.ledger.webRequests.get(key);
+      if (previous) {
+        if (previous.payload !== payload) throw new WorkspaceError("id_conflict", 409);
+        return "duplicate";
+      }
+      if (this.ledger.runs.openRows().filter((r) => r.kind === "user").length >= MAX_OPEN_USER_RUNS) {
+        throw new WorkspaceError("queue_full", 429);
+      }
+      this.ledger.webRequests.start(key, payload);
+      onAdmit?.();
+      return "admitted";
+    });
   }
 
   /** GET /api/messages?after=<sentAt-ms>&limit=N — the owner's read side: sent rows grouped
@@ -3811,8 +3863,9 @@ export class Steward extends Agent<Env> {
   private async handleApiActions(request: Request): Promise<Response> {
     let body: { cardMsgId?: unknown; action?: unknown };
     try {
-      body = (await request.json()) as typeof body;
-    } catch {
+      body = (await readJson(request, 16 * 1024)) as typeof body;
+    } catch (error) {
+      if (error instanceof WorkspaceError) return Response.json({ error: error.code }, { status: error.status });
       return Response.json({ error: "bad_request" }, { status: 400 });
     }
     if (typeof body.cardMsgId !== "string" || typeof body.action !== "string" || body.action.length === 0) {
@@ -3964,13 +4017,8 @@ export class Steward extends Agent<Env> {
     const quoted = input.replyTo ? this.ledger.outbound.row(input.replyTo) : null;
     if (input.replyTo && !quoted) throw new WorkspaceError("reply_target_not_found", 404);
     const parentId = typeof quoted?.providerMsgId === "string" ? quoted.providerMsgId : undefined;
-    if (!previous && this.ledger.runs.openRows().filter((r) => r.kind === "user").length >= MAX_OPEN_USER_RUNS) {
-      throw new WorkspaceError("queue_full", 429);
-    }
     const msgId = `web:${input.id}`;
-    this.ctx.storage.transactionSync(() => {
-      this.ledger.webRequests.start(input.id, payload);
-    });
+    this.admitMessageRequest(input.id, payload);
     const work = this.submitUserMessage({
       msgId, text: input.text, ...(parentId ? { parentId } : {}),
       routedThreadId: thread?.threadId ?? null,
@@ -4095,7 +4143,18 @@ export class Steward extends Agent<Env> {
    *  still open if it never landed, and the owner can press again with a fresh request id. */
   private async recoverWorkspaceInputs(): Promise<void> {
     for (const row of this.ledger.webRequests.pending()) {
-      if (row.id.startsWith("action:")) continue;
+      if (row.id.startsWith("action:") || row.id.startsWith("stop:")) continue;
+      if (row.id.startsWith("api:")) {
+        const msgId = row.id.slice("api:".length);
+        const parsed = JSON.parse(row.payload) as { text: string; replyTo?: string };
+        try {
+          await this.submitUserMessage({ msgId, text: parsed.text, parentId: parsed.replyTo });
+          this.ledger.webRequests.complete(row.id);
+        } catch (error) {
+          this.logChannel("web_recovery_failed", `${row.id} ${errorText(error)}`);
+        }
+        continue;
+      }
       try { await this.submitWorkspaceMessage(JSON.parse(row.payload) as WorkspaceInput); }
       catch (error) { this.logChannel("web_recovery_failed", `${row.id} ${errorText(error)}`); }
     }

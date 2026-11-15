@@ -82,10 +82,10 @@ export interface ApiSession {
 
 /** A message may be long (pasted logs), but not unbounded: the model sees it verbatim. */
 export const MAX_MESSAGE_CHARS = 16_000;
-const MAX_BODY_BYTES = 70_000;
-const REQUEST_ID = /^[\w-]{8,128}$/;
-const THREAD_ID = /^[\w-]{1,128}$/;
-const CARD_ID = /^[\w:.-]{1,256}$/;
+export const MAX_BODY_BYTES = 70_000;
+export const REQUEST_ID = /^[\w-]{8,128}$/;
+export const THREAD_ID = /^[\w-]{1,128}$/;
+export const CARD_ID = /^[\w:.-]{1,256}$/;
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}): Response =>
   Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -98,7 +98,7 @@ function sameSecret(a: string, b: string): boolean {
   return diff === 0;
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown>> {
+export async function readJson(request: Request, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const reader = request.body?.getReader();
   if (!reader) return {};
   const decoder = new TextDecoder();
@@ -108,7 +108,7 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
     const { value, done } = await reader.read();
     if (done) break;
     bytes += value.byteLength;
-    if (bytes > MAX_BODY_BYTES) {
+    if (bytes > maxBytes) {
       await reader.cancel();
       throw new WorkspaceError("too_large", 413);
     }
@@ -125,12 +125,19 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
   }
 }
 
-function parseMessage(body: Record<string, unknown>): WorkspaceInput {
-  const { id, text, threadId, replyTo } = body;
-  if (typeof id !== "string" || !REQUEST_ID.test(id)) throw new WorkspaceError("bad_request");
+export function parseApiMessage(body: Record<string, unknown>): { id?: string; text: string; replyTo?: string } {
+  const { id, text, replyTo } = body;
+  if (id !== undefined && (typeof id !== "string" || !REQUEST_ID.test(id))) throw new WorkspaceError("bad_request");
   if (typeof text !== "string" || text.trim() === "" || text.length > MAX_MESSAGE_CHARS) throw new WorkspaceError("bad_request");
-  if (threadId !== undefined && (typeof threadId !== "string" || !THREAD_ID.test(threadId))) throw new WorkspaceError("bad_request");
   if (replyTo !== undefined && (typeof replyTo !== "string" || !CARD_ID.test(replyTo))) throw new WorkspaceError("bad_request");
+  return { ...(id !== undefined ? { id } : {}), text, ...(replyTo !== undefined ? { replyTo } : {}) };
+}
+
+function parseMessage(body: Record<string, unknown>): WorkspaceInput {
+  const { id, text, replyTo } = parseApiMessage(body);
+  const { threadId } = body;
+  if (id === undefined) throw new WorkspaceError("bad_request");
+  if (threadId !== undefined && (typeof threadId !== "string" || !THREAD_ID.test(threadId))) throw new WorkspaceError("bad_request");
   return { id, text, ...(threadId ? { threadId } : {}), ...(replyTo ? { replyTo } : {}) };
 }
 

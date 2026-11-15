@@ -62,6 +62,7 @@ const DEFAULT_DEAD_AFTER_MS = 90_000;
 const DEFAULT_BATCH_MS = 250;
 const DEFAULT_BATCH_EVENTS = 50;
 const DEFAULT_BATCH_BYTES = 64 * 1024;
+const DEFAULT_MAX_MESSAGE_BYTES = 262_144;
 
 export class ConnectorClient {
   private readonly store: LocalStore;
@@ -87,6 +88,7 @@ export class ConnectorClient {
   private sendQueue: StoredEvent[] = [];
   private flushTimer?: NodeJS.Timeout;
   private directoryReads = 0;
+  private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
   private readonly history: HistoryStreams | undefined;
 
@@ -148,7 +150,12 @@ export class ConnectorClient {
 
     const wsUrl = `${toWsOrigin(credentials.serverUrl)}/agents/steward/owner?role=connector&proto=1`;
     const agent = this.options.wsAgent?.(wsUrl);
-    const ws = new this.WebSocketImpl(wsUrl, agent ? { headers: { authorization: `Bearer ${credentials.token}` }, agent } : { headers: { authorization: `Bearer ${credentials.token}` } });
+    const ws = new this.WebSocketImpl(
+      wsUrl,
+      agent
+        ? { headers: { authorization: `Bearer ${credentials.token}` }, agent, maxPayload: this.maxMessageBytes }
+        : { headers: { authorization: `Bearer ${credentials.token}` }, maxPayload: this.maxMessageBytes },
+    );
     this.ws = ws;
 
     ws.on("open", () => {
@@ -180,9 +187,11 @@ export class ConnectorClient {
     });
 
     ws.on("message", (data: unknown) => {
+      const text = String(data);
+      if (Buffer.byteLength(text, "utf8") > this.maxMessageBytes) return;
       let message: Record<string, unknown>;
       try {
-        message = JSON.parse(String(data));
+        message = JSON.parse(text);
       } catch {
         return;
       }
@@ -213,6 +222,9 @@ export class ConnectorClient {
       case "welcome": {
         this.backoffMs = this.minBackoffMs;
         const welcome = message as unknown as WelcomeMessage;
+        if (typeof welcome.limits?.maxMessageBytes === "number" && welcome.limits.maxMessageBytes > 0) {
+          this.maxMessageBytes = welcome.limits.maxMessageBytes;
+        }
         // SERVER_KEY rotation (issue #27): a welcome carrying `token` means the connection
         // authenticated with a key the steward is rotating away from; persist the fresh
         // primary-key token so the next reconnect uses it (no re-pairing needed).
@@ -399,12 +411,13 @@ export class ConnectorClient {
   private flush(): void {
     const ws = this.ws;
     if (!ws || ws.readyState !== this.WebSocketImpl.OPEN) return; // stays queued; retried after welcome
+    const maxBatchBytes = Math.max(1024, Math.min(this.batchBytes, this.maxMessageBytes - 1024));
     const batch: StoredEvent[] = [];
     let bytes = 0;
     while (this.sendQueue.length > 0 && batch.length < this.batchEvents) {
       const next = this.sendQueue[0]!;
       const size = next.payload.length;
-      if (batch.length > 0 && bytes + size > this.batchBytes) break;
+      if (batch.length > 0 && bytes + size > maxBatchBytes) break;
       batch.push(this.sendQueue.shift()!);
       bytes += size;
     }

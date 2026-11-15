@@ -166,7 +166,7 @@ export function chunkPage(reqId: string, page: HistoryPage, maxChunkBytes = HIST
     entries = [];
   };
   for (const entry of page.entries) {
-    const size = byteLength({ t: "history_chunk", re: reqId, n: 0, entries: [...entries, entry], cursor: entry.nextCursor ?? entry.id, done: false, ...(page.format ? { format: page.format } : {}) });
+    const size = byteLength({ t: "history_chunk", re: reqId, n: 0, entries: [...entries, entry], cursor: entry.nextCursor ?? entry.id, done: true, truncated: !page.done, ...(page.format ? { format: page.format } : {}) });
     if (entries.length > 0 && size > maxChunkBytes) flush();
     entries.push(entry);
   }
