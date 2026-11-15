@@ -145,8 +145,9 @@ console.log(
 const generatedAuthRun = generatedAuthFiles.length === 0
   ? Promise.resolve({ code: 0, seconds: 0 })
   : runVitest(
-      ["run", "--config", "vitest.generated-auth.config.ts", ...generatedAuthFiles.map((f) => path.join("test", f))],
+      ["run", "--config", generatedAuthConfig, ...generatedAuthFiles.map((f) => path.join("test", f))],
       `${PALETTE[groups.length % PALETTE.length]}[fresh-deploy: ${generatedAuthFiles.map((f) => f.replace(".test.ts", "")).join(" ")}]${RESET}`,
+      runtime === "node" ? { OTTO_TEST_PROFILE: "generated" } : {},
     );
 const results = await Promise.all([
   ...groups.map((g, i) => {
