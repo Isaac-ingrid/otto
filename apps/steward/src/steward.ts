@@ -35,19 +35,10 @@ import {
   EventsGapMessageSchema,
   EventsMessageSchema,
   HelloMessageSchema,
-  HISTORY_MAX_BYTES,
   HISTORY_RELAY_TTL_MS,
-  HistoryAckMessageSchema,
-  HistoryChunkMessageSchema,
-  HistoryOpenMessageSchema,
   PingMessageSchema,
   PROTOCOL_VERSION,
   RegisterRepoResultSchema,
-  SubscribeMessageSchema,
-  SubscribeThreadMessageSchema,
-  UnsubscribeMessageSchema,
-  UnsubscribeThreadMessageSchema,
-  WorkerCmdMessageSchema,
   generatePairingCode,
   mintToken,
   parseToken,
@@ -59,8 +50,6 @@ import {
   type DirectoryListMessage,
   type ErrorMessage,
   type EventsAckMessage,
-  type HistoryReqMessage,
-  type MachineOfflineMessage,
   type PongMessage,
   type ResyncMessage,
   type ServerKey,
@@ -101,7 +90,7 @@ import {
   type FauxRequestRecord,
   type StewardModels,
 } from "./llm/models.ts";
-import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type TimelineRow, type WakeRow, type WorkerRow } from "./ledger.ts";
+import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type WakeRow, type WorkerRow } from "./ledger.ts";
 import { DeploymentAuth, deploymentSecrets, ownerAuthorized } from "./deployment-auth.ts";
 import { loginPage } from "./login-page.ts";
 import { renderChangeReports } from "./notes.ts";
@@ -134,6 +123,7 @@ import {
 } from "./report-template.ts";
 import { MIGRATIONS, runMigrations } from "./schema.ts";
 import { ModelConfigStore } from "./model-config.ts";
+import { HistorySubscriptions, type ConnState } from "./history-subscriptions.ts";
 import { sealSecret } from "./secretbox.ts";
 import { PushService } from "./push.ts";
 import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers, verifyWakeText, wakeOwnerNotified, watchdogWakeText } from "./wake-text.ts";
@@ -157,9 +147,6 @@ export interface TurnStopResult {
 const WORKSPACE_TAG = "workspace";
 /** How long a burst of ledger writes is coalesced into one `workspace_changed` frame. */
 const WORKSPACE_NUDGE_MS = 150;
-/** Rows per `thread_events` frame (issue #1). A watcher that fell further behind gets the rest
- *  on the next flush, so the cap bounds one message, never the stream. */
-const THREAD_PAGE = 200;
 
 function clientIp(request: Request): string {
   return request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -192,30 +179,6 @@ export async function readJsonObject(request: Request, maximumBytes: number): Pr
   const parsed: unknown = JSON.parse(text);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("body must be an object");
   return parsed as Record<string, unknown>;
-}
-
-interface ConnState {
-  /** Set on browser connections (the L3 stream and workspace consumers); connector connections carry deviceId. */
-  role?: "web";
-  /** Set on workspace connections: the session that opened them (signing out closes them). */
-  sid?: string;
-  expiresAt?: number;
-  deviceId: string;
-  epoch: number;
-  /** Key that authenticated the connection (issue #27): ≠ primary ⇒ welcome rekeys. */
-  keyId: string;
-  connEpoch?: number;
-  directoryBrowse?: boolean;
-  /** Set on a browser connection by `subscribe` (issue #84, §6.8): the one worker session
-   *  view it currently has open, and the only `workerId` it may send `worker_cmd` to. */
-  viewingWorkerId?: string;
-  /** Set by `subscribe_thread` (issue #1): the Thread whose timeline this connection follows,
-   *  with the last `sh_timeline.id` it has been sent — the resume cursor. Both are dropped by
-   *  `unsubscribe_thread`, and a re-subscribe rebuilds them from the watcher's `after`. */
-  viewingThreadId?: string;
-  threadCursor?: number;
-  /** The last `thread_state` frame sent on this subscription: an unchanged state is not resent. */
-  threadStateSig?: string;
 }
 
 type DirectoryReadResult = DirectoryBrowseResult | { ok: false; code: "machine_offline" | "browse_timeout" };
@@ -320,11 +283,6 @@ const BACKGROUND_CONTEXT: Parameters<Harness["usage"]>[0] = Object.freeze({
   value: () => undefined,
   toString: () => "[Context steward background]",
 });
-
-/** UTF-8 size of a serialized relay message — the byte meter is numbers only, never content. */
-function jsonByteLength(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length;
-}
 
 /** The connector's pr_worker error codes (worker-manager.ts) → the failure card's stages
  *  (review finding 3): lets the failed-cmd_result path keep the stage-specific fix text
@@ -619,17 +577,27 @@ export class Steward extends Agent<Env> {
 
   // Tests shrink the history relay TTL to exercise the alarm-driven sweep quickly.
   protected historyRelayTtlMs = HISTORY_RELAY_TTL_DEFAULT_MS;
-  /** When the pending relay sweep fires (0: none known). Live viewers open a stream every few
-   *  seconds; one sweep per open would pile up schedule rows, and one pending sweep is enough —
-   *  it re-arms itself for the next expiry. */
-  private relaySweepAt = 0;
 
-  private armRelaySweep(): void {
-    const delayS = Math.max(1, Math.ceil(this.historyRelayTtlMs / 1000));
-    const fireAt = Date.now() + delayS * 1000;
-    if (this.relaySweepAt !== 0 && this.relaySweepAt <= fireAt) return; // an earlier sweep is already coming
-    this.relaySweepAt = fireAt;
-    void this.schedule(delayS, "sweepHistoryRelays");
+  // History relay, thread subscriptions and web-direct worker commands (phase 5 sub-batch A):
+  // the relay state, subscription logic and worker_cmd forwarding live in HistorySubscriptions.
+  // sweepHistoryRelays stays here as a thin delegator because the Agents SDK alarm fires it by
+  // callback name.
+  private historySubs_?: HistorySubscriptions;
+  private get historySubs(): HistorySubscriptions {
+    return (this.historySubs_ ??= new HistorySubscriptions({
+      sql: this.sql.bind(this),
+      ledger: this.ledger,
+      getConnection: (id) => this.getConnection(id),
+      getConnections: (tag) => this.getConnections(tag),
+      connFor: (deviceId) => this.connFor(deviceId),
+      webConnectionAlive: (conn) => this.webConnectionAlive(conn),
+      sendError: (conn, code, msg, re) => this.sendError(conn, code, msg, re),
+      schedule: (delayS, callback) => void this.schedule(delayS, callback as keyof this),
+      historyRelayTtlMs: () => this.historyRelayTtlMs,
+      notifyWorkspaces: () => this.notifyWorkspaces(),
+      sendToWorker: (input) => this.dispatcher.sendToWorker(input),
+      interruptWorker: (input) => this.dispatcher.interruptWorker(input),
+    }));
   }
 
   // Tests shrink the quiet merge window (issue #11) — 0 makes quiet rows due immediately,
@@ -687,7 +655,7 @@ export class Steward extends Agent<Env> {
       this.workspaceNudge = undefined;
       const frame = JSON.stringify({ t: "workspace_changed" });
       for (const connection of this.getConnections(WORKSPACE_TAG)) if (this.webConnectionAlive(connection)) connection.send(frame);
-      this.pushThreadSubscriptions(); // issue #1: watchers following one Thread get the rows themselves
+      this.historySubs.pushThreadSubscriptions(); // issue #1: watchers following one Thread get the rows themselves
       this.workspaceStream.ensure(); // a Durable Object that woke after hibernation re-subscribes here
     }, WORKSPACE_NUDGE_MS);
   }
@@ -1445,12 +1413,9 @@ export class Steward extends Agent<Env> {
     const state = connection.state as unknown as ConnState | null;
     if (!state) return;
     if (state.role === "web") {
-      // §6.6 termination: the browser closing its connection ends every stream it opened.
-      this.sql`DELETE FROM history_relay WHERE webConnId = ${connection.id}`;
-      // §6.8: any web-direct command still waiting on this connection's cmd_ack/cmd_result
-      // loses its relay target — the outbox row itself is untouched, only the bookkeeping
-      // that would have forwarded the answer to this now-gone browser.
-      this.sql`DELETE FROM web_cmd_relay WHERE webConnId = ${connection.id}`;
+      // §6.6/§6.8 termination: the browser closing its connection ends every stream it opened
+      // and drops the bookkeeping that would forward cmd answers to this now-gone socket.
+      this.historySubs.cleanupWebConnection(connection.id);
       // Nobody left watching a workspace: let go of pi's event stream (the close may still list this socket).
       if ([...this.getConnections(WORKSPACE_TAG)].every((other) => other.id === connection.id)) void this.workspaceStream_?.stop();
       return;
@@ -1466,13 +1431,7 @@ export class Steward extends Agent<Env> {
     // connector-side reset; the browser's silence watchdog ends the view.
     // The machine really went offline: every relay through it dies with the connection, and
     // each browser hears why (§6.6 machine_offline) instead of waiting out its own timeout.
-    const orphaned = this.sql<{ reqId: string; webConnId: string }>`
-      SELECT reqId, webConnId FROM history_relay WHERE deviceId = ${state.deviceId}
-    `;
-    for (const relay of orphaned) {
-      this.sql`DELETE FROM history_relay WHERE reqId = ${relay.reqId}`;
-      this.getConnection(relay.webConnId)?.send(JSON.stringify({ t: "machine_offline", re: relay.reqId } satisfies MachineOfflineMessage));
-    }
+    this.historySubs.notifyDeviceOfflineRelays(state.deviceId);
     this.ledger.machines.setOnline(state.deviceId, false);
     this.rearmNoticeDrain(); // a recovery intent may now be counting down its debounce
   }
@@ -1526,25 +1485,25 @@ export class Steward extends Agent<Env> {
       if (!this.webConnectionAlive(connection)) return;
       switch (t) {
         case "history_open":
-          this.handleHistoryOpen(connection, message);
+          this.historySubs.handleHistoryOpen(connection, message);
           return;
         case "history_ack":
-          this.handleHistoryAck(connection, message);
+          this.historySubs.handleHistoryAck(connection, message);
           return;
         case "subscribe":
-          this.handleSubscribe(connection, message);
+          this.historySubs.handleSubscribe(connection, message);
           return;
         case "unsubscribe":
-          this.handleUnsubscribe(connection);
+          this.historySubs.handleUnsubscribe(connection);
           return;
         case "subscribe_thread":
-          this.handleSubscribeThread(connection, message);
+          this.historySubs.handleSubscribeThread(connection, message);
           return;
         case "unsubscribe_thread":
-          this.handleUnsubscribeThread(connection, message);
+          this.historySubs.handleUnsubscribeThread(connection, message);
           return;
         case "worker_cmd":
-          this.handleWorkerCmd(connection, message);
+          this.historySubs.handleWorkerCmd(connection, message);
           return;
         default:
           this.sendError(connection, "forbidden", `message type ${JSON.stringify(t)} is not allowed on a web connection`);
@@ -1586,7 +1545,7 @@ export class Steward extends Agent<Env> {
         EventsGapMessageSchema.safeParse(message);
         return;
       case "history_chunk":
-        this.handleHistoryChunk(connection, message);
+        this.historySubs.handleHistoryChunk(connection, message);
         return;
       case "directory_listing":
         this.handleDirectoryListing(connection, message);
@@ -1594,7 +1553,7 @@ export class Steward extends Agent<Env> {
       case "error":
         // A connector reply to something the DO itself sent. The only DO-originated requests
         // are history pulls (§6.6): relay a failure to the waiting browser and end its stream.
-        this.relayHistoryError(connection, message);
+        this.historySubs.relayHistoryError(connection, message);
         return;
       default:
         break;
@@ -1611,314 +1570,11 @@ export class Steward extends Agent<Env> {
     connection.send(JSON.stringify({ t: "pong", re: parsed.data.id } satisfies PongMessage));
   }
 
-  // ---- History relay (protocol §6.6, issue #23) ---------------------------------------------------
-  // The DO is a pure pipe: ids and byte meters in SQLite, content only ever in memory
-  // between the two sockets. Nothing here logs or persists entry text.
-
-  /** browser → DO: resolve the worker, refuse offline machines, then ask the connector. */
-  private handleHistoryOpen(connection: Connection, raw: unknown): void {
-    const parsed = HistoryOpenMessageSchema.safeParse(raw);
-    if (!parsed.success) {
-      this.sendError(connection, "bad_request", "invalid history_open");
-      return;
-    }
-    const open = parsed.data;
-    const worker = this.ledger.workers.get(open.workerId);
-    if (!worker) {
-      this.sendError(connection, "not_found", `worker ${open.workerId} is unknown`, open.id);
-      return;
-    }
-    const deviceConn = this.connFor(worker.deviceId);
-    if (!deviceConn) {
-      // §6.6: offline is answered directly — the transcript lives on that machine only.
-      connection.send(JSON.stringify({ t: "machine_offline", re: open.id } satisfies MachineOfflineMessage));
-      return;
-    }
-    const reqId = ulid();
-    const maxBytes = Math.min(open.maxBytes ?? HISTORY_MAX_BYTES, HISTORY_MAX_BYTES);
-    const now = Date.now();
-    // One live stream per browser connection — a re-open supersedes the previous one.
-    this.sql`DELETE FROM history_relay WHERE webConnId = ${connection.id}`;
-    this.sql`
-      INSERT INTO history_relay (reqId, webConnId, workerId, deviceId, maxBytes, sentBytes, expiresAt, createdAt)
-      VALUES (${reqId}, ${connection.id}, ${open.workerId}, ${worker.deviceId}, ${maxBytes}, 0, ${now + this.historyRelayTtlMs}, ${now})
-    `;
-    this.armRelaySweep();
-    const req: HistoryReqMessage = {
-      t: "history_req",
-      id: reqId,
-      workerId: open.workerId,
-      maxBytes,
-      ...(open.since ? { since: open.since } : {}),
-      ...(open.format ? { format: open.format } : {}),
-    };
-    deviceConn.send(JSON.stringify(req));
-  }
-
-  /** browser → DO → connector: the ack that slides the connector's window (§6.6 step 4). */
-  private handleHistoryAck(connection: Connection, raw: unknown): void {
-    const parsed = HistoryAckMessageSchema.safeParse(raw);
-    if (!parsed.success) return;
-    const relay = this.sql<{ webConnId: string; deviceId: string }>`
-      SELECT webConnId, deviceId FROM history_relay WHERE reqId = ${parsed.data.re}
-    `[0];
-    // Unknown reqId (stream already finished) or another connection's stream: drop.
-    if (!relay || relay.webConnId !== connection.id) return;
-    this.connFor(relay.deviceId)?.send(JSON.stringify(parsed.data));
-  }
-
-  /** connector → DO → browser: forward one chunk, meter the bytes, end finished streams. */
-  private handleHistoryChunk(connection: Connection, raw: unknown): void {
-    const parsed = HistoryChunkMessageSchema.safeParse(raw);
-    if (!parsed.success) return;
-    const chunk = parsed.data;
-    const relay = this.sql<{ webConnId: string; deviceId: string; maxBytes: number; sentBytes: number; cursor: string | null; expiresAt: number }>`
-      SELECT webConnId, deviceId, maxBytes, sentBytes, cursor, expiresAt FROM history_relay WHERE reqId = ${chunk.re}
-    `[0];
-    if (!relay) return; // swept/timed out/done: nothing is waiting for this chunk
-    // The relay belongs to one machine: only its connection's chunks travel on. reqIds are
-    // unguessable ULIDs, so this is defense in depth against a confused connector, not auth.
-    if ((connection.state as unknown as ConnState | null)?.deviceId !== relay.deviceId) return;
-    if (relay.expiresAt <= Date.now()) {
-      this.sql`DELETE FROM history_relay WHERE reqId = ${chunk.re}`;
-      return;
-    }
-    const webConn = this.getConnection(relay.webConnId);
-    if (!webConn || !this.webConnectionAlive(webConn)) {
-      this.sql`DELETE FROM history_relay WHERE reqId = ${chunk.re}`;
-      return;
-    }
-    const bytes = jsonByteLength(raw);
-    if (relay.sentBytes + bytes > relay.maxBytes) {
-      // Defense in depth (the connector budgets maxBytes first): cut the stream here rather
-      // than forward past the cap, and tell the browser it ended — continuing from the last
-      // FORWARDED cursor, never the dropped chunk's (the browser never saw its entries).
-      webConn.send(
-        JSON.stringify({ t: "history_chunk", re: chunk.re, n: chunk.n, entries: [], cursor: relay.cursor, done: true, truncated: true }),
-      );
-      this.sql`DELETE FROM history_relay WHERE reqId = ${chunk.re}`;
-      return;
-    }
-    webConn.send(JSON.stringify(chunk));
-    if (chunk.done) {
-      this.sql`DELETE FROM history_relay WHERE reqId = ${chunk.re}`;
-    } else {
-      this.sql`
-        UPDATE history_relay SET sentBytes = ${relay.sentBytes + bytes}, cursor = ${chunk.cursor ?? null}
-        WHERE reqId = ${chunk.re}
-      `;
-    }
-  }
-
-  /** A connector `error` replying to a history_req: forward the reason, end the stream. */
-  private relayHistoryError(connection: Connection, raw: unknown): void {
-    const re = (raw as { re?: unknown }).re;
-    if (typeof re !== "string") return;
-    const relay = this.sql<{ webConnId: string; deviceId: string }>`
-      SELECT webConnId, deviceId FROM history_relay WHERE reqId = ${re}
-    `[0];
-    if (!relay) return; // not a history reply; nothing else to do with connector errors today
-    if ((connection.state as unknown as ConnState | null)?.deviceId !== relay.deviceId) return;
-    this.sql`DELETE FROM history_relay WHERE reqId = ${re}`;
-    this.getConnection(relay.webConnId)?.send(JSON.stringify(raw));
-  }
-
-  // ---- Direct worker chat from an open session view (issue #84, ADR-0011, protocol §6.8) ----
-  // Mechanical only (send/interrupt): the DO calls the same Dispatcher methods a steward tool
-  // call would, with no LLM step in between. Targeting is server-verified (subscribe state on
-  // the connection itself), never trusted from the message.
-
-  /** browser → DO: this connection is now watching `workerId`'s session view. */
-  private handleSubscribe(connection: Connection, raw: unknown): void {
-    const parsed = SubscribeMessageSchema.safeParse(raw);
-    if (!parsed.success) {
-      this.sendError(connection, "bad_request", "invalid subscribe");
-      return;
-    }
-    if (!this.ledger.workers.get(parsed.data.workerId)) {
-      this.sendError(connection, "not_found", `worker ${parsed.data.workerId} is unknown`);
-      return;
-    }
-    const state = connection.state as unknown as ConnState | null;
-    connection.setState({
-      role: "web",
-      sid: state?.sid,
-      expiresAt: state?.expiresAt,
-      deviceId: state?.deviceId ?? "",
-      epoch: state?.epoch ?? 0,
-      keyId: state?.keyId ?? "",
-      connEpoch: state?.connEpoch,
-      viewingWorkerId: parsed.data.workerId,
-    } satisfies ConnState);
-  }
-
-  /** browser → DO: the session view closed, or is about to subscribe to a different worker. */
-  private handleUnsubscribe(connection: Connection): void {
-    const state = connection.state as unknown as ConnState | null;
-    if (!state) return;
-    const { viewingWorkerId: _drop, ...rest } = state;
-    connection.setState(rest as ConnState);
-  }
-
-  // ---- thread subscription (issue #1, P4) ------------------------------------------------------
-
-  /** Rows of one Thread after a cursor — the only read the subscription does per tick, and it
-   *  rides the `(threadId, id)` index. */
-  private threadRowsAfter(threadId: string, after: number, limit: number): TimelineRow[] {
-    return this.sql<TimelineRow>`
-      SELECT id, threadId, ts, kind, text FROM sh_timeline
-      WHERE threadId = ${threadId} AND id > ${after} ORDER BY id LIMIT ${limit}
-    `;
-  }
-
-  /** One `thread_events` frame, oldest first; returns whether the page was capped. Nothing is
-   *  ever dropped: the capped remainder follows on the next push (see `pushThreadSubscriptions`). */
-  private sendThreadRows(connection: Connection, threadId: string, rows: readonly TimelineRow[]): boolean {
-    if (rows.length === 0) return false;
-    const more = this.threadRowsAfter(threadId, rows[rows.length - 1]!.id, 1).length > 0;
-    const events = rows.map(({ id, ts, kind, text }) => ({ id, ts, kind, text }));
-    connection.send(JSON.stringify({ t: "thread_events", threadId, events, ...(more ? { more: true as const } : {}) }));
-    return more;
-  }
-
-  /** The part of a Thread a watcher cannot read off the timeline: its state, its workers, and how
-   *  many questions are open. Sent when it changes (and once on subscribe) — never per row. */
-  private sendThreadState(connection: Connection, threadId: string, state: ConnState | null): void {
-    const thread = this.ledger.threads.get(threadId);
-    if (thread === null) return;
-    const workers = this.sql<{ workerId: string; state: string }>`
-      SELECT workerId, state FROM sh_worker WHERE threadId = ${threadId} ORDER BY workerId`;
-    const openQuestions = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM sh_question WHERE threadId = ${threadId} AND status = 'open'`[0]!.n;
-    const frame = JSON.stringify({ t: "thread_state", threadId, state: thread.state, workers, openQuestions });
-    if (state?.threadStateSig === frame) return;
-    if (state !== null) connection.setState({ ...state, threadStateSig: frame });
-    connection.send(frame);
-  }
-
-  /** browser → DO: follow one Thread’s timeline instead of polling `GET /api/messages` (issue #1).
-   *  Nothing is trusted from the message: the Thread must exist, and the cursor lives on the
-   *  connection — a reconnecting watcher asks for the gap, not the whole history. */
-  private handleSubscribeThread(connection: Connection, raw: unknown): void {
-    const parsed = SubscribeThreadMessageSchema.safeParse(raw);
-    if (!parsed.success) {
-      this.sendError(connection, "bad_request", "invalid subscribe_thread");
-      return;
-    }
-    const { threadId, after } = parsed.data;
-    if (this.ledger.threads.get(threadId) === null) {
-      this.sendError(connection, "not_found", `thread ${threadId} does not exist`);
-      return;
-    }
-    const previous = connection.state as unknown as ConnState | null;
-    // A fresh watcher gets the Thread's most recent page; a reconnecting one gets only the gap.
-    let rows = after === undefined ? this.ledger.timeline.recent(threadId, THREAD_PAGE) : this.threadRowsAfter(threadId, after, THREAD_PAGE);
-    // A long gap is drained in pages rather than truncated; the cap only bounds one message.
-    for (let pages = 1; ; pages += 1) {
-      const cursor = rows.at(-1)?.id ?? after ?? 0;
-      connection.setState({ ...previous, viewingThreadId: threadId, threadStateSig: undefined, threadCursor: cursor } as ConnState);
-      const more = this.sendThreadRows(connection, threadId, rows);
-      if (!more || pages >= 5) break;
-      rows = this.threadRowsAfter(threadId, cursor, THREAD_PAGE);
-    }
-    this.sendThreadState(connection, threadId, connection.state as unknown as ConnState | null);
-  }
-
-  /** Stops the frames at once; the cursor goes with the subscription, so a later re-subscribe
-   *  without `after` starts from the Thread’s recent page again. */
-  private handleUnsubscribeThread(connection: Connection, raw: unknown): void {
-    if (!UnsubscribeThreadMessageSchema.safeParse(raw).success) {
-      this.sendError(connection, "bad_request", "invalid unsubscribe_thread");
-      return;
-    }
-    const state = connection.state as unknown as ConnState | null;
-    if (!state) return;
-    const { viewingThreadId: _thread, threadCursor: _cursor, threadStateSig: _sig, ...rest } = state;
-    connection.setState(rest as ConnState);
-  }
-
-  /** Pushes what is new to every watcher (issue #1). Driven by the same ledger-write nudge as the
-   *  workspace refetch, so a burst collapses into one pass and no write path can forget to notify;
-   *  a watcher that fell further behind than five pages re-arms the nudge instead of stalling. */
-  private pushThreadSubscriptions(): void {
-    let behind = false;
-    for (const connection of this.getConnections<ConnState>("web")) {
-      const state = connection.state as ConnState | null;
-      const threadId = state?.viewingThreadId;
-      if (!threadId) continue;
-      if (!this.webConnectionAlive(connection)) continue;
-      let cursor = state.threadCursor ?? 0;
-      for (let pages = 0; pages < 5; pages += 1) {
-        const rows = this.threadRowsAfter(threadId, cursor, THREAD_PAGE);
-        if (rows.length === 0) break;
-        cursor = rows[rows.length - 1]!.id;
-        connection.setState({ ...state, threadCursor: cursor });
-        if (!this.sendThreadRows(connection, threadId, rows)) break;
-        if (pages === 4) behind = true;
-      }
-      this.sendThreadState(connection, threadId, { ...state, threadCursor: cursor });
-    }
-    if (behind) this.notifyWorkspaces();
-  }
-
-  /** browser → DO → connector: §6.8. Dispatches through the ordinary Dispatcher path (same
-   *  outbox write, same Thread timeline entry a steward tool call would produce) and registers
-   *  a relay row so the real cmd_ack/cmd_result — never fabricated — finds its way back. */
-  private async handleWorkerCmd(connection: Connection, raw: unknown): Promise<void> {
-    const parsed = WorkerCmdMessageSchema.safeParse(raw);
-    if (!parsed.success) {
-      this.sendError(connection, "bad_request", "invalid worker_cmd");
-      return;
-    }
-    const cmd = parsed.data;
-    const state = connection.state as unknown as ConnState | null;
-    if (state?.viewingWorkerId !== cmd.workerId) {
-      this.sendError(connection, "forbidden", `subscribe to ${cmd.workerId} before sending worker_cmd`, cmd.id);
-      return;
-    }
-    this.sql`INSERT OR REPLACE INTO web_cmd_relay (cmdId, webConnId, createdAt) VALUES (${cmd.id}, ${connection.id}, ${Date.now()})`;
-    const outcome =
-      cmd.kind === "send"
-        ? await this.dispatcher.sendToWorker({
-            workerId: cmd.workerId,
-            text: cmd.args?.text ?? "",
-            intent: cmd.args?.intent ?? "auto",
-            provenance: "web_direct",
-            cmdId: cmd.id,
-          })
-        : await this.dispatcher.interruptWorker({
-            workerId: cmd.workerId,
-            ...(cmd.args?.then !== undefined ? { then: cmd.args.then } : {}),
-            provenance: "web_direct",
-            cmdId: cmd.id,
-          });
-    if (outcome.kind === "refused") {
-      // Never reached `outbox` (unknown/broken worker, empty text): no cmd_ack is ever
-      // coming, so answer directly instead of leaving the browser waiting.
-      this.sql`DELETE FROM web_cmd_relay WHERE cmdId = ${cmd.id}`;
-      this.sendError(connection, "bad_request", outcome.reason, cmd.id);
-    }
-  }
-
-  /** Forwards a real cmd_ack/cmd_result to the browser that issued a web-direct worker_cmd, if
-   *  any is waiting; `terminal` clears the relay row (the command will not answer again). */
-  private relayWebCmd(cmdId: string, payload: unknown, terminal: boolean): void {
-    const relay = this.sql<{ webConnId: string }>`SELECT webConnId FROM web_cmd_relay WHERE cmdId = ${cmdId}`[0];
-    if (!relay) return;
-    this.getConnection(relay.webConnId)?.send(JSON.stringify(payload));
-    if (terminal) this.sql`DELETE FROM web_cmd_relay WHERE cmdId = ${cmdId}`;
-  }
-
-  /** Alarm-driven §6.6 termination: relays older than the TTL disappear, browser or not. */
+  /** Alarm-driven §6.6 termination: relays older than the TTL disappear, browser or not.
+   *  Delegates to HistorySubscriptions; kept here because the Agents SDK alarm fires it by
+   *  callback name. */
   async sweepHistoryRelays(): Promise<void> {
-    this.relaySweepAt = 0;
-    this.sql`DELETE FROM history_relay WHERE expiresAt <= ${Date.now()}`;
-    const next = this.sql<{ m: number | null }>`SELECT MIN(expiresAt) AS m FROM history_relay`[0]?.m;
-    if (typeof next === "number") {
-      const delayS = Math.max(1, Math.ceil((next - Date.now()) / 1000));
-      this.relaySweepAt = Date.now() + delayS * 1000;
-      void this.schedule(delayS, "sweepHistoryRelays");
-    }
+    this.historySubs.sweepHistoryRelays();
   }
 
   private async handleHello(connection: Connection, raw: unknown): Promise<void> {
@@ -2069,7 +1725,7 @@ export class Steward extends Agent<Env> {
     if (!row || row.deviceId !== deviceId) return;
     if (ack.status === "accepted") {
       this.sql`UPDATE outbox SET state = 'accepted' WHERE cmdId = ${ack.re} AND state IN ('sent', 'queued')`;
-      this.relayWebCmd(ack.re, ack, false);
+      this.historySubs.relayWebCmd(ack.re, ack, false);
     } else if (ack.status === "duplicate") {
       if (ack.result) {
         if (row.kind === "register_repo") return this.settleDirectoryRegistration(row, ack.result);
@@ -2077,10 +1733,10 @@ export class Steward extends Agent<Env> {
           UPDATE outbox SET state = ${ack.result.ok ? "done" : "failed"}, result = ${JSON.stringify(ack.result)}
           WHERE cmdId = ${ack.re}
         `;
-        this.relayWebCmd(ack.re, ack, true);
+        this.historySubs.relayWebCmd(ack.re, ack, true);
       } else {
         this.sql`UPDATE outbox SET state = 'accepted' WHERE cmdId = ${ack.re} AND state IN ('sent', 'queued')`;
-        this.relayWebCmd(ack.re, ack, false);
+        this.historySubs.relayWebCmd(ack.re, ack, false);
       }
     } else if (ack.status === "rejected") {
       if (row.kind === "register_repo") return this.settleDirectoryRegistration(row, { ok: false, error: { code: ack.code ?? "registration_failed" } });
@@ -2089,13 +1745,13 @@ export class Steward extends Agent<Env> {
         WHERE cmdId = ${ack.re}
       `;
       this.noteCommandFailure(ack.re, `连接器拒绝（${ack.code ?? "未知原因"}）`);
-      this.relayWebCmd(ack.re, ack, true);
+      this.historySubs.relayWebCmd(ack.re, ack, true);
     } else if (ack.status === "ambiguous") {
       // protocol §4.2: a crash during `sending`, undecidable — no automatic re-send. The row
       // is marked ambiguous; #15 wakes the steward to ask, except pr_worker rows, which the
       // consent gate answers deterministically (issue #21).
       this.markCommandAmbiguous(ack.re, "cmd_ack");
-      this.relayWebCmd(ack.re, ack, true);
+      this.historySubs.relayWebCmd(ack.re, ack, true);
     }
   }
 
@@ -2111,7 +1767,7 @@ export class Steward extends Agent<Env> {
       UPDATE outbox SET state = ${result.ok ? "done" : "failed"}, result = ${JSON.stringify(result.ok ? result.data ?? null : result.error ?? null)}
       WHERE cmdId = ${result.re}
     `;
-    this.relayWebCmd(result.re, result, true);
+    this.historySubs.relayWebCmd(result.re, result, true);
     if (result.ok) {
       // Review finding 4 (#57): a pr_worker settles with the URL even when its pr_created
       // event was lost (the connector's emit raced a shutdown). This backstop delivers the
@@ -2908,7 +2564,7 @@ export class Steward extends Agent<Env> {
         this.sql`UPDATE outbox SET state = 'failed', failReason = 'ack_timeout' WHERE cmdId = ${row.cmdId}`;
         // §6.8: a web-direct command that never got an ack at all — the browser would
         // otherwise wait forever with no feedback.
-        this.relayWebCmd(row.cmdId, { t: "cmd_result", re: row.cmdId, ok: false, error: { code: "ack_timeout" } }, true);
+        this.historySubs.relayWebCmd(row.cmdId, { t: "cmd_result", re: row.cmdId, ok: false, error: { code: "ack_timeout" } }, true);
       } else if (!this.deliver(row.cmdId)) {
         // Deadline passed and there is no live connection (deliver refused): park the row back
         // in `queued` for redelivery at the next hello. Leaving it `sent` would hot-loop the
