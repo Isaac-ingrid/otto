@@ -3484,7 +3484,7 @@ export class Steward extends Agent<Env> {
    * Idempotent on the browser's request id, and the answer is kept, so a retried tap replays the
    * verdict instead of aborting a turn the owner has since started.
    */
-  private async stopTurn(input: { id: string }): Promise<TurnStopResult> {
+  async stopTurn(input: { id: string }): Promise<TurnStopResult> {
     const key = `stop:${input.id}`;
     const previous = this.ledger.webRequests.get(key);
     if (previous?.status === "done") return JSON.parse(previous.payload) as TurnStopResult;
