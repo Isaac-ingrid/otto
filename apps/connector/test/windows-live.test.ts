@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { getServiceInstaller, OTTO_LABEL, WINDOWS_RUN_KEY, type ServiceSpec } from "../src/service.ts";
 import { LocalStore } from "../src/store.ts";
+import { VERSION } from "../src/version.ts";
 
 const run = promisify(execFile);
 const live = process.platform === "win32" && process.env.OTTO_WIN_LIVE_INSTALL === "1";
@@ -208,7 +209,7 @@ describe.runIf(live)("`otto install` on the real machine", () => {
     expect(existsSync(launcher)).toBe(true);
     // The service runs *this* package: installing it also wrote the versioned pi assets, or the
     // daemon would come up and fail every worker.
-    expect(existsSync(join(stateDir, "ext", "otto-pi-0.2.0.ts"))).toBe(true);
+    expect(existsSync(join(stateDir, "ext", `otto-pi-${VERSION}.ts`))).toBe(true);
     expect(await runValueFromRegistry()).toBe(`${process.env.SystemRoot}\\System32\\wscript.exe "${launcher}"`);
     // The hint a hidden autostart owes its owner (ADR-0018 decision 12) and where the credential
     // came from, so the command is honest about what it just did.
