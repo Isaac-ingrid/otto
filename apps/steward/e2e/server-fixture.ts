@@ -7,7 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { Steward } from "../src/steward.ts";
 import type { Ledger } from "../src/ledger.ts";
-import type { PrWatchService } from "../src/pr-watch.ts";
+import type { PrWatchDeps, PrWatchService } from "../src/pr-watch.ts";
+import type { PrEvidenceMode } from "../src/pr-evidence.ts";
+import { installLoopbackFetchGuard } from "./network-guard.ts";
 import type { PrWatchApprovals } from "../src/pr-watch-approval.ts";
 
 let loaderRegistered = false;
@@ -38,6 +40,7 @@ export interface BrowserTestServer {
   readonly ledger: Ledger;
   readonly prWatches: PrWatchService;
   readonly prWatchApprovals: PrWatchApprovals;
+  readonly evidenceReads: Array<{ url: string; mode: PrEvidenceMode }>;
   scriptModel(...steps: unknown[]): Promise<void>;
   streamRepliesAt(tokensPerSecond: number | undefined): Promise<void>;
   advanceApprovalClock(offsetMs: number): void;
@@ -46,6 +49,16 @@ export interface BrowserTestServer {
 }
 
 export async function startBrowserTestServer(): Promise<BrowserTestServer> {
+  const network = installLoopbackFetchGuard();
+  try {
+    return await createBrowserTestServer(network);
+  } catch (error) {
+    network.restore();
+    throw error;
+  }
+}
+
+async function createBrowserTestServer(network: ReturnType<typeof installLoopbackFetchGuard>): Promise<BrowserTestServer> {
   ensureCloudflareLoader();
 
   const { installGlobals } = await import("../node-host/globals.ts");
@@ -91,7 +104,6 @@ export async function startBrowserTestServer(): Promise<BrowserTestServer> {
   // biome-ignore lint/suspicious/noExplicitAny: SDK constructor type is not exported
   stewardInstance = new (StewardClass as any)(state, env) as Steward;
   const runtime = new HostRuntime(state, stewardInstance as never, { tickMs: 25 });
-  runtime.start();
 
   const server = await startServer({
     runtime: runtime as never,
@@ -116,10 +128,21 @@ export async function startBrowserTestServer(): Promise<BrowserTestServer> {
     fauxStreamAt(tokensPerSecond: number | undefined): Promise<void>;
   };
 
+  // Install before the alarm loop starts: crossing a cron boundary must still be
+  // deterministic and offline. Keep the real service, transactions and notifications.
+  const evidenceReads: BrowserTestServer["evidenceReads"] = [];
+  const watchDeps = (internal.prWatches as unknown as { deps: PrWatchDeps }).deps;
+  watchDeps.read = async (target, mode) => {
+    evidenceReads.push({ url: target.url, mode });
+    return { ok: true, evidence: { head: "a".repeat(40), state: "waiting", checks: 1, pending: 1, failed: 0 } };
+  };
+  runtime.start();
+
   return {
     baseUrl,
     port,
     loginSecret,
+    evidenceReads,
     steward: stewardInstance,
     runtime: {
       getWebSockets() {
@@ -150,12 +173,17 @@ export async function startBrowserTestServer(): Promise<BrowserTestServer> {
       await (stewardInstance as unknown as { submitWorkspaceAction(i: typeof input): Promise<void> }).submitWorkspaceAction(input);
     },
     async close() {
-      await runtime.stop();
-      if (typeof server.closeAllConnections === "function") server.closeAllConnections();
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-      await new Promise((r) => setTimeout(r, 25));
-      db.close();
-      await rm(dir, { recursive: true, force: true });
+      try {
+        await runtime.stop();
+        if (typeof server.closeAllConnections === "function") server.closeAllConnections();
+        await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+        await new Promise((r) => setTimeout(r, 25));
+        db.close();
+        await rm(dir, { recursive: true, force: true });
+      } finally {
+        network.restore();
+        network.assertIsolated();
+      }
     },
   };
 }

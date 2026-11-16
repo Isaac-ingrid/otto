@@ -53,16 +53,18 @@ function toHeaders(request: IncomingMessage): Headers {
 export async function readBody(request: IncomingMessage, maxBytes = MAX_NODE_HTTP_BODY_BYTES): Promise<Buffer | undefined> {
   const contentLength = Number(request.headers["content-length"]);
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    request.destroy();
+    request.pause();
     throw new BodyTooLargeError();
   }
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  for await (const chunk of request) {
+  // The default async iterator destroys the socket when the loop throws. Keep it
+  // open long enough for startServer to send 413, then close via Connection: close.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBuffer);
     totalBytes += buf.byteLength;
     if (totalBytes > maxBytes) {
-      request.destroy();
+      request.pause();
       throw new BodyTooLargeError();
     }
     chunks.push(buf);
@@ -157,8 +159,7 @@ export function startServer(options: HostServerOptions): Promise<Server> {
         sockets.handleUpgrade(incoming, socket, head, (ws) => attach(ws, serverEnd, options.runtime, clientEnd));
       } catch (error) {
         if (error instanceof BodyTooLargeError) {
-          socket.write("HTTP/1.1 413 Payload Too Large\r\nconnection: close\r\n\r\n");
-          socket.destroy();
+          socket.end("HTTP/1.1 413 Payload Too Large\r\nconnection: close\r\n\r\n");
           return;
         }
         console.error("[node-host] upgrade failed", error);

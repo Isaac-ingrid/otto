@@ -46,6 +46,37 @@ export class EventLog {
     }
   }
 
+  /** Replace an undeliverable event with an explicit failure at the SAME sequence number.
+   * The original stays in a machine-local archive after ack; archive + replacement commit
+   * together, so a crash cannot lose the evidence or leave a gap in cumulative acks. */
+  quarantine(event: StoredEvent, maxMessageBytes: number): StoredEvent {
+    const original = JSON.parse(event.payload) as { ts: number; type: string };
+    const originalType = String(original.type).slice(0, 80);
+    const payload = JSON.stringify({
+      workerId: event.workerId,
+      seq: event.seq,
+      ts: original.ts,
+      type: "broken",
+      code: "event_too_large",
+      originalType,
+      originalBytes: Buffer.byteLength(event.payload, "utf8"),
+      maxMessageBytes,
+      reason: `连接器无法上传 ${originalType} 事件：超过消息大小上限，未确认该事件的结果。完整事件保存在本机 connector.sqlite 的 event_oversize 表；请检查本机会话记录。`,
+    });
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("INSERT OR IGNORE INTO event_oversize (workerId, seq, payload, createdAt) VALUES (?, ?, ?, ?)")
+        .run(event.workerId, event.seq, event.payload, Date.now());
+      this.db.prepare("UPDATE event SET payload = ? WHERE workerId = ? AND seq = ?")
+        .run(payload, event.workerId, event.seq);
+      this.db.exec("COMMIT");
+      return { ...event, payload };
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   nextSeq(workerId: string): number {
     const row = this.db.prepare("SELECT nextSeq FROM worker_seq WHERE workerId = ?").get(workerId) as
       | { nextSeq: number }

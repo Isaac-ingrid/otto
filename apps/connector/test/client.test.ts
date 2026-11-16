@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { CloseCode, HelloMessageSchema } from "@isaac2ingrid/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectorClient } from "../src/client.ts";
+import { EventLog } from "../src/events.ts";
 import { LocalStore } from "../src/store.ts";
 
 class FakeWebSocket extends EventEmitter {
@@ -199,6 +200,57 @@ describe("ConnectorClient", () => {
     client.start();
     FakeWebSocket.instances[0]!.simulateClose(code);
     expect(store.getCredentials()).not.toBeNull();
+  });
+
+  it("meters complete event frames in UTF-8 bytes, including the envelope", () => {
+    vi.useFakeTimers();
+    const client = new ConnectorClient({ store, WebSocketImpl: FakeWebSocket as never, batchMs: 10 });
+    client.start();
+    const ws = FakeWebSocket.instances[0]!;
+    ws.simulateOpen();
+    ws.simulateMessage({ t: "welcome", acks: {}, limits: { maxMessageBytes: 64 * 1024 } });
+    for (let i = 0; i < 4; i++) client.emit("w_utf8", { type: "progress", target: "中".repeat(12_000) });
+    vi.advanceTimersByTime(100);
+    const frames = ws.sent.filter((frame) => JSON.parse(frame).t === "events");
+    expect(frames).toHaveLength(4);
+    for (const frame of frames) expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(frames.flatMap((frame) => JSON.parse(frame).batch.map((event: { seq: number }) => event.seq))).toEqual([1, 2, 3, 4]);
+    client.stop();
+  });
+
+  it("quarantines an oversized persisted event and replays an explicit failure at the same seq", () => {
+    vi.useFakeTimers();
+    const log = new EventLog(store.database);
+    const original = log.append("w_large", { type: "report", status: "done", summary: "中".repeat(100_000) });
+    const client = new ConnectorClient({ store, WebSocketImpl: FakeWebSocket as never, batchMs: 10, minBackoffMs: 10 });
+    client.start();
+    let ws = FakeWebSocket.instances[0]!;
+    ws.simulateOpen();
+    ws.simulateMessage({ t: "welcome", acks: {}, limits: { maxMessageBytes: 262_144 } });
+    client.emit("w_large", { type: "settled", outcome: "reported" });
+    vi.advanceTimersByTime(30);
+    const firstFrame = ws.sent.find((frame) => JSON.parse(frame).t === "events")!;
+    expect(Buffer.byteLength(firstFrame, "utf8")).toBeLessThanOrEqual(262_144);
+    const firstBatch = JSON.parse(firstFrame).batch;
+    expect(firstBatch[0]).toMatchObject({ workerId: "w_large", seq: 1, type: "broken", code: "event_too_large", originalType: "report" });
+    expect(firstBatch[0].reason).toContain("event_oversize");
+    expect(firstBatch[1]).toMatchObject({ seq: 2, type: "settled" });
+    const archived = store.database.prepare("SELECT payload FROM event_oversize WHERE workerId = ? AND seq = ?").get("w_large", 1) as { payload: string };
+    expect(archived.payload).toBe(original.payload);
+
+    ws.simulateClose(1006);
+    vi.advanceTimersByTime(20);
+    ws = FakeWebSocket.instances[1]!;
+    ws.simulateOpen();
+    ws.simulateMessage({ t: "welcome", acks: {}, limits: { maxMessageBytes: 262_144 } });
+    vi.advanceTimersByTime(20);
+    const replay = ws.sent.find((frame) => JSON.parse(frame).t === "events")!;
+    expect(JSON.parse(replay).batch).toEqual(firstBatch);
+    ws.simulateMessage({ t: "events_ack", workerId: "w_large", upTo: 2 });
+    expect(log.pending("w_large")).toHaveLength(0);
+    expect(store.database.prepare("SELECT payload FROM event_oversize").get()).toEqual(archived);
+    expect(client.emit("w_large", { type: "progress" })).toBe(3);
+    client.stop();
   });
 
   it("stop() closes the socket and suppresses reconnection", () => {

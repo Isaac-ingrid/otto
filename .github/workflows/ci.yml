@@ -34,7 +34,7 @@ jobs:
       - run: pnpm --filter @isaac2ingrid/steward typecheck:node-host
       - run: pnpm -r test
       # The Node host's canonical-origin, client-IP, body-limit, and PR-watch regressions use its own in-process SQLite harness.
-      - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts node-host/testing/body-limit.test.ts test/pr-evidence.test.ts test/pr-watch.test.ts test/pr-watch-api.test.ts test/pr-watch-tools.test.ts test/pr-watch-intent.test.ts test/pr-watch-approval.test.ts
+      - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts node-host/testing/body-limit.test.ts node-host/testing/browser-network.test.ts test/pr-evidence.test.ts test/pr-watch.test.ts test/pr-watch-api.test.ts test/pr-watch-tools.test.ts test/pr-watch-intent.test.ts test/pr-watch-approval.test.ts
       # Scripted faux model + real ledger; no credentials or network, any trust leak fails.
       - run: pnpm --filter @isaac2ingrid/steward eval:memory
       # Deterministic routing selftest; no credentials or model calls.
@@ -105,4 +105,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @isaac2ingrid/steward typecheck:node-host
-      - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts test/e2e-loop.test.ts test/turn-stop.test.ts test/crash-window.test.ts test/owner-api-boundaries.test.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts node-host/testing/body-limit.test.ts
+      - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts test/e2e-loop.test.ts test/turn-stop.test.ts test/crash-window.test.ts test/owner-api-boundaries.test.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts node-host/testing/body-limit.test.ts node-host/testing/browser-network.test.ts

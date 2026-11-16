@@ -59,6 +59,15 @@ export class LocalStore {
       createdAt INTEGER NOT NULL,
       PRIMARY KEY (workerId, seq)
     )`);
+    // Transport failures retain their original payload locally, even after the bounded
+    // failure notice is acknowledged. Never delete an oversized event to skip its seq.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS event_oversize (
+      workerId TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      PRIMARY KEY (workerId, seq)
+    )`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS worker_seq (
       workerId TEXT PRIMARY KEY,
       nextSeq INTEGER NOT NULL DEFAULT 1,

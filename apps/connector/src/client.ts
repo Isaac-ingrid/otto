@@ -222,8 +222,9 @@ export class ConnectorClient {
       case "welcome": {
         this.backoffMs = this.minBackoffMs;
         const welcome = message as unknown as WelcomeMessage;
-        if (typeof welcome.limits?.maxMessageBytes === "number" && welcome.limits.maxMessageBytes > 0) {
-          this.maxMessageBytes = welcome.limits.maxMessageBytes;
+        const advertisedMax = welcome.limits?.maxMessageBytes;
+        if (Number.isSafeInteger(advertisedMax) && advertisedMax >= 1024) {
+          this.maxMessageBytes = Math.min(advertisedMax, DEFAULT_MAX_MESSAGE_BYTES);
         }
         // SERVER_KEY rotation (issue #27): a welcome carrying `token` means the connection
         // authenticated with a key the steward is rotating away from; persist the fresh
@@ -411,18 +412,32 @@ export class ConnectorClient {
   private flush(): void {
     const ws = this.ws;
     if (!ws || ws.readyState !== this.WebSocketImpl.OPEN) return; // stays queued; retried after welcome
-    const maxBatchBytes = Math.max(1024, Math.min(this.batchBytes, this.maxMessageBytes - 1024));
+    const id = ulid();
+    const envelopeBytes = Buffer.byteLength(JSON.stringify({ t: "events", id, batch: [] }), "utf8");
+    const maxBatchBytes = Math.min(this.batchBytes, this.maxMessageBytes);
     const batch: StoredEvent[] = [];
-    let bytes = 0;
+    let bytes = envelopeBytes;
     while (this.sendQueue.length > 0 && batch.length < this.batchEvents) {
-      const next = this.sendQueue[0]!;
-      const size = next.payload.length;
-      if (batch.length > 0 && bytes + size > maxBatchBytes) break;
+      let next = this.sendQueue[0]!;
+      let size = Buffer.byteLength(next.payload, "utf8");
+      if (envelopeBytes + size > this.maxMessageBytes) {
+        next = this.events.quarantine(next, this.maxMessageBytes);
+        this.sendQueue[0] = next;
+        size = Buffer.byteLength(next.payload, "utf8");
+      }
+      // Even a failure notice must fit: unusual oversized identities must not restart
+      // the poison-event loop. Keep it durable and surface the refusal locally instead.
+      if (envelopeBytes + size > this.maxMessageBytes) {
+        console.error("[otto] event failure notice exceeds transport limit; event retained locally");
+        break;
+      }
+      const nextBytes = bytes + size + (batch.length > 0 ? 1 : 0); // JSON array comma
+      if (batch.length > 0 && nextBytes > maxBatchBytes) break;
       batch.push(this.sendQueue.shift()!);
-      bytes += size;
+      bytes = nextBytes;
     }
     if (batch.length === 0) return;
-    this.send(ws, { t: "events", id: ulid(), batch: batch.map((e) => JSON.parse(e.payload)) });
+    this.send(ws, { t: "events", id, batch: batch.map((e) => JSON.parse(e.payload)) });
     if (this.sendQueue.length > 0) this.scheduleFlush();
   }
 

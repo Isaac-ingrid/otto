@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectorClient } from "../src/client.ts";
 import { EventLog } from "../src/events.ts";
 import { LocalStore } from "../src/store.ts";
@@ -72,6 +72,31 @@ describe("EventLog (durable log, persisted seqs)", () => {
     expect(log.ackedUpTo("w1")).toBe(2);
   });
 
+  it("keeps the quarantine and replacement across a store restart, retaining originals after ack", () => {
+    let log = new EventLog(store.database);
+    const original = log.append("w_archive", { type: "report", summary: "x".repeat(270_000) });
+    const failure = log.quarantine(original, 262_144);
+    store.close();
+    store = new LocalStore(dbPath);
+    log = new EventLog(store.database);
+    expect(log.pending("w_archive")).toEqual([failure]);
+    log.truncate("w_archive", 1);
+    expect(log.pending("w_archive")).toHaveLength(0);
+    expect(store.database.prepare("SELECT payload FROM event_oversize WHERE workerId = ? AND seq = ?").get("w_archive", 1))
+      .toEqual({ payload: original.payload });
+    expect(log.append("w_archive", { type: "settled" }).seq).toBe(2);
+  });
+
+  it("rolls back quarantine evidence when replacement persistence fails", () => {
+    const log = new EventLog(store.database);
+    const original = log.append("w_rollback", { type: "report", summary: "x".repeat(270_000) });
+    store.database.exec("CREATE TRIGGER fail_event_update BEFORE UPDATE ON event BEGIN SELECT RAISE(ABORT, 'injected persistence failure'); END");
+    expect(() => log.quarantine(original, 262_144)).toThrow("injected persistence failure");
+    expect(log.pending("w_rollback")).toEqual([original]);
+    expect(store.database.prepare("SELECT COUNT(*) AS n FROM event_oversize").get()).toEqual({ n: 0 });
+    expect(log.nextSeq("w_rollback")).toBe(2);
+  });
+
   it("rangeAvailable flags evicted history as a gap instead of pretending to replay it", () => {
     const log = new EventLog(store.database);
     for (let i = 1; i <= 3; i++) log.append("w1", { type: "progress" });
@@ -85,6 +110,31 @@ describe("EventLog (durable log, persisted seqs)", () => {
 });
 
 describe("event delivery over the client", () => {
+  it("delivers an oversized event as a bounded failure across a real payload-limited socket and reconnect", async () => {
+    const log = new EventLog(store.database);
+    const original = log.append("w_large", { type: "report", status: "done", summary: "中".repeat(100_000) });
+    log.append("w_large", { type: "settled", outcome: "reported" });
+    mock.setSwallowAcks(true);
+    const client = connectClient();
+    try {
+      await vi.waitFor(() => expect(mock.events()).toHaveLength(2));
+      const first = mock.events().slice();
+      expect(first[0]).toMatchObject({ seq: 1, type: "broken", code: "event_too_large" });
+      expect(first[1]).toMatchObject({ seq: 2, type: "settled" });
+      expect(mock.upgrades()).toBe(1);
+      mock.setSwallowAcks(false);
+      mock.dropConn();
+      await mock.waitHello(2);
+      await vi.waitFor(() => expect(log.pending("w_large")).toHaveLength(0));
+      expect(mock.events()).toEqual([...first, ...first]);
+      expect(mock.upgrades()).toBe(2);
+      const archived = store.database.prepare("SELECT payload FROM event_oversize WHERE workerId = ? AND seq = ?").get("w_large", 1) as { payload: string };
+      expect(archived.payload).toBe(original.payload);
+    } finally {
+      client.stop();
+    }
+  });
+
   it("batches emitted events, truncates on events_ack, and replays only unacked after a dropped connection", async () => {
     const client = connectClient();
     await mock.waitConnected();

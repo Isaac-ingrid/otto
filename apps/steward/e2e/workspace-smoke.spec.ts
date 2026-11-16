@@ -7,6 +7,7 @@ let browser: Browser;
 let context: BrowserContext;
 let page: Page;
 let server: BrowserTestServer;
+let blockedBrowserRequests: string[] = [];
 
 test.beforeAll(async () => {
   browser = await chromium.launch({
@@ -14,6 +15,12 @@ test.beforeAll(async () => {
     args: process.platform === "darwin" ? ["--single-process", "--no-zygote", "--no-sandbox"] : [],
   });
   context = await browser.newContext();
+  await context.route("**/*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin === server?.baseUrl) return route.continue();
+    blockedBrowserRequests.push(`${url.origin}${url.pathname}`);
+    await route.abort("blockedbyclient");
+  });
   await context.addInitScript(() => {
     try {
       localStorage.setItem("otto.setup.securitySkipped", "true");
@@ -29,6 +36,7 @@ test.afterAll(async () => {
 });
 
 test.beforeEach(async () => {
+  blockedBrowserRequests = [];
   server = await startBrowserTestServer();
   await context.clearCookies();
 });
@@ -36,6 +44,7 @@ test.beforeEach(async () => {
 test.afterEach(async () => {
   await page.goto("about:blank").catch(() => {});
   if (server) await server.close();
+  expect(blockedBrowserRequests).toEqual([]);
 });
 
 async function signInToWorkspace(page: Page, srv: BrowserTestServer): Promise<void> {
@@ -123,6 +132,12 @@ test.describe("Workspace browser smoke suite", () => {
     await expect.poll(() => server.prWatches.list().filter((w) => w.status === "active").length).toBe(1);
     await expect(page.locator("#feed")).toContainText("已确认此 PR 跟进");
     await expect(confirmBtn).toHaveCount(0);
+
+    // Exercise the actual polling callback, not just creation. No wall-clock cron
+    // boundary or public GitHub response may decide this browser test's result.
+    await server.steward.pollPrWatches();
+    expect(server.evidenceReads).toContainEqual({ url: prUrl, mode: "statuses-only" });
+    expect(server.prWatches.list()[0]).toMatchObject({ status: "active", observedState: "waiting", lastError: null });
 
     await expect(server.submitWorkspaceActionForTest({ id: "stale-replay-attempt-01", cardId: cardId!, action: action! })).rejects.toMatchObject({
       code: "already_handled",

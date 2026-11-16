@@ -18,7 +18,7 @@
     "build:node": "node scripts/build-node.mjs",
     "dev:node": "node scripts/build-node.mjs && node dist/node/steward-node.mjs",
     "start:node": "node dist/node/steward-node.mjs",
-    "typecheck:node-host": "tsc -p tsconfig.node-host.json",
+    "typecheck:node-host": "wrangler types --config ../../wrangler.jsonc worker-configuration.d.ts && tsc -p tsconfig.node-host.json",
     "test:browser": "playwright test --project=chromium"
   },
   "dependencies": {

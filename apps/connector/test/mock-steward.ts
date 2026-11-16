@@ -62,7 +62,8 @@ export function startMockSteward(): MockSteward {
     res.writeHead(404);
     res.end("mock steward");
   });
-  const wss = new WebSocketServer({ noServer: true });
+  // Exercise the production per-frame ceiling, not ws's permissive default.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 262_144 });
 
   server.on("upgrade", (req, socket, head) => {
     upgradeCount++;
@@ -77,6 +78,7 @@ export function startMockSteward(): MockSteward {
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       conn = ws;
+      ws.on("error", () => {}); // protocol/payload failures close the socket; tests assert recovery
       for (const frame of offlineQueue.splice(0)) ws.send(JSON.stringify(frame));
       ws.on("message", (data) => {
         const m = JSON.parse(String(data)) as Record<string, unknown>;

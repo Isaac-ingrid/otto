@@ -188,6 +188,30 @@ describe("the reducer: derived state, unread, notification intents (steward.md �
     expect(card).toContain("凭据");
   });
 
+  it("an oversized-report failure cannot become a success when the worker later settles reported", async () => {
+    const { ws, reader } = await connectMachine();
+    try {
+      const workerId = await dispatchAndAwaitWorker(reader, "检查超限汇报");
+      await sendEvents(ws, [
+        event(workerId, 1, { type: "started", sessionId: workerId }),
+        event(workerId, 2, { type: "broken", code: "event_too_large", originalType: "report", reason: "汇报超限；完整事件保存在本机 event_oversize 表，未确认结果。" }),
+        event(workerId, 3, { type: "settled", outcome: "reported" }),
+      ]);
+      const snap = await snapshotWhere((s) => s.threads[0]?.workers[0]?.state === "idle", "failure then settle reduced");
+      expect(snap.threads[0]!.workers[0]!.lastOutcome).toBe("broken");
+      expect(snap.threads[0]!.state).toBe("waiting_you");
+      expect(snap.threads[0]!.questions[0]).toMatchObject({ status: "open", kind: "failure" });
+      expect(snap.threads[0]!.questions[0]!.text).toContain("event_oversize");
+      expect(snap.threads[0]!.timeline.filter((entry) => entry.kind === "report")).toHaveLength(0);
+      await waitWhileOutboundPending();
+      const cards = JSON.stringify(await cardPayloads());
+      expect(cards).toContain("event_oversize");
+      expect(cards).not.toContain("✅");
+    } finally {
+      ws.close();
+    }
+  });
+
   it("re-delivered batches apply exactly once (idempotent per workerId+seq, protocol §4.3)", async () => {
     const { ws, reader } = await connectMachine();
     const workerId = await dispatchAndAwaitWorker(reader, "修个分页");
