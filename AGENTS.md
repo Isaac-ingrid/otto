@@ -26,9 +26,18 @@ Four packages: `apps/steward` (the Worker/Durable Object plus `node-host/`), `ap
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
-### Verification pilot
+### Autonomous verification selection
 
-Use `.agents/skills/verify-otto/SKILL.md` for reproducible browser/transport checks and retained evidence. `formal/README.md` maps the bounded event-delivery TLA+ model to real code and regressions. For covered protocol changes, run the normal code tests plus `node scripts/verification/run-tla.mjs` (including both required negative controls). A TLC pass verifies the finite model, not TypeScript refinement or production behavior. Do not weaken invariants, fairness assumptions, or acceptance tests to make a candidate pass; intentional policy changes need separate owner review.
+The agent owns verification selection and execution; do not require the user to name a skill or choose test commands for routine coding work. Select checks from the actual behavioral impact and dependencies, not just changed filenames.
+
+- **Before editing**, identify affected behavior, invariants and existing coverage. After editing, autonomously run the relevant local, credentials-free checks with existing tools. Choose the smallest sufficient set, expanding for shared code or cross-layer changes; this does not waive ordinary tests, typechecks, ADR evaluation gates or required CI checks.
+- **Conversation, PR confirmation or event delivery**: read `.agents/skills/verify-otto/SKILL.md` and run the affected feature checks with retained evidence. Run `all` when multiple covered areas or their shared dependencies are affected, not for every unrelated edit.
+- **Persistence, ack, replay, deduplication, oversized-event handling or crash/reconnect ordering**: inspect the mapping in `formal/README.md`. For changes covered by the event-delivery model, run the relevant implementation regressions plus `node scripts/verification/run-tla.mjs`, including both required negative controls. A TLC pass verifies the finite model, not TypeScript refinement or production behavior.
+- **Pure prose or cosmetic changes**: use relevant documentation or UI checks; do not run TLC by default. Changes to a behavioral contract, model, assumptions or verification tooling are not automatically low-risk merely because they are outside runtime code.
+- **Coverage gaps or blocked checks**: add focused regression coverage for new or changed behavior where feasible. Do not present unrelated passing tests or a non-applicable model as verification. Report missing prerequisites and blockers; do not silently skip, retry until green, or substitute a production instance.
+- **Report completion**: state why the checks were selected, what actually ran and passed/failed, where evidence is retained when applicable, and what remains unverified. A proposed command or a previous run against different inputs is not a current result.
+
+Autonomy applies to choosing and running safe checks, not changing acceptance criteria or granting operational permission. Do not weaken invariants, fairness assumptions or assertions to make a candidate pass; intentional policy changes need separate owner review. Paid model calls, real external-service operations, production access, deployment, commits, pushes and multi-agent launches still require authorization for the current task. Verification itself grants none of these permissions.
 
 ### Windows working copies
 

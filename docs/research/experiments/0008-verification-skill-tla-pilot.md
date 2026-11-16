@@ -90,6 +90,24 @@ event/archive/reconnect regression over a real payload-limited socket. These are
 known fault classes, not newly discovered production incidents. Counterexamples are required to
 fail for their named properties; parser errors or timeouts cannot count as successful controls.
 
+## Publication and remote verification
+
+The pilot and prior reliability fixes were published in two commits: `47d6aa0` (repairs) and
+`b7c1220` (verification pilot). For `b7c1220`:
+
+- [CI run 43816581478](https://github.com/Isaac-ingrid/otto/actions/runs/43816581478) passed all three jobs:
+  Linux test (6m25s), Windows connector (2m22s), and Node 24 (51s).
+- [Model run 43816590150](https://github.com/Isaac-ingrid/otto/actions/runs/43816590150) passed in 17s;
+  its uploaded summary confirms baseline exit 0 / 1,545 states, ack control exit 12 / 21 states,
+  and poison control exit 13 / 494 states. The remote model evidence was downloaded locally.
+- Remote receipts and model artifacts are retained under
+  `.verification/evidence/publication-b7c1220/`; they establish results for that commit, not for
+  subsequent uncommitted guidance or documentation changes.
+
+No deployment, package publication, branch-protection change or production operation was performed.
+The autonomous verification-selection policy was subsequently added to local `AGENTS.md`; it is
+agent guidance, not a mandatory execution hook or proof that every future agent will comply.
+
 ## Limits and next decision
 
 This is not a full joined steward + connector + live coding-agent acceptance run, phone-push

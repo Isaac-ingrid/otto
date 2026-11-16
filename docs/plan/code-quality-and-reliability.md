@@ -47,6 +47,14 @@
 
 上述本地复核的限制：当时未测远端 GitHub Actions 的运行耗时，未执行 Linux connector 全套；Windows store 测试中的 POSIX `0600` 断言及其清理 `EPERM` 属已记录的环境限制，未修改或掩盖该断言。浏览器失败截图/trace 已配置，但未通过故障注入验收其产物。上述本地复核没有付费模型调用或部署；后续提交、推送与 CI 检查单独记录。
 
+### 后续提交与远端验收
+
+- `47d6aa0`：三项可靠性修复、网络隔离与独立 Node 宿主类型生成修正。
+- `b7c1220`：验证 skill、有限 TLA+ 模型、负控制及证据工具。
+- [普通 CI run 43816581478](https://github.com/Isaac-ingrid/otto/actions/runs/43816581478) 对 `b7c1220` 全部通过，包含 Linux 递归测试（含 connector 全套）、浏览器、评测、打包检查、Windows 平台子集及 Node 24 专项；先前仅本地验证的限制不再适用于该次远端结果。
+- [模型 run 43816590150](https://github.com/Isaac-ingrid/otto/actions/runs/43816590150) 对同一提交通过，耗时 17 秒；正常模型 1,545 个状态，两项负控制分别因预期的安全性与活性违规被拒绝。TLC 证据 artifact 已上传并下载留存。
+- 上述结果不验证未提交的指引/文档改动，不代表已部署、真实服务联合验收或异地备份恢复验收；浏览器故障产物的完整注入验收仍未完成。
+
 ## 审查依据与已纠正的旧结论
 
 前期报告包含未经核实的描述，不作为直接整改依据。基线代码核对结果：
@@ -222,7 +230,7 @@ Owner API 已有认证，反向代理也可能限制请求体，因此这些发�
 - [x] 保留现有 Node 22、workerd 和 Windows 验证。
 - [x] 检查测试运行器确实选择了目标运行时，修复 generated-auth 的 Node profile 选择。
 - [x] CI 保留 Node 24 专项覆盖；本地另外运行 Node/workerd 全套，不重复扩大 CI 套件。
-- [ ] 记录远端新增 CI 耗时（本次只测本地，未推送或读取新一轮 Actions 结果）。
+- [x] 记录远端新增 CI 耗时：`b7c1220` 的 [CI run 43816581478](https://github.com/Isaac-ingrid/otto/actions/runs/43816581478) 全部通过；Node 24 51 秒，Windows connector 2 分 22 秒，Linux test 6 分 25 秒。
 
 Node 22/24 并非必须统一版本的缺陷；目标是验证承诺支持的运行环境。
 
