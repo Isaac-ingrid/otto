@@ -1074,4 +1074,33 @@ export const MIGRATIONS: readonly Migration[] = [
       )`;
     },
   },
+  {
+    id: "037_saved_model_enabled",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_saved_model ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`;
+      });
+    },
+  },
+  {
+    id: "038_provider_profiles",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_provider_profile (
+        profileId TEXT PRIMARY KEY,
+        dialect TEXT NOT NULL,
+        name TEXT NOT NULL,
+        baseUrl TEXT,
+        headersEnc TEXT,
+        apiKeyEnc TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        updatedAt INTEGER NOT NULL
+      )`;
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_model ADD COLUMN dialect TEXT`;
+      });
+      sql`INSERT OR IGNORE INTO sh_provider_profile (profileId, dialect, name, apiKeyEnc, enabled, updatedAt)
+        SELECT provider, provider, provider, apiKeyEnc, 1, updatedAt FROM sh_provider_key`;
+      sql`UPDATE sh_model SET dialect = provider WHERE dialect IS NULL`;
+    },
+  },
 ];

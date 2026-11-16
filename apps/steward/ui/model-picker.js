@@ -1,5 +1,15 @@
 import { h, icon } from './dom.js';
 import { t } from './i18n.js';
+import { formatContextWindow } from './model.js';
+
+function capabilityBadges(model) {
+  const badges = [];
+  if (model.vision) badges.push(h('span', { class: 'model-badge' }, t('badgeVision')));
+  if (model.reasoning) badges.push(h('span', { class: 'model-badge' }, t('badgeReasoning')));
+  const ctx = formatContextWindow(model.contextWindow);
+  if (ctx) badges.push(h('span', { class: 'model-badge' }, ctx));
+  return badges.length ? h('span', { class: 'model-badges' }, badges) : null;
+}
 
 /** A bounded, searchable choice list; native buttons keep pointer and keyboard behavior equal. */
 export function modelPicker(models, selected, onSelect, options = {}) {
@@ -28,7 +38,7 @@ export function modelPicker(models, selected, onSelect, options = {}) {
       rows.push(h('button', {
         type: 'button', class: 'model-option', 'aria-pressed': String(model.id === selected), dataset: { model: model.id },
         onclick: () => { panel.hidePopover(); onSelect(model.id); },
-      }, h('span', null, h('strong', null, model.name), searchable && !model.group && model.name !== model.id ? h('small', null, model.id) : null), model.id === selected ? icon('check') : null));
+      }, h('span', null, h('span', { class: 'model-option-title' }, h('strong', null, model.name), capabilityBadges(model)), searchable && !model.group && model.name !== model.id ? h('small', null, model.id) : null), model.id === selected ? icon('check') : null));
     }
     results.replaceChildren(...rows);
     if (!matches.length) results.append(h('p', { class: 'model-no-results' }, t('modelNoMatches')));

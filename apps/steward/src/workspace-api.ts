@@ -49,6 +49,9 @@ export interface WorkspaceApiDeps {
    * "fix a rejected key" flow stays the same single form). */
   saveModel?(input: ModelSwitchInput): Promise<ModelSaveResult>;
   selectModel?(input: ComposerModelInput): Promise<unknown>;
+  setModelEnabled?(input: { provider: string; modelId: string; enabled: boolean }): Promise<{ ok: true }>;
+  setProfileEnabled?(input: { profileId: string; enabled: boolean }): Promise<{ ok: true }>;
+  deleteProfile?(input: { profileId: string }): Promise<{ ok: true }>;
   testModel?(input: ModelSwitchInput): Promise<ConnectionTestResult>;
   importModels?(input: ModelSwitchInput): Promise<{ models: { id: string; name: string }[] }>; 
   pairing?(id: string): Promise<{ code: string; expiresAt: number }>;
@@ -153,9 +156,11 @@ function parseAction(body: Record<string, unknown>): WorkspaceActionInput {
  *  together — switching provider always needs a new key, and re-submitting the same
  *  provider/modelId still reseals the key (the "fix a rejected key" flow is this same form). */
 function parseModelSwitch(body: Record<string, unknown>): ModelSwitchInput {
-  const { provider, modelId, apiKey, baseUrl, thinkingLevel, headers, importedModelIds, thinkingJson, autoTest } = body;
+  const { provider, dialect, profileName, modelId, apiKey, baseUrl, thinkingLevel, headers, importedModelIds, thinkingJson, autoTest } = body;
   if (thinkingLevel !== undefined && !isThinkingLevel(thinkingLevel)) throw new WorkspaceError("bad_request");
   if (typeof provider !== "string" || !provider.trim() || provider.length > 128) throw new WorkspaceError("bad_request");
+  if (dialect !== undefined && (typeof dialect !== "string" || !dialect.trim() || dialect.length > 128)) throw new WorkspaceError("bad_request");
+  if (profileName !== undefined && (typeof profileName !== "string" || profileName.length > 128)) throw new WorkspaceError("bad_request");
   if (typeof modelId !== "string" || !modelId.trim() || modelId.length > 256) throw new WorkspaceError("bad_request");
   if (apiKey !== undefined && (typeof apiKey !== "string" || apiKey.length > 8192)) throw new WorkspaceError("bad_request");
   if (baseUrl !== undefined && (typeof baseUrl !== "string" || baseUrl.length > 2048)) throw new WorkspaceError("bad_request");
@@ -181,6 +186,8 @@ function parseModelSwitch(body: Record<string, unknown>): ModelSwitchInput {
   } else if (thinkingJson === null) declaration = null;
   return {
     provider: provider.trim(),
+    ...(typeof dialect === "string" && dialect.trim() ? { dialect: dialect.trim() } : {}),
+    ...(typeof profileName === "string" && profileName.trim() ? { profileName: profileName.trim() } : {}),
     ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
     modelId: modelId.trim(),
     ...(typeof apiKey === "string" && apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
@@ -250,6 +257,29 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     }
     if (url.pathname === "/app/api/settings/model/test" && deps.testModel) {
       return json(await deps.testModel(parseModelSwitch(await readJson(request))));
+    }
+    if (url.pathname === "/app/api/settings/model/toggle" && deps.setModelEnabled) {
+      const { provider, modelId, enabled } = await readJson(request);
+      if (typeof provider !== "string" || !provider.trim() || provider.length > 128 ||
+          typeof modelId !== "string" || !modelId.trim() || modelId.length > 256 ||
+          typeof enabled !== "boolean") {
+        throw new WorkspaceError("bad_request");
+      }
+      return json(await deps.setModelEnabled({ provider: provider.trim(), modelId: modelId.trim(), enabled }));
+    }
+    if (url.pathname === "/app/api/settings/model/profile/toggle" && deps.setProfileEnabled) {
+      const { profileId, enabled } = await readJson(request);
+      if (typeof profileId !== "string" || !profileId.trim() || profileId.length > 128 || typeof enabled !== "boolean") {
+        throw new WorkspaceError("bad_request");
+      }
+      return json(await deps.setProfileEnabled({ profileId: profileId.trim(), enabled }));
+    }
+    if (url.pathname === "/app/api/settings/model/profile/delete" && deps.deleteProfile) {
+      const { profileId } = await readJson(request);
+      if (typeof profileId !== "string" || !profileId.trim() || profileId.length > 128) {
+        throw new WorkspaceError("bad_request");
+      }
+      return json(await deps.deleteProfile({ profileId: profileId.trim() }));
     }
     if (url.pathname === "/app/api/settings/model" && deps.saveModel) {
       return json(await deps.saveModel(parseModelSwitch(await readJson(request))));

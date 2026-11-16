@@ -139,3 +139,19 @@ export function thinkingAfterModelChange(model, current = 'off') {
 export function availableChatModels(settings) {
   return (settings?.providers ?? []).filter((provider) => settings.keyedProviders.includes(provider.id));
 }
+
+/** Whether a model is enabled in savedModels (defaults to true when not explicitly disabled). */
+export function isModelEnabled(savedModels, provider, modelId) {
+  const entry = (savedModels ?? []).find((item) => item.provider === provider && item.modelId === modelId);
+  return entry ? entry.enabled !== false : true;
+}
+
+/** Compact context window badge label (e.g. 128K, 1M). */
+export function formatContextWindow(tokens) {
+  if (!Number.isFinite(tokens) || tokens <= 0) return null;
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  return `${Math.round(tokens / 1000)}K`;
+}

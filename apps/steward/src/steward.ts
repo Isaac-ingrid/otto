@@ -487,8 +487,10 @@ export class Steward extends Agent<Env> {
     const sealed = await this.modelConfig();
     const vars = this.modelVarsConfig;
     const config = mergeModelSelection(sealed, vars);
+    const dialect = config.dialect ?? this.modelConfigStore.dialectFor(config.provider);
+    if (dialect !== config.provider) config.dialect = dialect;
     config.headers = await this.modelConfigStore.headersFor(config.provider, config.modelId);
-    if (config.provider === "openai-compatible" && config.baseUrl) {
+    if (dialect === "openai-compatible" && config.baseUrl) {
       // Only something actually known may override the stored level: a measured probe, or the
       // owner's own declaration. With neither, the level they picked from the (unverified) list
       // is what goes on the wire — a silent rewrite to "auto" would look like a failed switch.
@@ -758,6 +760,7 @@ export class Steward extends Agent<Env> {
           passkeys: this.web.listPasskeys(),
           push: this.push.settings(),
           providers: providerCatalog(),
+          profiles: this.modelConfigStore.profiles(),
           keyedProviders: await this.keyedProviders(),
           savedModels: this.modelConfigStore.savedModels().map((entry) => ({ ...entry, thinkingLevels: declaredThinkingLevels(entry.thinkingJson) ?? null })),
           verifiedModels: await this.modelConfigStore.verifiedModels(),
@@ -772,14 +775,18 @@ export class Steward extends Agent<Env> {
             this.testingModel = false;
           }
         },
-        importModels: async (input) => importProviderModels({ ...input, headers: input.headers ?? await this.modelConfigStore.headersFor(input.provider, input.modelId) }, input.apiKey || await this.modelConfigStore.sealedKeyFor(input.provider) || undefined),
+        importModels: async (input) => {
+          const dialect = input.dialect ?? this.modelConfigStore.dialectFor(input.provider);
+          const baseUrl = input.baseUrl || this.modelConfigStore.profileById(input.provider)?.baseUrl || undefined;
+          return importProviderModels({ ...input, dialect, ...(baseUrl ? { baseUrl } : {}), headers: input.headers ?? await this.modelConfigStore.headersFor(input.provider, input.modelId) }, input.apiKey || await this.modelConfigStore.sealedKeyFor(input.provider) || undefined);
+        },
         saveModel: async (input) => {
-          await this.setModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel, input.headers, input.thinkingJson);
+          await this.setModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel, input.headers, input.thinkingJson, input.dialect, input.profileName);
           for (const id of input.importedModelIds ?? []) this.sql`
-            INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, updatedAt)
-            VALUES (${input.provider}, ${id}, ${input.baseUrl ?? null}, ${input.headers ? await sealSecret((await this.serverKeys())[0]!, JSON.stringify(input.headers)) : null}, ${Date.now()})
+            INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, enabled, updatedAt)
+            VALUES (${input.provider}, ${id}, ${input.baseUrl ?? null}, ${input.headers ? await sealSecret((await this.serverKeys())[0]!, JSON.stringify(input.headers)) : null}, 1, ${Date.now()})
             ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
-              headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc), updatedAt = excluded.updatedAt
+              headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc), enabled = 1, updatedAt = excluded.updatedAt
           `;
           // A save is where an owner expects the endpoint to be checked (there is no separate
           // "verify" chore). Cached results are reused, so re-saving without changing the key
@@ -796,6 +803,22 @@ export class Steward extends Agent<Env> {
           }
         },
         selectModel: (input) => this.selectComposerModel(input),
+        setModelEnabled: async (input) => {
+          if (!this.modelConfigStore.setModelEnabled(input.provider, input.modelId, input.enabled)) {
+            throw new WorkspaceError("not_found", 404);
+          }
+          return { ok: true };
+        },
+        setProfileEnabled: async (input) => {
+          if (!this.modelConfigStore.setProfileEnabled(input.profileId, input.enabled)) {
+            throw new WorkspaceError("not_found", 404);
+          }
+          return { ok: true };
+        },
+        deleteProfile: async (input) => {
+          this.modelConfigStore.deleteProfile(input.profileId);
+          return { ok: true };
+        },
         pairing: (id: string) => this.webPairing(id),
         revoke: (id: string) => { this.logChannel("web_machine_revoked", id); void this.revoke(id); },
         addDirectory: (input) => this.connectorProto.addMachineDirectory(input),
@@ -2434,11 +2457,11 @@ export class Steward extends Agent<Env> {
     }));
   }
 
-  async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null): Promise<void> {
-    return this.modelConfigStore.setModelConfig(provider, apiKey, modelId, baseUrl, thinkingLevel, headers, thinkingJson);
+  async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null, dialect?: string, profileName?: string): Promise<void> {
+    return this.modelConfigStore.setModelConfig(provider, apiKey, modelId, baseUrl, thinkingLevel, headers, thinkingJson, dialect, profileName);
   }
 
-  async modelConfig(): Promise<{ provider: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: StewardThinkingLevel } | null> {
+  async modelConfig(): Promise<{ provider: string; dialect?: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: StewardThinkingLevel } | null> {
     return this.modelConfigStore.modelConfig();
   }
 
@@ -2449,6 +2472,7 @@ export class Steward extends Agent<Env> {
 
   async llmSelection(varsRaw?: unknown): Promise<{
     provider: string;
+    dialect?: string;
     modelId: string;
     baseUrl: string | null;
     explicitVars: boolean;
@@ -2474,12 +2498,14 @@ export class Steward extends Agent<Env> {
     const store = this.modelConfigStore;
     const current = mergeModelSelection(await store.modelConfig(), resolveModelConfig(this.env.STEWARD_MODEL));
     const saved = store.savedModels().find((entry) => entry.provider === input.provider && entry.modelId === input.modelId);
-    const baseUrl = saved?.baseUrl ?? (current.provider === input.provider && current.modelId === input.modelId ? current.baseUrl : undefined);
-    const model = resolveCatalogModel({ provider: input.provider, modelId: input.modelId, baseUrl, explicit: true });
-    if (!model || !(await store.sealedKeyFor(input.provider))) throw new WorkspaceError("model_not_available");
+    const profile = store.profileById(input.provider);
+    const dialect = store.dialectFor(input.provider);
+    const baseUrl = saved?.baseUrl ?? profile?.baseUrl ?? (current.provider === input.provider && current.modelId === input.modelId ? current.baseUrl : undefined);
+    const model = resolveCatalogModel({ provider: input.provider, ...(dialect !== input.provider ? { dialect } : {}), modelId: input.modelId, baseUrl, explicit: true });
+    if (!model || !(await store.sealedKeyFor(input.provider)) || !store.isProfileEnabled(input.provider)) throw new WorkspaceError("model_not_available");
     const accepted = await store.thinkingLevelsFor(input.provider, input.modelId, baseUrl);
-    if (input.provider === "openai-compatible" && input.thinkingLevel !== "auto" && accepted && !accepted.includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
-    if (input.provider !== "openai-compatible" && !getSupportedThinkingLevels(model).includes(input.thinkingLevel as ModelThinkingLevel)) throw new WorkspaceError("thinking_not_supported");
+    if (dialect === "openai-compatible" && input.thinkingLevel !== "auto" && accepted && !accepted.includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
+    if (dialect !== "openai-compatible" && !getSupportedThinkingLevels(model).includes(input.thinkingLevel as ModelThinkingLevel)) throw new WorkspaceError("thinking_not_supported");
     if (await this.piHarness.session().busy()) throw new WorkspaceError("model_busy", 409);
     // The endpoint rides along: setModelConfig writes what it is given, so passing undefined
     // here would drop a gateway deployment's baseUrl and re-point it at the vendor's own API

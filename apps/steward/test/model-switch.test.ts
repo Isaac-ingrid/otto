@@ -20,6 +20,7 @@ async function clearModelRow(): Promise<void> {
   await runInDurableObject(ownerStub(), (instance: Steward) => {
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_model`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_provider_key`;
+    (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_provider_profile`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_saved_model`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_verified_model`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_model_thinking_probe`;
@@ -333,5 +334,119 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     expect((await post("settings/model", { provider: "anthropic", apiKey: "sk-1" })).status).toBe(400);
     expect((await post("settings/model", { provider: "", modelId: "claude-x", apiKey: "sk-1" })).status).toBe(400);
     expect((await post("settings/model", { provider: "anthropic", modelId: "claude-x", apiKey: 5 })).status).toBe(400);
+  });
+
+  it("exposes catalog model capabilities and toggles savedModels enabled state", async () => {
+    const { post, settings } = await browser();
+    await post("settings/model", { provider: "deepseek", modelId: "deepseek-flash", apiKey: "sk-ds" });
+    const initial = (await (await settings()).json()) as {
+      providers: Array<{ id: string; models: Array<{ id: string; reasoning: boolean; vision: boolean; contextWindow: number }> }>;
+      savedModels: Array<{ provider: string; modelId: string; enabled: boolean }>;
+    };
+    const flash = initial.providers.find((p) => p.id === "deepseek")?.models.find((m) => m.id === "deepseek-flash");
+    expect(flash).toMatchObject({ reasoning: expect.any(Boolean), vision: expect.any(Boolean), contextWindow: expect.any(Number) });
+    expect(initial.savedModels.find((m) => m.provider === "deepseek" && m.modelId === "deepseek-flash")?.enabled).toBe(true);
+
+    expect((await post("settings/model/toggle", { provider: "deepseek", modelId: "deepseek-flash", enabled: false })).status).toBe(200);
+    const disabled = (await (await settings()).json()) as { savedModels: Array<{ provider: string; modelId: string; enabled: boolean }> };
+    expect(disabled.savedModels.find((m) => m.provider === "deepseek" && m.modelId === "deepseek-flash")?.enabled).toBe(false);
+
+    expect((await post("settings/model/toggle", { provider: "deepseek", modelId: "non-existent", enabled: false })).status).toBe(404);
+    expect((await post("settings/model/toggle", { provider: "deepseek", modelId: "deepseek-flash", enabled: "yes" })).status).toBe(400);
+  });
+
+  it("supports multiple provider profiles sharing the same dialect, plus toggle and delete guards (P1)", async () => {
+    const { post, settings } = await browser();
+
+    const r1 = await post("settings/model", {
+      provider: "prof_relay1",
+      dialect: "openai-compatible",
+      profileName: "Relay One",
+      modelId: "model-alpha",
+      apiKey: "sk-relay-1",
+      baseUrl: "https://relay1.example/v1",
+      thinkingLevel: "auto",
+    });
+    expect(r1.status).toBe(200);
+
+    const r2 = await post("settings/model", {
+      provider: "prof_relay2",
+      dialect: "openai-compatible",
+      profileName: "Relay Two",
+      modelId: "model-beta",
+      apiKey: "sk-relay-2",
+      baseUrl: "https://relay2.example/v1",
+      thinkingLevel: "auto",
+    });
+    expect(r2.status).toBe(200);
+
+    const s1 = (await (await settings()).json()) as {
+      model: { provider: string; dialect?: string; profileName?: string; modelId: string; baseUrl: string | null };
+      profiles: Array<{ profileId: string; name: string; dialect: string; baseUrl: string | null; enabled: boolean }>;
+      keyedProviders: string[];
+    };
+    expect(s1.model).toMatchObject({
+      provider: "prof_relay2",
+      dialect: "openai-compatible",
+      modelId: "model-beta",
+      baseUrl: "https://relay2.example/v1",
+    });
+    expect(s1.keyedProviders).toEqual(expect.arrayContaining(["prof_relay1", "prof_relay2"]));
+    expect(s1.profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ profileId: "prof_relay1", name: "Relay One", dialect: "openai-compatible", baseUrl: "https://relay1.example/v1", enabled: true }),
+      expect.objectContaining({ profileId: "prof_relay2", name: "Relay Two", dialect: "openai-compatible", baseUrl: "https://relay2.example/v1", enabled: true }),
+    ]));
+
+    // Independent verifiedModels / thinkingProbes per profile
+    const d1 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(["sk-relay-1", []])))), (b) => b.toString(16).padStart(2, "0")).join("");
+    await runInDurableObject(ownerStub(), (instance: Steward) => {
+      (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_verified_model (provider, modelId, baseUrl, credentialHash, verifiedAt) VALUES ('prof_relay1', 'model-alpha', 'https://relay1.example/v1', ${d1}, 1)`;
+      (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt) VALUES ('prof_relay1', 'model-alpha', 'https://relay1.example/v1', ${d1}, '["low","high"]', 1)`;
+    });
+    const sVerified = (await (await settings()).json()) as {
+      verifiedModels: Array<{ provider: string; modelId: string }>;
+      thinkingProbes: Array<{ provider: string; modelId: string; acceptedLevels: string[] }>;
+    };
+    expect(sVerified.verifiedModels).toEqual([{ provider: "prof_relay1", modelId: "model-alpha" }]);
+    expect(sVerified.thinkingProbes).toEqual([{ provider: "prof_relay1", modelId: "model-alpha", acceptedLevels: ["low", "high"] }]);
+
+    // Switch back to prof_relay1 without re-entering API key or baseUrl
+    const sw1 = await post("settings/model/selection", { provider: "prof_relay1", modelId: "model-alpha", thinkingLevel: "high" });
+    expect(sw1.status).toBe(200);
+    expect(await ownerStub().modelConfig()).toMatchObject({
+      provider: "prof_relay1",
+      dialect: "openai-compatible",
+      modelId: "model-alpha",
+      baseUrl: "https://relay1.example/v1",
+      apiKey: "sk-relay-1",
+    });
+
+    // Switch back to prof_relay2, then disable prof_relay1
+    expect((await post("settings/model/selection", { provider: "prof_relay2", modelId: "model-beta", thinkingLevel: "auto" })).status).toBe(200);
+    expect((await post("settings/model/profile/toggle", { profileId: "prof_relay1", enabled: false })).status).toBe(200);
+    const sDisabled = (await (await settings()).json()) as { keyedProviders: string[] };
+    expect(sDisabled.keyedProviders).not.toContain("prof_relay1");
+    expect((await post("settings/model/selection", { provider: "prof_relay1", modelId: "model-alpha", thinkingLevel: "auto" })).status).toBe(400);
+
+    // Re-enable prof_relay1
+    expect((await post("settings/model/profile/toggle", { profileId: "prof_relay1", enabled: true })).status).toBe(200);
+    expect(((await (await settings()).json()) as { keyedProviders: string[] }).keyedProviders).toContain("prof_relay1");
+
+    // Cannot delete active profile (prof_relay2)
+    const delActive = await post("settings/model/profile/delete", { profileId: "prof_relay2" });
+    expect(delActive.status).toBe(409);
+    expect(await delActive.json()).toEqual({ error: "active_profile" });
+
+    // Can delete inactive profile (prof_relay1)
+    const delInactive = await post("settings/model/profile/delete", { profileId: "prof_relay1" });
+    expect(delInactive.status).toBe(200);
+    const sAfterDelete = (await (await settings()).json()) as {
+      profiles: Array<{ profileId: string }>;
+      keyedProviders: string[];
+      savedModels: Array<{ provider: string }>;
+    };
+    expect(sAfterDelete.profiles.some((p) => p.profileId === "prof_relay1")).toBe(false);
+    expect(sAfterDelete.keyedProviders).not.toContain("prof_relay1");
+    expect(sAfterDelete.savedModels.some((m) => m.provider === "prof_relay1")).toBe(false);
   });
 });

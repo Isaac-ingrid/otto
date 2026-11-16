@@ -7,7 +7,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
-import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
+import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, formatContextWindow, groupByDay, groupThreads, isModelEnabled, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -404,6 +404,15 @@ describe("composer model choices", () => {
     expect(thinkingAfterModelChange(model, "max")).toBe("max");
     expect(thinkingAfterModelChange(model, "low")).toBe("off");
     expect(thinkingAfterModelChange({ thinkingLevels: ["high"], defaultThinkingLevel: "high" }, "off")).toBe("high");
+  });
+  it("checks saved model enabled status and formats context windows", () => {
+    const saved = [{ provider: "deepseek", modelId: "deepseek-flash", enabled: false }, { provider: "openai", modelId: "gpt-5", enabled: true }];
+    expect(isModelEnabled(saved, "deepseek", "deepseek-flash")).toBe(false);
+    expect(isModelEnabled(saved, "openai", "gpt-5")).toBe(true);
+    expect(isModelEnabled(saved, "anthropic", "claude-sonnet")).toBe(true);
+    expect(formatContextWindow(1_000_000)).toBe("1M");
+    expect(formatContextWindow(128_000)).toBe("128K");
+    expect(formatContextWindow(0)).toBeNull();
   });
 });
 

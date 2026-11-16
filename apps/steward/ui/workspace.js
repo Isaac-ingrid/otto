@@ -14,7 +14,7 @@ import { markup } from './markup.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
-  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
+  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, formatContextWindow, groupByDay, groupThreads, isActiveWorker, isModelEnabled, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -53,6 +53,10 @@ const state = {
   pushNotice: null, // i18n key of the last push result, shown inside the dialog the toast cannot reach
   pushQuiet: true,
   changingModel: false,
+  pendingModelSwitch: null, // queued { provider, modelId, thinkingLevel } while a reply is in flight
+  togglingModel: null, // `${provider}:${modelId}` while toggling enabled state
+  togglingProfile: null, // profileId while toggling enabled state
+  deletingProfile: null, // profileId while deleting
   stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
 
@@ -438,23 +442,49 @@ function providerChoiceName(provider) {
   return [info?.familyName ?? provider.name, info?.plan ? t(`providerPlan_${info.plan}`) : '', info?.region ? t(`providerRegion_${info.region}`) : ''].filter(Boolean).join(' · ');
 }
 
+const profileFor = (id) => (state.settings?.profiles ?? []).find((entry) => entry.profileId === id) ?? null;
+const dialectFor = (id) => profileFor(id)?.dialect || (state.settings?.model?.provider === id ? state.settings?.model?.dialect : null) || id;
+const profileEnabled = (id) => { const p = profileFor(id); return p ? p.enabled !== false : true; };
+const profileGroupName = (id) => {
+  const p = profileFor(id);
+  if (p?.name) return p.name;
+  const catalog = (state.settings?.providers ?? []).find((entry) => entry.id === dialectFor(id));
+  return catalog ? providerChoiceName(catalog) : id;
+};
+
 function renderComposerModels() {
   const node = $('#composer-model-controls');
   const model = state.settings?.model;
-  const busy = state.changingModel || working();
-  redraw('composer-model', [getLocale(), state.settings, busy], () => {
+  const busy = state.changingModel;
+  redraw('composer-model', [getLocale(), state.settings, busy, state.pendingModelSwitch], () => {
     if (!model?.apiKey) { node.replaceChildren(); return; }
     const verified = (provider, modelId) => (state.settings.verifiedModels ?? []).some((entry) => entry.provider === provider && entry.modelId === modelId);
-    const entries = availableChatModels(state.settings).flatMap((provider) => provider.models.filter((entry) => verified(provider.id, entry.id)).map((entry) => ({
-      ...entry, id: JSON.stringify([provider.id, entry.id]), modelId: entry.id, provider: provider.id, group: providerChoiceName(provider),
+    const savedModels = state.settings.savedModels ?? [];
+    const entries = availableChatModels(state.settings).filter((provider) => profileEnabled(provider.id)).flatMap((provider) => provider.models.filter((entry) => verified(provider.id, entry.id) && isModelEnabled(savedModels, provider.id, entry.id)).map((entry) => ({
+      ...entry, id: JSON.stringify([provider.id, entry.id]), modelId: entry.id, provider: provider.id, group: profileGroupName(provider.id),
     })));
-    for (const saved of state.settings.savedModels ?? []) {
-      if (!verified(saved.provider, saved.modelId) || entries.some((entry) => entry.provider === saved.provider && entry.modelId === saved.modelId)) continue;
-      entries.push({ id: JSON.stringify([saved.provider, saved.modelId]), modelId: saved.modelId, provider: saved.provider, name: saved.modelId, group: saved.provider, thinkingLevels: saved.provider === 'openai-compatible' ? compatibleThinkingLevels(saved.provider, saved.modelId) : saved.provider === model.provider && saved.modelId === model.modelId ? model.thinkingLevels : ['off'] });
+    for (const profile of (state.settings.profiles ?? [])) {
+      if (profile.enabled === false || profile.profileId === profile.dialect) continue;
+      const catalog = (state.settings.providers ?? []).find((entry) => entry.id === profile.dialect);
+      if (!catalog) continue;
+      for (const entry of catalog.models) {
+        if (!verified(profile.profileId, entry.id) || !isModelEnabled(savedModels, profile.profileId, entry.id)) continue;
+        if (entries.some((item) => item.provider === profile.profileId && item.modelId === entry.id)) continue;
+        entries.push({ ...entry, id: JSON.stringify([profile.profileId, entry.id]), modelId: entry.id, provider: profile.profileId, group: profile.name || profile.profileId });
+      }
     }
-    if (!entries.some((entry) => entry.provider === model.provider && entry.modelId === model.modelId)) entries.unshift({ id: JSON.stringify([model.provider, model.modelId]), modelId: model.modelId, provider: model.provider, name: model.modelId, group: model.provider, thinkingLevels: model.thinkingLevels });
+    for (const saved of savedModels) {
+      if (saved.enabled === false || !profileEnabled(saved.provider) || !verified(saved.provider, saved.modelId) || entries.some((entry) => entry.provider === saved.provider && entry.modelId === saved.modelId)) continue;
+      const dialect = dialectFor(saved.provider);
+      entries.push({ id: JSON.stringify([saved.provider, saved.modelId]), modelId: saved.modelId, provider: saved.provider, name: saved.modelId, group: profileGroupName(saved.provider), thinkingLevels: dialect === 'openai-compatible' ? compatibleThinkingLevels(saved.provider, saved.modelId) : saved.provider === model.provider && saved.modelId === model.modelId ? model.thinkingLevels : ['off'] });
+    }
+    if (!entries.some((entry) => entry.provider === model.provider && entry.modelId === model.modelId)) {
+      const catalogModel = (state.settings.providers ?? []).find((p) => p.id === dialectFor(model.provider))?.models?.find((m) => m.id === model.modelId);
+      entries.unshift({ ...(catalogModel ?? {}), id: JSON.stringify([model.provider, model.modelId]), modelId: model.modelId, provider: model.provider, name: catalogModel?.name ?? model.modelId, group: profileGroupName(model.provider), thinkingLevels: model.thinkingLevels });
+    }
     const selected = entries.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId);
-    const levels = model.provider === 'openai-compatible' ? compatibleThinkingLevels(model.provider, model.modelId) : selected?.thinkingLevels ?? model.thinkingLevels;
+    const activeDialect = dialectFor(model.provider);
+    const levels = activeDialect === 'openai-compatible' ? compatibleThinkingLevels(model.provider, model.modelId) : selected?.thinkingLevels ?? model.thinkingLevels;
     const ready = Boolean(levels?.includes(model.thinkingLevel));
     node.replaceChildren(...[
       modelPicker(entries, selected?.id ?? model.modelId, (id) => {
@@ -465,12 +495,19 @@ function renderComposerModels() {
         void changeComposerModel({ provider: model.provider, modelId: model.modelId, thinkingLevel: level });
       }, { name: 'chat-thinking', compact: true, searchable: false, leadingIcon: 'memory', disabled: busy || levels.length < 2, label: `${t('thinkingTitle')}: ${t(`thinking_${model.thinkingLevel}`)}`, minWidth: 180 })
         : h('button', { type: 'button', class: 'model-picker-trigger model-choice-chip', disabled: busy, dataset: { action: 'retry-settings' } }, t('modelOptionsReload')),
-      state.changingModel ? h('span', { class: 'model-saving', role: 'status' }, t('modelSaving')) : null].filter(Boolean));
+      state.changingModel ? h('span', { class: 'model-saving', role: 'status' }, t('modelSaving'))
+        : state.pendingModelSwitch ? h('span', { class: 'model-saving', role: 'status' }, t('modelSwitchPending')) : null].filter(Boolean));
   });
 }
 
 async function changeComposerModel(input) {
-  if (state.changingModel || working()) return;
+  if (state.changingModel) return;
+  if (working()) {
+    state.pendingModelSwitch = input;
+    toast(t('modelSwitchQueued'));
+    renderComposer();
+    return;
+  }
   state.changingModel = true;
   renderComposer();
   $('#send-button').disabled = true;
@@ -480,11 +517,14 @@ async function changeComposerModel(input) {
       const adjusted = state.settings.model.thinkingLevel !== data.model.thinkingLevel && state.settings.model.modelId !== data.model.modelId;
       state.settings = { ...state.settings, model: data.model };
       if (adjusted) toast(t('thinkingAdjusted', { level: t(`thinking_${data.model.thinkingLevel}`) }));
+    } else if (status === 409) {
+      state.pendingModelSwitch = input;
+      toast(t('modelSwitchQueued'));
     } else if (status !== 401) {
       // The server's own code, when it gives one, turns "it did not switch" into something
       // actionable instead of a dead end.
       const code = typeof data?.error === 'string' && data.error ? ` (${data.error})` : '';
-      toast(status === 409 ? t('modelChangeBusy') : `${t('modelChangeFailed')}${code}`);
+      toast(`${t('modelChangeFailed')}${code}`);
     }
   } catch { toast(t('modelChangeFailed')); }
   finally {
@@ -871,13 +911,121 @@ function providerGrid() {
     h('span', { class: 'provider-mark' }, icon('plus')), h('span', { class: 'provider-name' }, t('modelCustomOption')), icon('chevron-right')));
 }
 
+function savedModelBadges(providerId, modelId) {
+  const dialect = dialectFor(providerId);
+  const entry = (state.settings?.providers ?? []).find((p) => p.id === dialect)?.models?.find((m) => m.id === modelId);
+  if (!entry) return null;
+  const badges = [];
+  if (entry.vision) badges.push(h('span', { class: 'model-badge' }, t('badgeVision')));
+  if (entry.reasoning) badges.push(h('span', { class: 'model-badge' }, t('badgeReasoning')));
+  const ctx = formatContextWindow(entry.contextWindow);
+  if (ctx) badges.push(h('span', { class: 'model-badge' }, ctx));
+  return badges.length ? h('span', { class: 'model-badges' }, badges) : null;
+}
+
+function savedModelsList() {
+  const saved = state.settings?.savedModels ?? [];
+  if (!saved.length) return null;
+  return h('div', { class: 'saved-models' },
+    h('h4', null, t('savedModelsTitle')),
+    saved.map((entry) => {
+      const enabled = entry.enabled !== false;
+      const key = `${entry.provider}:${entry.modelId}`;
+      return h('div', { class: 'saved-model-row' },
+        h('div', { class: 'saved-model-meta' },
+          h('strong', null, entry.modelId),
+          h('small', null, profileFor(entry.provider)?.name ?? entry.provider),
+          savedModelBadges(entry.provider, entry.modelId)),
+        h('button', {
+          type: 'button',
+          class: `button quiet${enabled ? '' : ' muted'}`,
+          disabled: state.togglingModel === key,
+          'aria-pressed': String(enabled),
+          dataset: { action: 'toggle-saved-model', provider: entry.provider, modelId: entry.modelId, enabled: String(!enabled) },
+        }, t(enabled ? 'modelEnabled' : 'modelDisabled')));
+    }));
+}
+
+function profilesList() {
+  const profiles = state.settings?.profiles ?? [];
+  const activeId = state.settings?.model?.provider;
+  return h('div', { class: 'saved-models' },
+    h('div', { class: 'profiles-header' },
+      h('h4', null, t('profilesTitle')),
+      h('button', { type: 'button', class: 'button quiet', dataset: { action: 'new-profile', focus: 'new-profile' } }, icon('plus'), t('profileAdd'))),
+    profiles.map((profile) => {
+      const enabled = profile.enabled !== false;
+      const isActive = profile.profileId === activeId;
+      return h('div', { class: 'saved-model-row' },
+        h('div', { class: 'saved-model-meta' },
+          h('strong', null, profile.name || profile.profileId),
+          h('small', null, [profile.dialect, profile.baseUrl].filter(Boolean).join(' · '))),
+        h('div', { class: 'profile-actions' },
+          h('button', { type: 'button', class: 'button quiet', dataset: { action: 'edit-profile', profileId: profile.profileId, focus: `edit-profile:${profile.profileId}` } }, t('profileEdit')),
+          h('button', {
+            type: 'button',
+            class: `button quiet${enabled ? '' : ' muted'}`,
+            disabled: state.togglingProfile === profile.profileId,
+            'aria-pressed': String(enabled),
+            dataset: { action: 'toggle-profile', profileId: profile.profileId, enabled: String(!enabled) },
+          }, t(enabled ? 'modelEnabled' : 'modelDisabled')),
+          h('button', {
+            type: 'button',
+            class: 'button quiet muted',
+            disabled: isActive || state.deletingProfile === profile.profileId,
+            title: isActive ? t('profileDeleteActive') : null,
+            dataset: { action: 'delete-profile', profileId: profile.profileId },
+          }, t('profileDelete'))));
+    }));
+}
+
+async function toggleProfile(profileId, enabled) {
+  if (state.togglingProfile === profileId) return;
+  state.togglingProfile = profileId;
+  bumpDialog();
+  try {
+    const { status } = await request('/app/api/settings/model/profile/toggle', { profileId, enabled });
+    if (status === 200) await loadSettings();
+    else if (status !== 401) toast(t('profileToggleFailed'));
+  } catch { toast(t('profileToggleFailed')); }
+  finally { state.togglingProfile = null; bumpDialog(); }
+}
+
+async function deleteProfile(profileId) {
+  if (state.deletingProfile === profileId) return;
+  state.deletingProfile = profileId;
+  bumpDialog();
+  try {
+    const { status, data } = await request('/app/api/settings/model/profile/delete', { profileId });
+    if (status === 200) await loadSettings();
+    else if (status === 409 && data?.error === 'active_profile') toast(t('profileDeleteActive'));
+    else if (status !== 401) toast(t('profileDeleteFailed'));
+  } catch { toast(t('profileDeleteFailed')); }
+  finally { state.deletingProfile = null; bumpDialog(); }
+}
+
+async function toggleSavedModel(provider, modelId, enabled) {
+  const key = `${provider}:${modelId}`;
+  if (state.togglingModel === key) return;
+  state.togglingModel = key;
+  bumpDialog();
+  try {
+    const { status } = await request('/app/api/settings/model/toggle', { provider, modelId, enabled });
+    if (status === 200) await loadSettings();
+    else if (status !== 401) toast(t('modelToggleFailed'));
+  } catch { toast(t('modelToggleFailed')); }
+  finally { state.togglingModel = null; bumpDialog(); }
+}
+
 function modelSection() {
   const model = state.settings.model;
   return h('section', { class: 'model-settings settings-section' },
     h('div', { class: 'section-heading' }, icon('sparkle'),
       h('div', null, h('h3', null, t('modelTitle')), h('p', { class: 'dialog-copy' }, t('providersHelp')))),
     model?.apiKey ? h('p', { class: 'active-model' }, h('span', { class: `status-dot${(state.settings.verifiedModels ?? []).some((entry) => entry.provider === model.provider && entry.modelId === model.modelId) ? ' green' : ''}` }), t((state.settings.verifiedModels ?? []).some((entry) => entry.provider === model.provider && entry.modelId === model.modelId) ? 'providerActive' : 'providerUnverified'), h('strong', null, model.modelId)) : null,
-    providerGrid());
+    providerGrid(),
+    profilesList(),
+    savedModelsList());
 }
 
 function pushSection() {
@@ -918,22 +1066,32 @@ function accountSection() {
 
 function providerSection() {
   const draft = state.modelDraft;
-  const provider = state.settings.providers.find((entry) => entry.id === draft.provider);
+  const dialect = draft.dialect || dialectFor(draft.provider);
+  const provider = state.settings.providers.find((entry) => entry.id === dialect);
+  const isCompat = dialect.endsWith('-compatible');
+  const isOpenAICompat = dialect === 'openai-compatible';
   const models = state.dialog.importedModels ?? provider?.models ?? [];
   const known = models.some((entry) => entry.id === draft.modelId);
   const keyed = state.settings.keyedProviders.includes(draft.provider);
-  const variants = provider?.info ? state.settings.providers.filter((entry) => entry.info?.family === provider.info.family) : [];
+  const variants = !draft.isNewProfile && draft.provider === dialect && provider?.info ? state.settings.providers.filter((entry) => entry.info?.family === provider.info.family) : [];
   const selectedModel = models.find((entry) => entry.id === draft.modelId);
   const declared = parseDeclaredLevels(draft.thinkingJson ?? '');
   const measured = state.dialog.acceptedThinkingLevels ?? measuredThinkingLevels(draft.provider, draft.modelId);
   const described = declared?.length ? declared : measured ?? null;
-  const thinkingLevels = draft.provider === 'openai-compatible' ? (described ? ['auto', ...described] : [...ALL_THINKING_LEVELS]) : (selectedModel?.thinkingLevels ?? ['off']);
+  const thinkingLevels = isOpenAICompat ? (described ? ['auto', ...described] : [...ALL_THINKING_LEVELS]) : (selectedModel?.thinkingLevels ?? ['off']);
   const busy = state.dialog.saving || state.dialog.testing;
   const link = (url, label) => h('a', { class: 'provider-link', href: url, target: '_blank', rel: 'noopener noreferrer' }, label, icon('external'));
   return h('form', { id: 'model-form', class: 'model-form provider-form' },
     h('div', { class: 'provider-intro' },
       h('p', { class: 'dialog-copy' }, t('providerConnectHelp')),
       provider?.info ? link(provider.info.consoleUrl, t('providerConsole')) : null),
+    draft.isNewProfile ? [
+      h('label', { for: 'model-profile-dialect' }, t('profileProtocolLabel')),
+      h('select', { id: 'model-profile-dialect' },
+        state.settings.providers.map((entry) => h('option', { value: entry.id, selected: dialect === entry.id }, entry.name || entry.id))),
+    ] : null,
+    h('label', { for: 'model-profile-name' }, t('profileNameLabel')),
+    h('input', { id: 'model-profile-name', maxlength: 128, autocomplete: 'off', placeholder: t('profileNamePlaceholder'), value: draft.profileName ?? '' }),
     variants.length > 1 ? [
       h('span', { id: 'provider-variant-label', class: 'field-label' }, t('providerVariant')),
       h('div', { class: 'provider-variants', role: 'group', 'aria-labelledby': 'provider-variant-label' }, variants.map((entry) =>
@@ -948,13 +1106,13 @@ function providerSection() {
       h('input', { id: 'model-key', type: state.dialog.showKey ? 'text' : 'password', autocomplete: 'off', spellcheck: 'false', required: !keyed, placeholder: t(keyed ? 'modelKeyKeep' : 'modelKeyPlaceholder'), value: draft.apiKey, dataset: { focus: 'model-key' } }),
       h('button', { type: 'button', class: 'button quiet', dataset: { action: 'toggle-key' }, 'aria-pressed': String(Boolean(state.dialog.showKey)) }, t(state.dialog.showKey ? 'keyHide' : 'keyShow'))),
     h('p', { class: 'dialog-hint' }, t('modelHelp')),
-    !provider?.id?.endsWith('-compatible') ? h('div', { class: 'provider-endpoint' }, h('span', null, t('providerEndpoint')),
+    !isCompat ? h('div', { class: 'provider-endpoint' }, h('span', null, t('providerEndpoint')),
       h('code', { id: 'provider-endpoint' }, draft.baseUrl.trim() || selectedModel?.baseUrl || t('providerEndpointUnknown'))) : null,
     h('label', { for: provider && !draft.customModel && (known || !draft.baseUrl) ? 'model-picker-trigger' : 'model-id-custom' }, t('modelIdLabel')),
     provider && !draft.customModel && (known || !draft.baseUrl) ? modelPicker([...models, { id: MODEL_CUSTOM, name: t('modelCustomOption') }], draft.modelId, (id) => {
       state.modelDraft.customModel = id === MODEL_CUSTOM;
       state.modelDraft.modelId = id === MODEL_CUSTOM ? '' : id;
-      state.modelDraft.thinkingLevel = draft.provider === 'openai-compatible' ? 'auto' : thinkingAfterModelChange(models.find((entry) => entry.id === id), state.modelDraft.thinkingLevel);
+      state.modelDraft.thinkingLevel = isOpenAICompat ? 'auto' : thinkingAfterModelChange(models.find((entry) => entry.id === id), state.modelDraft.thinkingLevel);
       state.dialog.acceptedThinkingLevels = null;
       state.dialog.test = null;
       bumpDialog();
@@ -963,16 +1121,16 @@ function providerSection() {
       !provider ? [h('label', { for: 'model-provider-custom' }, t('modelProviderLabel')),
         h('input', { id: 'model-provider-custom', required: true, autocomplete: 'off', value: draft.provider })] : null,
       h('input', { id: 'model-id-custom', required: true, autocomplete: 'off', placeholder: t('modelIdLabel'), value: draft.modelId }),
-      provider && !provider.id.endsWith('-compatible') ? h('button', { type: 'button', class: 'button quiet', dataset: { action: 'catalog-model' } }, t('setupBack')) : null,
+      provider && !isCompat ? h('button', { type: 'button', class: 'button quiet', dataset: { action: 'catalog-model' } }, t('setupBack')) : null,
     ],
     h('label', { for: 'model-base-url' }, t('modelBaseUrlLabel')),
-    h('input', { id: 'model-base-url', type: 'url', autocomplete: 'url', required: draft.provider.endsWith('-compatible'), placeholder: t('modelBaseUrlPlaceholder'), value: draft.baseUrl }),
-    draft.provider.endsWith('-compatible') ? [h('label', { for: 'model-api' }, t('modelApiLabel')),
+    h('input', { id: 'model-base-url', type: 'url', autocomplete: 'url', required: isCompat, placeholder: t('modelBaseUrlPlaceholder'), value: draft.baseUrl }),
+    isCompat ? [h('label', { for: 'model-api' }, t('modelApiLabel')),
       h('select', { id: 'model-api' }, [
-        h('option', { value: 'openai-compatible', selected: draft.provider === 'openai-compatible' }, 'openai-completions'),
-        h('option', { value: 'anthropic-compatible', selected: draft.provider === 'anthropic-compatible' }, 'anthropic-messages'),
+        h('option', { value: 'openai-compatible', selected: isOpenAICompat }, 'openai-completions'),
+        h('option', { value: 'anthropic-compatible', selected: dialect === 'anthropic-compatible' }, 'anthropic-messages'),
       ])] : null,
-    draft.provider.endsWith('-compatible') ? [h('label', { for: 'model-headers' }, t('modelHeadersLabel')),
+    isCompat ? [h('label', { for: 'model-headers' }, t('modelHeadersLabel')),
       h('textarea', { id: 'model-headers', rows: 3, placeholder: '{"X-Custom-Header":"value"}' }, draft.headersJson ?? ''),
       h('p', { class: 'dialog-hint' }, t('modelHeadersHelp')),
       h('button', { type: 'button', class: 'button quiet', disabled: busy, dataset: { action: 'import-models' } }, state.dialog.importing ? t('modelImporting') : t('modelImport')),
@@ -980,21 +1138,21 @@ function providerSection() {
       h('textarea', { id: 'model-levels-json', rows: 3, spellcheck: 'false', placeholder: '{"thinkingLevels":["minimal","low","medium","high"]}' }, draft.thinkingJson ?? ''),
       declared === undefined ? h('p', { class: 'dialog-error' }, t('modelLevelsInvalid')) : h('p', { class: 'dialog-hint' }, t('modelLevelsHelp'))] : null,
     state.dialog.importError ? h('p', { class: 'dialog-error' }, t('modelImportFailed')) : null,
-    provider && (selectedModel || draft.provider === 'openai-compatible') ? [h('label', { for: 'provider-thinking-picker-trigger' }, t('thinkingTitle')),
+    provider && (selectedModel || isOpenAICompat) ? [h('label', { for: 'provider-thinking-picker-trigger' }, t('thinkingTitle')),
       modelPicker(thinkingLevels.map((level) => ({ id: level, name: t(`thinking_${level}`) })), thinkingLevels.includes(draft.thinkingLevel) ? draft.thinkingLevel : thinkingLevels[0], (level) => {
         state.modelDraft.thinkingLevel = level;
         state.dialog.test = null;
         bumpDialog();
         $('#provider-thinking-picker-trigger').focus();
       }, { name: 'provider-thinking', searchable: false, label: t('thinkingTitle'), disabled: busy || thinkingLevels.length < 2 }),
-      draft.provider === 'openai-compatible' && !described ? h('p', { class: 'dialog-hint' }, t('thinkingUnverified')) : null,
+      isOpenAICompat && !described ? h('p', { class: 'dialog-hint' }, t('thinkingUnverified')) : null,
       h('p', { class: 'dialog-hint' }, t('thinkingHelp')),
     ] : null,
     provider && !known && !draft.baseUrl && !draft.customModel ? h('p', { class: 'dialog-hint' }, t('modelChooseKnown')) : null,
     h('div', { class: 'connection-test' },
       h('button', { type: 'button', class: 'button', disabled: busy, dataset: { action: 'test-model' } }, t(state.dialog.testing ? 'modelTesting' : 'modelTest')),
-      h('p', { class: 'dialog-hint' }, t(draft.provider === 'openai-compatible' ? 'modelTestProbeHelp' : 'modelTestHelp', { model: draft.modelId }))),
-    draft.provider === 'openai-compatible' ? h('label', { class: 'dialog-check' }, [
+      h('p', { class: 'dialog-hint' }, t(isOpenAICompat ? 'modelTestProbeHelp' : 'modelTestHelp', { model: draft.modelId }))),
+    isOpenAICompat ? h('label', { class: 'dialog-check' }, [
       h('input', { id: 'model-auto-test', type: 'checkbox', checked: state.dialog.autoTest !== false }),
       h('span', null, t('modelAutoTestLabel'))]) : null,
     h('p', { id: 'model-test-result', class: `connection-result${state.dialog.test?.ok ? ' success' : ' dialog-error'}`, role: 'status', 'aria-live': 'polite' },
@@ -1008,8 +1166,8 @@ function providerSection() {
 function selectProviderVariant(provider) {
   const current = state.settings.model;
   state.modelDraft = current?.provider === provider
-    ? { provider, modelId: current.modelId, baseUrl: current.baseUrl ?? '', apiKey: '', thinkingJson: savedThinkingJson(provider, current.modelId) }
-    : { provider, modelId: modelAfterProviderChange(state.settings.providers, provider, state.modelDraft.modelId) ?? '', baseUrl: '', apiKey: '', thinkingJson: '' };
+    ? { provider, dialect: provider, profileName: profileFor(provider)?.name ?? '', modelId: current.modelId, baseUrl: current.baseUrl ?? '', apiKey: '', thinkingJson: savedThinkingJson(provider, current.modelId) }
+    : { provider, dialect: provider, profileName: profileFor(provider)?.name ?? '', modelId: modelAfterProviderChange(state.settings.providers, provider, state.modelDraft.modelId) ?? '', baseUrl: profileFor(provider)?.baseUrl ?? '', apiKey: '', thinkingJson: '' };
   const selected = state.settings.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === state.modelDraft.modelId);
   state.modelDraft.customModel = provider.endsWith('-compatible') || Boolean(current?.provider === provider && !selected);
   state.modelDraft.thinkingLevel = provider === 'openai-compatible' ? (current?.provider === provider ? current.thinkingLevel : 'auto') : provider.endsWith('-compatible') ? 'off' : thinkingAfterModelChange(selected, current?.thinkingLevel);
@@ -1040,8 +1198,9 @@ async function importModels() {
   dialog.importError = false;
   bumpDialog();
   try {
+    const dialect = draft.dialect || dialectFor(draft.provider);
     const { status, data } = await request('/app/api/settings/model/import', {
-      provider: draft.provider, modelId: draft.modelId || 'import', baseUrl: draft.baseUrl.trim(),
+      provider: draft.provider, ...(dialect ? { dialect } : {}), modelId: draft.modelId || 'import', baseUrl: draft.baseUrl.trim(),
       ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
       ...(headers ? { headers } : {}),
     });
@@ -1050,7 +1209,7 @@ async function importModels() {
     dialog.importedModels = data.models;
     draft.modelId = data.models[0].id;
     draft.customModel = false;
-    draft.thinkingLevel = draft.provider === 'openai-compatible' ? 'auto' : 'off';
+    draft.thinkingLevel = dialect === 'openai-compatible' ? 'auto' : 'off';
     dialog.test = null;
   } catch { if (state.dialog === dialog) dialog.importError = true; }
   finally { dialog.importing = false; if (state.dialog === dialog) bumpDialog(); }
@@ -1061,7 +1220,9 @@ async function testModel() {
   if (!state.modelDraft || dialog.testing || dialog.saving || !$('#model-form').reportValidity()) return;
   const headers = draftHeaders();
   if (headers === null) return;
-  const draft = Object.fromEntries(Object.entries(state.modelDraft).filter(([key]) => key !== 'customModel' && key !== 'headersJson').map(([key, value]) => [key, value.trim()]));
+  const draft = Object.fromEntries(Object.entries(state.modelDraft).filter(([key, value]) => key !== 'customModel' && key !== 'headersJson' && key !== 'isNewProfile' && typeof value === 'string').map(([key, value]) => [key, value.trim()]));
+  if (!draft.profileName) delete draft.profileName;
+  if (!draft.dialect) delete draft.dialect;
   if (headers) draft.headers = headers;
   const signature = JSON.stringify(state.modelDraft);
   dialog.testing = true;
@@ -1073,7 +1234,7 @@ async function testModel() {
       dialog.test = status === 200 ? data : { ok: false, error: 'provider_error' };
       if (dialog.test.ok) {
         dialog.acceptedThinkingLevels = data.acceptedThinkingLevels ?? null;
-        if (draft.provider === 'openai-compatible' && !['auto', ...(data.acceptedThinkingLevels ?? [])].includes(draft.thinkingLevel)) draft.thinkingLevel = 'auto';
+        if ((draft.dialect || draft.provider) === 'openai-compatible' && !['auto', ...(data.acceptedThinkingLevels ?? [])].includes(draft.thinkingLevel)) draft.thinkingLevel = 'auto';
         await loadSettings();
       }
     }
@@ -1088,15 +1249,50 @@ async function testModel() {
 function openProvider(id) {
   const current = state.settings.model;
   const provider = id === MODEL_CUSTOM ? '' : id;
+  const dialect = id === MODEL_CUSTOM ? '' : dialectFor(id);
+  const existing = profileFor(provider);
   state.modelDraft = current?.provider === provider
-    ? { provider, modelId: current.modelId, baseUrl: current.baseUrl ?? '', apiKey: '', thinkingJson: savedThinkingJson(provider, current.modelId) }
-    : { provider, modelId: modelAfterProviderChange(state.settings.providers, provider, '') ?? '', baseUrl: '', apiKey: '', thinkingJson: '' };
-  state.dialog = { type: 'provider', rev: 0, returnTo: state.onboarding ? null : 'account', returnFocus: `provider:${id === MODEL_CUSTOM ? 'custom' : state.settings.providers.find((entry) => entry.id === id)?.info?.family ?? id}` };
-  const selected = state.settings.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === state.modelDraft.modelId);
-  state.modelDraft.customModel = provider.endsWith('-compatible') || Boolean(current?.provider === provider && !selected);
-  state.modelDraft.thinkingLevel = provider === 'openai-compatible' ? (current?.provider === provider ? current.thinkingLevel : 'auto') : provider.endsWith('-compatible') ? 'off' : thinkingAfterModelChange(selected, current?.thinkingLevel);
+    ? { provider, dialect, profileName: existing?.name ?? '', modelId: current.modelId, baseUrl: current.baseUrl ?? '', apiKey: '', thinkingJson: savedThinkingJson(provider, current.modelId) }
+    : { provider, dialect, profileName: existing?.name ?? '', modelId: modelAfterProviderChange(state.settings.providers, dialect, '') ?? '', baseUrl: existing?.baseUrl ?? '', apiKey: '', thinkingJson: '' };
+  state.dialog = { type: 'provider', rev: 0, returnTo: state.onboarding ? null : 'account', returnFocus: `provider:${id === MODEL_CUSTOM ? 'custom' : state.settings.providers.find((entry) => entry.id === dialect)?.info?.family ?? id}` };
+  const selected = state.settings.providers.find((entry) => entry.id === dialect)?.models.find((entry) => entry.id === state.modelDraft.modelId);
+  state.modelDraft.customModel = dialect.endsWith('-compatible') || Boolean(current?.provider === provider && !selected);
+  state.modelDraft.thinkingLevel = dialect === 'openai-compatible' ? (current?.provider === provider ? current.thinkingLevel : 'auto') : dialect.endsWith('-compatible') ? 'off' : thinkingAfterModelChange(selected, current?.thinkingLevel);
   renderDialog();
   $('#model-key').focus();
+}
+
+function openNewProfile() {
+  const id = `prof_${uuid().slice(0, 8)}`;
+  const dialect = 'openai-compatible';
+  state.modelDraft = { provider: id, dialect, profileName: '', modelId: '', baseUrl: '', apiKey: '', thinkingJson: '', customModel: true, thinkingLevel: 'auto', isNewProfile: true };
+  state.dialog = { type: 'provider', rev: 0, returnTo: state.onboarding ? null : 'account', returnFocus: 'new-profile' };
+  renderDialog();
+  $('#model-profile-name').focus();
+}
+
+function editProfile(profileId) {
+  const profile = profileFor(profileId);
+  if (!profile) return openProvider(profileId);
+  const current = state.settings.model;
+  const dialect = profile.dialect || profileId;
+  const savedForProfile = (state.settings?.savedModels ?? []).find((entry) => entry.provider === profileId);
+  const modelId = current?.provider === profileId ? current.modelId : (savedForProfile?.modelId ?? modelAfterProviderChange(state.settings.providers, dialect, '') ?? '');
+  state.modelDraft = {
+    provider: profileId,
+    dialect,
+    profileName: profile.name ?? '',
+    modelId,
+    baseUrl: (current?.provider === profileId ? current.baseUrl : null) ?? profile.baseUrl ?? '',
+    apiKey: '',
+    thinkingJson: savedThinkingJson(profileId, modelId),
+  };
+  state.dialog = { type: 'provider', rev: 0, returnTo: state.onboarding ? null : 'account', returnFocus: `edit-profile:${profileId}` };
+  const selected = state.settings.providers.find((entry) => entry.id === dialect)?.models.find((entry) => entry.id === modelId);
+  state.modelDraft.customModel = dialect.endsWith('-compatible') || Boolean(modelId && !selected);
+  state.modelDraft.thinkingLevel = dialect === 'openai-compatible' ? (current?.provider === profileId ? current.thinkingLevel : 'auto') : dialect.endsWith('-compatible') ? 'off' : thinkingAfterModelChange(selected, current?.thinkingLevel);
+  renderDialog();
+  $('#model-profile-name').focus();
 }
 
 function renderOnboarding() {
@@ -1159,8 +1355,9 @@ function finishSetup() {
 function dialogContent() {
   const snapshot = state.snapshot;
   if (state.dialog.type === 'provider') {
-    const provider = state.settings.providers.find((entry) => entry.id === state.modelDraft.provider);
-    return { title: provider?.info?.familyName || provider?.name || state.modelDraft.provider || t('modelCustomOption'), body: providerSection() };
+    const dialect = state.modelDraft.dialect || dialectFor(state.modelDraft.provider);
+    const provider = state.settings.providers.find((entry) => entry.id === dialect);
+    return { title: state.modelDraft.profileName || provider?.info?.familyName || provider?.name || state.modelDraft.provider || t('modelCustomOption'), body: providerSection() };
   }
   if (state.dialog.type === 'directory') return { title: t('directoryPickerTitle'), body: directoryPicker() };
   if (state.dialog.type === 'machines') {
@@ -1201,7 +1398,7 @@ function renderDialog() {
     const { title, body } = dialogContent();
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
-    $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
+    $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.dialect || dialectFor(state.modelDraft.provider)), document.createTextNode(title)] : [document.createTextNode(title)]));
     preservingFocus($('#dialog-body'), () => $('#dialog-body').replaceChildren(...[body].flat(Infinity).filter(Boolean)));
   });
   if (!$('#dialog').open) $('#dialog').showModal();
@@ -1389,6 +1586,11 @@ function accept(data) {
   // The words being written give way to the finished message the moment the snapshot has it.
   if (state.live && (state.live.ending || !data.busy)) state.live = null;
   renderAll({ stick: first });
+  if (!working() && state.pendingModelSwitch && !state.changingModel) {
+    const queued = state.pendingModelSwitch;
+    state.pendingModelSwitch = null;
+    void changeComposerModel(queued);
+  }
   markSelectedRead();
   if (!socket) connect();
   subscribeThread();
@@ -1828,6 +2030,8 @@ async function saveModel() {
   const draft = state.modelDraft;
   if (!draft || state.dialog?.saving || state.dialog?.testing) return;
   const provider = draft.provider.trim();
+  const dialect = (draft.dialect || dialectFor(provider)).trim();
+  const profileName = (draft.profileName ?? '').trim();
   const modelId = draft.modelId.trim();
   const baseUrl = draft.baseUrl.trim();
   const apiKey = draft.apiKey.trim();
@@ -1835,7 +2039,7 @@ async function saveModel() {
   if (headers === null) return;
   if (!provider || !modelId) return;
   if (!$('#model-form').reportValidity()) return;
-  const catalog = state.settings.providers.find((entry) => entry.id === provider);
+  const catalog = state.settings.providers.find((entry) => entry.id === dialect);
   if (catalog && !catalog.models.some((entry) => entry.id === modelId) && !baseUrl) { toast(t('modelChooseKnown')); return; }
   if (!apiKey && !(state.settings?.keyedProviders ?? []).includes(provider)) {
     toast(t('modelKeyMissing'));
@@ -1849,7 +2053,7 @@ async function saveModel() {
     const declared = parseDeclaredLevels(draft.thinkingJson ?? '');
     if (declared === undefined) { toast(t('modelLevelsInvalid')); return; }
     const autoTest = dialog.autoTest !== false;
-    const { status, data } = await request('/app/api/settings/model', { provider, modelId, ...(apiKey ? { apiKey } : {}), ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}), thinkingJson: draft.thinkingJson ?? '', autoTest, ...(dialog.importedModels?.length ? { importedModelIds: dialog.importedModels.map((entry) => entry.id) } : {}), thinkingLevel: draft.thinkingLevel ?? 'off' });
+    const { status, data } = await request('/app/api/settings/model', { provider, ...(dialect && dialect !== provider ? { dialect } : {}), ...(profileName ? { profileName } : {}), modelId, ...(apiKey ? { apiKey } : {}), ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}), thinkingJson: draft.thinkingJson ?? '', autoTest, ...(dialog.importedModels?.length ? { importedModelIds: dialog.importedModels.map((entry) => entry.id) } : {}), thinkingLevel: draft.thinkingLevel ?? 'off' });
     if (status === 200) {
       draft.apiKey = '';
       if (data?.acceptedThinkingLevels?.length) toast(t('modelAutoTested', { levels: data.acceptedThinkingLevels.map((level) => t(`thinking_${level}`)).join(' / ') }));
@@ -2323,8 +2527,13 @@ document.addEventListener('click', (event) => {
   switch (dataset.action) {
     case 'stop-turn': return void stopTurn();
     case 'provider': return openProvider(dataset.provider);
+    case 'new-profile': return openNewProfile();
+    case 'edit-profile': return editProfile(dataset.profileId);
+    case 'toggle-profile': return void toggleProfile(dataset.profileId, dataset.enabled === 'true');
+    case 'delete-profile': return void deleteProfile(dataset.profileId);
     case 'provider-variant': return selectProviderVariant(dataset.provider);
     case 'test-model': return void testModel();
+    case 'toggle-saved-model': return void toggleSavedModel(dataset.provider, dataset.modelId, dataset.enabled === 'true');
     case 'toggle-key':
       state.dialog.showKey = !state.dialog.showKey;
       return bumpDialog();
@@ -2454,7 +2663,7 @@ function compatibleThinkingLevels(provider, modelId) {
   return known?.length ? ['auto', ...known] : [...ALL_THINKING_LEVELS];
 }
 
-const MODEL_DRAFT_FIELDS = { 'model-provider-custom': 'provider', 'model-id-custom': 'modelId', 'model-base-url': 'baseUrl', 'model-headers': 'headersJson', 'model-levels-json': 'thinkingJson', 'model-key': 'apiKey' };
+const MODEL_DRAFT_FIELDS = { 'model-provider-custom': 'provider', 'model-profile-name': 'profileName', 'model-id-custom': 'modelId', 'model-base-url': 'baseUrl', 'model-headers': 'headersJson', 'model-levels-json': 'thinkingJson', 'model-key': 'apiKey' };
 document.addEventListener('input', (event) => {
   if (event.target.id === 'directory-browse-path' && state.dialog?.type === 'directory') state.dialog.pathDraft = event.target.value;
   const directory = state.directoryForms.get(event.target.dataset?.directoryPath);
@@ -2471,7 +2680,7 @@ document.addEventListener('input', (event) => {
       bumpDialog();
       return;
     }
-    if (field === 'baseUrl') $('#provider-endpoint')?.replaceChildren(document.createTextNode(state.modelDraft.baseUrl.trim() || state.settings.providers.find((entry) => entry.id === state.modelDraft.provider)?.models.find((entry) => entry.id === state.modelDraft.modelId)?.baseUrl || t('providerEndpointUnknown')));
+    if (field === 'baseUrl') $('#provider-endpoint')?.replaceChildren(document.createTextNode(state.modelDraft.baseUrl.trim() || state.settings.providers.find((entry) => entry.id === (state.modelDraft.dialect || dialectFor(state.modelDraft.provider)))?.models.find((entry) => entry.id === state.modelDraft.modelId)?.baseUrl || t('providerEndpointUnknown')));
     if (isSelect) {
       bumpDialog();
       if (event.target.value === MODEL_CUSTOM) $('#model-id-custom')?.focus();
@@ -2484,8 +2693,24 @@ document.addEventListener('change', (event) => {
     state.dialog.autoTest = event.target.checked;
     return;
   }
+  if (event.target.id === 'model-profile-dialect' && state.modelDraft) {
+    const dialect = event.target.value;
+    state.modelDraft.dialect = dialect;
+    state.modelDraft.modelId = modelAfterProviderChange(state.settings.providers, dialect, state.modelDraft.modelId) ?? '';
+    const selected = state.settings.providers.find((entry) => entry.id === dialect)?.models.find((entry) => entry.id === state.modelDraft.modelId);
+    state.modelDraft.customModel = dialect.endsWith('-compatible') || !selected;
+    state.modelDraft.thinkingLevel = dialect === 'openai-compatible' ? 'auto' : dialect.endsWith('-compatible') ? 'off' : thinkingAfterModelChange(selected, state.modelDraft.thinkingLevel);
+    state.dialog.importedModels = null;
+    state.dialog.acceptedThinkingLevels = null;
+    state.dialog.test = null;
+    bumpDialog();
+    return;
+  }
   if (event.target.id !== 'model-api' || !state.modelDraft) return;
-  state.modelDraft.provider = event.target.value;
+  if (!state.modelDraft.isNewProfile && (!state.modelDraft.provider || state.modelDraft.provider.endsWith('-compatible'))) {
+    state.modelDraft.provider = event.target.value;
+  }
+  state.modelDraft.dialect = event.target.value;
   state.modelDraft.thinkingLevel = event.target.value === 'openai-compatible' ? 'auto' : 'off';
   state.dialog.importedModels = null;
   state.dialog.acceptedThinkingLevels = null;

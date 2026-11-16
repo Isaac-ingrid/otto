@@ -29,6 +29,16 @@ import type { SqlExecutor } from "./schema.ts";
 import { openSecret, sealSecret } from "./secretbox.ts";
 import { WorkspaceError } from "./workspace.ts";
 
+export interface ProviderProfile {
+  profileId: string;
+  dialect: string;
+  name: string;
+  baseUrl: string | null;
+  enabled: boolean;
+  hasKey: boolean;
+  updatedAt: number;
+}
+
 /** Dependencies the store borrows from the Steward Durable Object. */
 export interface ModelConfigDeps {
   sql: SqlExecutor;
@@ -67,15 +77,88 @@ export class ModelConfigStore {
    * MODEL_KEY seed path, and the pre-#70 provider-only form) keeps the legacy behavior —
    * vars still supply modelId/baseUrl.
    */
-  async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null): Promise<void> {
+  profileById(profileId: string): ProviderProfile | null {
+    const row = this.sql<{ profileId: string; dialect: string; name: string; baseUrl: string | null; enabled: number; apiKeyEnc: string; updatedAt: number }>`
+      SELECT profileId, dialect, name, baseUrl, enabled, apiKeyEnc, updatedAt
+      FROM sh_provider_profile WHERE profileId = ${profileId}
+    `[0];
+    if (!row) return null;
+    return {
+      profileId: row.profileId,
+      dialect: row.dialect,
+      name: row.name,
+      baseUrl: row.baseUrl,
+      enabled: row.enabled !== 0,
+      hasKey: row.apiKeyEnc !== "",
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  dialectFor(providerOrProfileId: string): string {
+    const row = this.sql<{ dialect: string }>`
+      SELECT dialect FROM sh_provider_profile WHERE profileId = ${providerOrProfileId}
+    `[0];
+    return row?.dialect ?? providerOrProfileId;
+  }
+
+  isProfileEnabled(providerOrProfileId: string): boolean {
+    const row = this.sql<{ enabled: number }>`
+      SELECT enabled FROM sh_provider_profile WHERE profileId = ${providerOrProfileId}
+    `[0];
+    return row ? row.enabled !== 0 : true;
+  }
+
+  profiles(): ProviderProfile[] {
+    return this.sql<{ profileId: string; dialect: string; name: string; baseUrl: string | null; enabled: number; apiKeyEnc: string; updatedAt: number }>`
+      SELECT profileId, dialect, name, baseUrl, enabled, apiKeyEnc, updatedAt
+      FROM sh_provider_profile ORDER BY updatedAt DESC, profileId ASC
+    `.map((row) => ({
+      profileId: row.profileId,
+      dialect: row.dialect,
+      name: row.name,
+      baseUrl: row.baseUrl,
+      enabled: row.enabled !== 0,
+      hasKey: row.apiKeyEnc !== "",
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  setProfileEnabled(profileId: string, enabled: boolean): boolean {
+    this.sql`
+      UPDATE sh_provider_profile SET enabled = ${enabled ? 1 : 0}, updatedAt = ${Date.now()}
+      WHERE profileId = ${profileId}
+    `;
+    const changed = this.sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    if (changed) this.deps.notifyModelChanged();
+    return changed;
+  }
+
+  deleteProfile(profileId: string): void {
+    const active = this.sql<{ provider: string }>`SELECT provider FROM sh_model WHERE id = 0`[0];
+    if (active?.provider === profileId) throw new WorkspaceError("active_profile", 409);
+    this.sql`DELETE FROM sh_provider_profile WHERE profileId = ${profileId}`;
+    this.sql`DELETE FROM sh_provider_key WHERE provider = ${profileId}`;
+    this.sql`DELETE FROM sh_saved_model WHERE provider = ${profileId}`;
+    this.sql`DELETE FROM sh_verified_model WHERE provider = ${profileId}`;
+    this.sql`DELETE FROM sh_model_thinking_probe WHERE provider = ${profileId}`;
+    this.deps.notifyModelChanged();
+  }
+
+  async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null, dialect?: string, profileName?: string): Promise<void> {
     if (!provider.trim()) throw new Error("provider is required");
     const providerId = provider.trim();
+    const existingProfile = this.profileById(providerId);
+    const dialectValue = dialect?.trim() || existingProfile?.dialect || providerId;
+    const nameValue = profileName?.trim() || existingProfile?.name || providerId;
     const [primary] = await this.deps.serverKeys();
     const key = apiKey?.trim() || "";
     // No key given: the selection moves to a provider whose key was sealed earlier, so mirror
     // that stored key — a pre-#74 reader of sh_model keeps seeing a matching provider+key.
     const sealedKey = key || (await this.sealedKeyFor(providerId)) || "";
     const apiKeyEnc = sealedKey ? await sealSecret(primary!, sealedKey) : "";
+    const modelIdValue = modelId?.trim() || null;
+    const baseUrlValue = baseUrl?.trim() || null;
+    const sealedHeadersEnc = headers !== undefined ? await sealSecret(primary!, JSON.stringify(headers)) : null;
     if (key) {
       this.sql`
         INSERT INTO sh_provider_key (provider, apiKeyEnc, updatedAt)
@@ -83,16 +166,36 @@ export class ModelConfigStore {
         ON CONFLICT(provider) DO UPDATE SET
           apiKeyEnc = excluded.apiKeyEnc, updatedAt = excluded.updatedAt
       `;
+      this.sql`
+        INSERT INTO sh_provider_profile (profileId, dialect, name, baseUrl, headersEnc, apiKeyEnc, enabled, updatedAt)
+        VALUES (${providerId}, ${dialectValue}, ${nameValue}, ${baseUrlValue}, ${sealedHeadersEnc}, ${apiKeyEnc}, 1, ${Date.now()})
+        ON CONFLICT(profileId) DO UPDATE SET
+          dialect = excluded.dialect,
+          name = excluded.name,
+          baseUrl = COALESCE(excluded.baseUrl, sh_provider_profile.baseUrl),
+          headersEnc = COALESCE(excluded.headersEnc, sh_provider_profile.headersEnc),
+          apiKeyEnc = excluded.apiKeyEnc,
+          enabled = 1,
+          updatedAt = excluded.updatedAt
+      `;
+    } else if (existingProfile) {
+      this.sql`
+        UPDATE sh_provider_profile SET
+          dialect = ${dialectValue},
+          name = ${nameValue},
+          baseUrl = COALESCE(${baseUrlValue}, baseUrl),
+          headersEnc = COALESCE(${sealedHeadersEnc}, headersEnc),
+          updatedAt = ${Date.now()}
+        WHERE profileId = ${providerId}
+      `;
     }
-    const modelIdValue = modelId?.trim() || null;
-    const baseUrlValue = baseUrl?.trim() || null;
     const previous = this.sql<{ provider: string; modelId: string | null; thinkingLevel: StewardThinkingLevel | null }>`SELECT provider, modelId, thinkingLevel FROM sh_model WHERE id = 0`[0];
     const thinkingValue = thinkingLevel ?? (previous?.provider === providerId && previous.modelId === modelIdValue ? previous.thinkingLevel : null);
     this.sql`
-      INSERT INTO sh_model (id, provider, apiKeyEnc, modelId, baseUrl, thinkingLevel, updatedAt)
-      VALUES (0, ${providerId}, ${apiKeyEnc}, ${modelIdValue}, ${baseUrlValue}, ${thinkingValue}, ${Date.now()})
+      INSERT INTO sh_model (id, provider, dialect, apiKeyEnc, modelId, baseUrl, thinkingLevel, updatedAt)
+      VALUES (0, ${providerId}, ${dialectValue}, ${apiKeyEnc}, ${modelIdValue}, ${baseUrlValue}, ${thinkingValue}, ${Date.now()})
       ON CONFLICT(id) DO UPDATE SET
-        provider = excluded.provider, apiKeyEnc = excluded.apiKeyEnc,
+        provider = excluded.provider, dialect = excluded.dialect, apiKeyEnc = excluded.apiKeyEnc,
         modelId = excluded.modelId, baseUrl = excluded.baseUrl, thinkingLevel = excluded.thinkingLevel, updatedAt = excluded.updatedAt
     `;
     // The LLM wiring (issue #6) installs the sealed selection lazily (ensureRootModel, before
@@ -100,25 +203,43 @@ export class ModelConfigStore {
     // open stays the same object and is re-keyed in place. The faux provider's scripted state
     // is per-isolate and never rebuilt.
     if (modelIdValue) this.sql`
-      INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, thinkingJson, updatedAt)
-      VALUES (${providerId}, ${modelIdValue}, ${baseUrlValue}, ${headers !== undefined ? await sealSecret(primary!, JSON.stringify(headers)) : null}, ${thinkingJson ?? null}, ${Date.now()})
+      INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, thinkingJson, enabled, updatedAt)
+      VALUES (${providerId}, ${modelIdValue}, ${baseUrlValue}, ${sealedHeadersEnc}, ${thinkingJson ?? null}, 1, ${Date.now()})
       ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
         headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc),
         thinkingJson = CASE WHEN ${thinkingJson === undefined ? 0 : 1} THEN ${thinkingJson ?? null} ELSE sh_saved_model.thinkingJson END,
+        enabled = 1,
         updatedAt = excluded.updatedAt
     `;
     this.deps.notifyModelChanged();
   }
 
-  savedModels(): { provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null }[] {
-    return this.sql<{ provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null }>`
-      SELECT provider, modelId, baseUrl, thinkingJson FROM sh_saved_model ORDER BY updatedAt DESC
+  savedModels(): { provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null; enabled: boolean }[] {
+    return this.sql<{ provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null; enabled: number }>`
+      SELECT provider, modelId, baseUrl, thinkingJson, enabled FROM sh_saved_model ORDER BY updatedAt DESC
+    `.map((row) => ({
+      provider: row.provider,
+      modelId: row.modelId,
+      baseUrl: row.baseUrl,
+      thinkingJson: row.thinkingJson,
+      enabled: row.enabled !== 0,
+    }));
+  }
+
+  setModelEnabled(provider: string, modelId: string, enabled: boolean): boolean {
+    this.sql`
+      UPDATE sh_saved_model SET enabled = ${enabled ? 1 : 0}, updatedAt = ${Date.now()}
+      WHERE provider = ${provider} AND modelId = ${modelId}
     `;
+    const changed = this.sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    if (changed) this.deps.notifyModelChanged();
+    return changed;
   }
 
   async sealedKeyFor(provider: string): Promise<string | null> {
-    const row = this.sql<{ apiKeyEnc: string }>`SELECT apiKeyEnc FROM sh_provider_key WHERE provider = ${provider}`[0];
-    if (!row) return null;
+    const prof = this.sql<{ apiKeyEnc: string }>`SELECT apiKeyEnc FROM sh_provider_profile WHERE profileId = ${provider}`[0];
+    const row = prof?.apiKeyEnc ? prof : this.sql<{ apiKeyEnc: string }>`SELECT apiKeyEnc FROM sh_provider_key WHERE provider = ${provider}`[0];
+    if (!row || !row.apiKeyEnc) return null;
     const keys = await this.deps.serverKeys();
     const opened = await openSecret(keys, row.apiKeyEnc);
     if (!opened) return null;
@@ -129,17 +250,25 @@ export class ModelConfigStore {
     // by setModelConfig too, so refresh it in the same breath or it stays sealed under the dead key.
     const primary = keys[0];
     if (primary && opened.keyId !== primary.id) {
-      this.sql`UPDATE sh_provider_key SET apiKeyEnc = ${await sealSecret(primary, opened.text)}, updatedAt = ${Date.now()} WHERE provider = ${provider}`;
-      this.sql`UPDATE sh_model SET apiKeyEnc = ${await sealSecret(primary, opened.text)} WHERE id = 0 AND provider = ${provider} AND apiKeyEnc <> ''`;
+      const reSealed = await sealSecret(primary, opened.text);
+      this.sql`UPDATE sh_provider_profile SET apiKeyEnc = ${reSealed}, updatedAt = ${Date.now()} WHERE profileId = ${provider}`;
+      this.sql`UPDATE sh_provider_key SET apiKeyEnc = ${reSealed}, updatedAt = ${Date.now()} WHERE provider = ${provider}`;
+      this.sql`UPDATE sh_model SET apiKeyEnc = ${reSealed} WHERE id = 0 AND provider = ${provider} AND apiKeyEnc <> ''`;
     }
     return opened.text;
   }
 
   async keyedProviders(): Promise<string[]> {
-    return this.sql<{ provider: string }>`SELECT provider FROM sh_provider_key ORDER BY provider`.map((row) => row.provider);
+    return this.sql<{ provider: string }>`
+      SELECT profileId AS provider FROM sh_provider_profile WHERE enabled = 1 AND apiKeyEnc <> ''
+      UNION
+      SELECT provider FROM sh_provider_key
+      WHERE provider NOT IN (SELECT profileId FROM sh_provider_profile WHERE enabled = 0)
+      ORDER BY provider
+    `.map((row) => row.provider);
   }
 
-  async modelConfig(): Promise<{ provider: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: StewardThinkingLevel } | null> {
+  async modelConfig(): Promise<{ provider: string; dialect?: string; modelId: string | null; baseUrl: string | null; apiKey: string; thinkingLevel?: StewardThinkingLevel } | null> {
     // One-click-deploy glue (issue #25, spec §12.1 step 1): MODEL_KEY — the secret the
     // Deploy-to-Cloudflare form collects — seeds the sealed config on first read, so the key
     // never lives anywhere outside the user's own account. Seeding fills an empty deployment
@@ -153,19 +282,28 @@ export class ModelConfigStore {
     ) {
       await this.setModelConfig(this.deps.defaultProvider, modelKey);
     }
-    const row = this.sql<{ provider: string; modelId: string | null; baseUrl: string | null; thinkingLevel: StewardThinkingLevel | null }>`
-      SELECT provider, modelId, baseUrl, thinkingLevel FROM sh_model WHERE id = 0
+    const row = this.sql<{ provider: string; dialect: string | null; modelId: string | null; baseUrl: string | null; thinkingLevel: StewardThinkingLevel | null }>`
+      SELECT provider, dialect, modelId, baseUrl, thinkingLevel FROM sh_model WHERE id = 0
     `[0];
     if (!row) return null;
+    const dialect = row.dialect ?? this.dialectFor(row.provider);
     // The key lives with the provider now (issue #74): a selection whose provider has no
     // sealed key still resolves, keyless — apiKey: "" — and fails visibly at run time.
-    return { provider: row.provider, modelId: row.modelId, baseUrl: row.baseUrl, ...(row.thinkingLevel ? { thinkingLevel: row.thinkingLevel } : {}), apiKey: (await this.sealedKeyFor(row.provider)) ?? "" };
+    return {
+      provider: row.provider,
+      ...(dialect && dialect !== row.provider ? { dialect } : {}),
+      modelId: row.modelId,
+      baseUrl: row.baseUrl,
+      ...(row.thinkingLevel ? { thinkingLevel: row.thinkingLevel } : {}),
+      apiKey: (await this.sealedKeyFor(row.provider)) ?? "",
+    };
   }
 
   async headersFor(provider: string, modelId: string): Promise<Record<string, string> | undefined> {
     const row = this.sql<{ headersEnc: string | null }>`SELECT headersEnc FROM sh_saved_model WHERE provider = ${provider} AND modelId = ${modelId}`[0];
-    if (!row?.headersEnc) return undefined;
-    const opened = await openSecret(await this.deps.serverKeys(), row.headersEnc);
+    const enc = row?.headersEnc ?? this.sql<{ headersEnc: string | null }>`SELECT headersEnc FROM sh_provider_profile WHERE profileId = ${provider}`[0]?.headersEnc ?? null;
+    if (!enc) return undefined;
+    const opened = await openSecret(await this.deps.serverKeys(), enc);
     return opened ? JSON.parse(opened.text) as Record<string, string> : undefined;
   }
 
@@ -219,14 +357,15 @@ export class ModelConfigStore {
    * a save reuses a result already measured for the same key+endpoint so nothing is spent twice.
    */
   async verifyAndProbe(
-    input: { provider: string; modelId: string; baseUrl?: string; apiKey?: string; headers?: Record<string, string>; thinkingLevel?: StewardThinkingLevel },
+    input: { provider: string; dialect?: string; modelId: string; baseUrl?: string; apiKey?: string; headers?: Record<string, string>; thinkingLevel?: StewardThinkingLevel },
     options: { force: boolean },
   ): Promise<{ ok: true; acceptedThinkingLevels?: ModelThinkingLevel[]; cached?: boolean } | { ok: false; error: ConnectionTestError }> {
-    const config = { provider: input.provider, modelId: input.modelId, explicit: true, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) };
+    const dialect = input.dialect?.trim() || this.dialectFor(input.provider);
+    const config = { provider: input.provider, ...(dialect !== input.provider ? { dialect } : {}), modelId: input.modelId, explicit: true, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) };
     const apiKey = input.apiKey ?? await this.sealedKeyFor(input.provider) ?? undefined;
     const headers = input.headers ?? await this.headersFor(input.provider, input.modelId);
     const hash = apiKey ? await this.modelCredentialHash(apiKey, headers) : undefined;
-    const probesLevels = input.provider === "openai-compatible" && Boolean(input.baseUrl);
+    const probesLevels = dialect === "openai-compatible" && Boolean(input.baseUrl);
     if (!options.force && probesLevels && hash) {
       const row = this.sql<{ levelsJson: string }>`SELECT levelsJson FROM sh_model_thinking_probe
         WHERE provider = ${input.provider} AND modelId = ${input.modelId} AND baseUrl = ${input.baseUrl ?? ""} AND credentialHash = ${hash}`[0];
@@ -262,7 +401,7 @@ export class ModelConfigStore {
   async thinkingProbes(): Promise<{ provider: string; modelId: string; acceptedLevels: ModelThinkingLevel[] }[]> {
     const saved = this.savedModels();
     const result: { provider: string; modelId: string; acceptedLevels: ModelThinkingLevel[] }[] = [];
-    for (const entry of saved.filter((item) => item.provider === "openai-compatible")) {
+    for (const entry of saved.filter((item) => this.dialectFor(item.provider) === "openai-compatible")) {
       const acceptedLevels = await this.acceptedThinkingLevels(entry.provider, entry.modelId, entry.baseUrl ?? undefined);
       if (acceptedLevels) result.push({ provider: entry.provider, modelId: entry.modelId, acceptedLevels });
     }
@@ -277,6 +416,7 @@ export class ModelConfigStore {
    */
   async llmSelection(varsRaw?: unknown): Promise<{
     provider: string;
+    dialect?: string;
     modelId: string;
     baseUrl: string | null;
     explicitVars: boolean;
@@ -294,23 +434,26 @@ export class ModelConfigStore {
     // `varsRaw: null` models an unset deploy config; `undefined` (the production call) reads env.
     const vars = resolveModelConfig(varsRaw === undefined ? this.deps.stewardModelVars() : varsRaw);
     const config = mergeModelSelection(sealed, vars);
+    const dialect = config.dialect ?? this.dialectFor(config.provider);
+    const configWithDialect = dialect !== config.provider ? { ...config, dialect } : config;
     const accepted = await this.thinkingLevelsFor(config.provider, config.modelId, config.baseUrl);
-    if (config.thinkingLevel !== "auto" && accepted && !accepted.includes(config.thinkingLevel ?? "off")) config.thinkingLevel = "auto";
-    const levels = config.provider === "openai-compatible" && config.baseUrl
-      ? await this.thinkingLevelsFor(config.provider, config.modelId, config.baseUrl)
+    if (configWithDialect.thinkingLevel !== "auto" && accepted && !accepted.includes(configWithDialect.thinkingLevel ?? "off")) configWithDialect.thinkingLevel = "auto";
+    const levels = dialect === "openai-compatible" && configWithDialect.baseUrl
+      ? await this.thinkingLevelsFor(configWithDialect.provider, configWithDialect.modelId, configWithDialect.baseUrl)
       : null;
     return {
-      provider: config.provider,
-      modelId: config.modelId,
-      ...resolveModelThinking(config),
-      ...(config.provider === "openai-compatible" && config.baseUrl ? {
+      provider: configWithDialect.provider,
+      ...(dialect !== configWithDialect.provider ? { dialect } : {}),
+      modelId: configWithDialect.modelId,
+      ...resolveModelThinking(configWithDialect),
+      ...(dialect === "openai-compatible" && configWithDialect.baseUrl ? {
         thinkingLevels: (levels ? ["auto", ...levels] : COMPATIBLE_THINKING_LEVELS) as StewardThinkingLevel[],
       } : {}),
-      baseUrl: config.baseUrl ?? null,
+      baseUrl: configWithDialect.baseUrl ?? null,
       explicitVars: vars.explicit,
       sealedProvider: sealed?.provider ?? null,
-      apiKey: Boolean(sealed && sealed.provider === config.provider && sealed.apiKey),
-      modelKnown: config.provider === "faux" || resolveCatalogModel(config) !== undefined,
+      apiKey: Boolean(sealed && sealed.provider === configWithDialect.provider && sealed.apiKey),
+      modelKnown: dialect === "faux" || resolveCatalogModel(configWithDialect) !== undefined,
     };
   }
 }
