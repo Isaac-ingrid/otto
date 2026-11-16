@@ -7,7 +7,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
-import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
+import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, modelRejectionKey, thinkingAdjusted, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -144,6 +144,7 @@ describe("interface copy", () => {
       for (const attribute of source.matchAll(/data-i18n(?:-[a-z]+)?="([A-Za-z_:]+)"/g)) used.add(attribute[1]!);
     }
     // Keys built from data: card kinds, worker states, connection states, and the copy tables.
+    for (const status of ['saved', 'verification_failed', 'verified', 'busy', 'conflict']) used.add(`modelDraft_${status}`);
     for (const kind of ["question", "consent", "offline", "offer", "memory"]) used.add(`kind${kind[0]!.toUpperCase()}${kind.slice(1)}`);
     for (const state of ["queued", "starting", "running", "recovering", "idle", "broken"]) used.add(`worker${state[0]!.toUpperCase()}${state.slice(1)}`);
     for (const state of ["connecting", "live", "reconnecting", "disconnected"]) used.add(state);
@@ -404,6 +405,22 @@ describe("composer model choices", () => {
     expect(thinkingAfterModelChange(model, "max")).toBe("max");
     expect(thinkingAfterModelChange(model, "low")).toBe("off");
     expect(thinkingAfterModelChange({ thinkingLevels: ["high"], defaultThinkingLevel: "high" }, "off")).toBe("high");
+  });
+  it("notices a thinking level the switch changed, even for the same model (issue #70)", () => {
+    const model = { provider: "deepseek", modelId: "deepseek-flash", thinkingLevel: "off" };
+    // Compare the requested value, not the previous selection: an intentional change is not
+    // an automatic adjustment. A provider changing the requested tier is.
+    expect(thinkingAdjusted({ ...model, thinkingLevel: 'high' }, { ...model, thinkingLevel: 'high' })).toBe(false);
+    expect(thinkingAdjusted(model, { ...model, thinkingLevel: "high" })).toBe(true);
+    expect(thinkingAdjusted(model, { ...model, modelId: "deepseek-v4-pro" })).toBe(false);
+    expect(thinkingAdjusted(model, null)).toBe(false);
+  });
+  it("explains a save that did not activate with the server's own reason", () => {
+    // A save that never reached the endpoint and the manual test button share one vocabulary.
+    expect(modelRejectionKey("authentication")).toBe("modelTest_authentication");
+    expect(modelRejectionKey("busy")).toBe("modelTest_busy");
+    expect(modelRejectionKey(null)).toBe("modelTest_provider_error");
+    expect(modelRejectionKey(undefined)).toBe("modelTest_provider_error");
   });
 });
 

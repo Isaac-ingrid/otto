@@ -14,7 +14,7 @@ import { markup } from './markup.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
-  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
+  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, modelRejectionKey, thinkingAdjusted, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -53,6 +53,7 @@ const state = {
   pushNotice: null, // i18n key of the last push result, shown inside the dialog the toast cannot reach
   pushQuiet: true,
   changingModel: false,
+  modelDraftNotice: null, // lifecycle feedback belongs inside the settings modal, not behind it
   stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
 
@@ -443,7 +444,12 @@ function renderComposerModels() {
   const model = state.settings?.model;
   const busy = state.changingModel || working();
   redraw('composer-model', [getLocale(), state.settings, busy], () => {
-    if (!model?.apiKey) { node.replaceChildren(); return; }
+    if (!model?.apiKey) {
+      // No usable key for the current selection. The control used to disappear, which reads as
+      // "this has no settings"; it stays as the way into the same provider form instead.
+      node.replaceChildren(h('button', { type: 'button', class: 'model-picker-trigger model-choice-chip', disabled: busy, dataset: { action: 'provider', provider: (state.settings?.providers ?? []).some((entry) => entry.id === model?.provider) ? model.provider : MODEL_CUSTOM } }, t('composerModelUnset')));
+      return;
+    }
     const verified = (provider, modelId) => (state.settings.verifiedModels ?? []).some((entry) => entry.provider === provider && entry.modelId === modelId);
     const entries = availableChatModels(state.settings).flatMap((provider) => provider.models.filter((entry) => verified(provider.id, entry.id)).map((entry) => ({
       ...entry, id: JSON.stringify([provider.id, entry.id]), modelId: entry.id, provider: provider.id, group: providerChoiceName(provider),
@@ -477,7 +483,7 @@ async function changeComposerModel(input) {
   try {
     const { status, data } = await request('/app/api/settings/model/selection', input);
     if (status === 200 && data?.model) {
-      const adjusted = state.settings.model.thinkingLevel !== data.model.thinkingLevel && state.settings.model.modelId !== data.model.modelId;
+      const adjusted = thinkingAdjusted(input, data.model);
       state.settings = { ...state.settings, model: data.model };
       if (adjusted) toast(t('thinkingAdjusted', { level: t(`thinking_${data.model.thinkingLevel}`) }));
     } else if (status !== 401) {
@@ -877,7 +883,15 @@ function modelSection() {
     h('div', { class: 'section-heading' }, icon('sparkle'),
       h('div', null, h('h3', null, t('modelTitle')), h('p', { class: 'dialog-copy' }, t('providersHelp')))),
     model?.apiKey ? h('p', { class: 'active-model' }, h('span', { class: `status-dot${(state.settings.verifiedModels ?? []).some((entry) => entry.provider === model.provider && entry.modelId === model.modelId) ? ' green' : ''}` }), t((state.settings.verifiedModels ?? []).some((entry) => entry.provider === model.provider && entry.modelId === model.modelId) ? 'providerActive' : 'providerUnverified'), h('strong', null, model.modelId)) : null,
-    providerGrid());
+    state.modelDraftNotice ? h('p', { class: 'dialog-error', role: 'alert' }, t(state.modelDraftNotice)) : null,
+    working() && (state.settings.modelDrafts ?? []).some(draft => draft.status === 'verified')
+      ? h('p', { class: 'dialog-hint', role: 'status' }, t('modelDraftReplyBusy')) : null,
+    providerGrid(),
+    (state.settings.modelDrafts ?? []).filter(draft => draft.status !== 'activated').map(draft => h('div', { class: 'connection-test' },
+      h('p', { role: 'status' }, `${draft.provider} / ${draft.modelId} · ${t(`modelDraft_${draft.status}`)}${draft.testError ? ` · ${t(modelRejectionKey(draft.testError))}` : ''}`),
+      h('button', { type: 'button', class: 'button quiet', disabled: state.changingModel, dataset: { action: 'model-draft', id: draft.id, revision: String(draft.revision), operation: 'verify' } }, t('modelDraftRetry')),
+      draft.status === 'verified' ? h('button', { type: 'button', class: 'button', disabled: state.changingModel || working(), dataset: { action: 'model-draft', id: draft.id, revision: String(draft.revision), operation: 'activate' } }, t('modelDraftActivate')) : null,
+      h('button', { type: 'button', class: 'button quiet', disabled: state.changingModel, dataset: { action: 'model-draft', id: draft.id, revision: String(draft.revision), operation: 'delete' } }, t('modelDraftDiscard')))));
 }
 
 function pushSection() {
@@ -929,6 +943,7 @@ function providerSection() {
   const described = declared?.length ? declared : measured ?? null;
   const thinkingLevels = draft.provider === 'openai-compatible' ? (described ? ['auto', ...described] : [...ALL_THINKING_LEVELS]) : (selectedModel?.thinkingLevels ?? ['off']);
   const busy = state.dialog.saving || state.dialog.testing;
+  const draftStatusKey = `modelDraft_${state.dialog.saveError?.status ?? 'verification_failed'}`;
   const link = (url, label) => h('a', { class: 'provider-link', href: url, target: '_blank', rel: 'noopener noreferrer' }, label, icon('external'));
   return h('form', { id: 'model-form', class: 'model-form provider-form' },
     h('div', { class: 'provider-intro' },
@@ -994,15 +1009,17 @@ function providerSection() {
     h('div', { class: 'connection-test' },
       h('button', { type: 'button', class: 'button', disabled: busy, dataset: { action: 'test-model' } }, t(state.dialog.testing ? 'modelTesting' : 'modelTest')),
       h('p', { class: 'dialog-hint' }, t(draft.provider === 'openai-compatible' ? 'modelTestProbeHelp' : 'modelTestHelp', { model: draft.modelId }))),
-    draft.provider === 'openai-compatible' ? h('label', { class: 'dialog-check' }, [
+    h('label', { class: 'dialog-check' }, [
       h('input', { id: 'model-auto-test', type: 'checkbox', checked: state.dialog.autoTest !== false }),
-      h('span', null, t('modelAutoTestLabel'))]) : null,
+      h('span', null, t('modelAutoTestLabel'))]),
     h('p', { id: 'model-test-result', class: `connection-result${state.dialog.test?.ok ? ' success' : ' dialog-error'}`, role: 'status', 'aria-live': 'polite' },
       state.dialog.test ? t(state.dialog.test.ok ? 'modelTestSuccess' : `modelTest_${state.dialog.test.error}`) : ''),
-    state.dialog.saveError ? h('p', { class: 'dialog-error', role: 'alert' }, t('modelSaveFailed')) : null,
+    state.dialog.saveError === true ? h('p', { class: 'dialog-error', role: 'alert' }, t('modelSaveFailed'))
+      : state.dialog.saveError ? h('p', { class: 'dialog-error', role: 'alert' }, `${t(draftStatusKey)}${state.dialog.saveError.testError ? ` · ${t(modelRejectionKey(state.dialog.saveError.testError))}` : ''}`)
+      : null,
     h('div', { class: 'provider-footer' },
       h('button', { type: 'button', class: 'button quiet', dataset: { action: 'close-dialog' } }, t('actionCancel')),
-      h('button', { type: 'submit', class: 'button primary', disabled: busy }, t(state.dialog.saving ? 'modelSaving' : 'modelSave'))));
+      h('button', { type: 'submit', class: 'button primary', disabled: busy }, t(state.dialog.saving ? 'modelSaving' : state.dialog.autoTest === false ? 'modelSaveDraft' : 'modelSave'))));
 }
 
 function selectProviderVariant(provider) {
@@ -1196,7 +1213,7 @@ function renderDialog() {
     type === 'machines' ? [snapshot.machines, snapshot.threads.map((entry) => [entry.id, entry.state, entry.workers.map((worker) => [worker.state, worker.machine])]), minuteBucket()] : null,
     type === 'directory' ? snapshot.machines : null,
     type === 'scope' ? [state.selected, snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.repos])] : null,
-    type === 'account' ? [state.settings, state.dialog.passkeyAdd] : null];
+    type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice] : null];
   redraw('dialog', signature, () => {
     const { title, body } = dialogContent();
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
@@ -1217,6 +1234,7 @@ function bumpDialog() {
 
 function openDialog(type) {
   state.dialog = { type, rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+  state.modelDraftNotice = null;
   state.pushNotice = null; // a fresh visit shows the current state, not the last attempt's result
   drawn.delete('dialog');
   if (type === 'account') void loadSettings();
@@ -1850,10 +1868,9 @@ async function saveModel() {
     if (declared === undefined) { toast(t('modelLevelsInvalid')); return; }
     const autoTest = dialog.autoTest !== false;
     const { status, data } = await request('/app/api/settings/model', { provider, modelId, ...(apiKey ? { apiKey } : {}), ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}), thinkingJson: draft.thinkingJson ?? '', autoTest, ...(dialog.importedModels?.length ? { importedModelIds: dialog.importedModels.map((entry) => entry.id) } : {}), thinkingLevel: draft.thinkingLevel ?? 'off' });
-    if (status === 200) {
+    if (status === 200 && data?.activated === true) {
       draft.apiKey = '';
       if (data?.acceptedThinkingLevels?.length) toast(t('modelAutoTested', { levels: data.acceptedThinkingLevels.map((level) => t(`thinking_${level}`)).join(' / ') }));
-      else if (autoTest && data?.verified === false) toast(t('modelAutoTestFailed'));
       else toast(t('modelSaved'));
       const loaded = await loadSettings();
       dialog.saving = false;
@@ -1861,6 +1878,12 @@ async function saveModel() {
       closeDialog();
       if (state.onboarding) setSetupStep('security');
       await refresh();
+    } else if (status === 200) {
+      // The check runs before the commit, so nothing was written: keep the dialog, the typed
+      // values and the key (fixing and retrying is one click) and say why it did not switch.
+      draft.apiKey = ''; // persisted sealed in the candidate, never echoed back
+      await loadSettings();
+      dialog.saveError = { testError: typeof data.testError === 'string' ? data.testError : null, status: data.status };
     } else if (status !== 401) dialog.saveError = true;
   } catch {
     dialog.saveError = true;
@@ -1868,6 +1891,22 @@ async function saveModel() {
     dialog.saving = false;
     bumpDialog();
   }
+}
+
+async function modelDraftAction(dataset) {
+  if (state.changingModel) return;
+  state.changingModel = true;
+  state.modelDraftNotice = null;
+  bumpDialog();
+  try {
+    const { status, data } = await request('/app/api/settings/model/draft', { id: dataset.id, revision: Number(dataset.revision), action: dataset.operation });
+    if (status === 200) {
+      await loadSettings();
+      if (data.status === 'conflict' || data.status === 'busy') state.modelDraftNotice = `modelDraft_${data.status}`;
+      if (data.activated && state.onboarding) setSetupStep('security');
+    } else if (status !== 401) state.modelDraftNotice = status === 409 ? 'modelDraft_conflict' : 'modelSaveFailed';
+  } catch { state.modelDraftNotice = 'modelSaveFailed'; }
+  finally { state.changingModel = false; bumpDialog(); renderSetup(); renderComposerModels(); }
 }
 
 async function createPairing() {
@@ -2325,6 +2364,7 @@ document.addEventListener('click', (event) => {
     case 'provider': return openProvider(dataset.provider);
     case 'provider-variant': return selectProviderVariant(dataset.provider);
     case 'test-model': return void testModel();
+    case 'model-draft': return void modelDraftAction(dataset);
     case 'toggle-key':
       state.dialog.showKey = !state.dialog.showKey;
       return bumpDialog();
@@ -2462,6 +2502,7 @@ document.addEventListener('input', (event) => {
   const field = MODEL_DRAFT_FIELDS[event.target.id];
   if (field && state.modelDraft) {
     state.dialog.test = null;
+    state.dialog.saveError = false;
     $('#model-test-result')?.replaceChildren();
     const isSelect = event.target.tagName === 'SELECT';
     state.modelDraft[field] = isSelect && event.target.value === MODEL_CUSTOM ? '' : event.target.value;
@@ -2482,7 +2523,7 @@ document.addEventListener('input', (event) => {
 document.addEventListener('change', (event) => {
   if (event.target.id === 'model-auto-test' && state.dialog) {
     state.dialog.autoTest = event.target.checked;
-    return;
+    return bumpDialog();
   }
   if (event.target.id !== 'model-api' || !state.modelDraft) return;
   state.modelDraft.provider = event.target.value;

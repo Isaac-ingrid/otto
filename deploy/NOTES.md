@@ -116,7 +116,32 @@ bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
 Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
 `apps/steward/ui` only needs re-copying when the page itself changes.
 
-Latest deployment (2026-11-16): `c77f6a5` (runtime source unchanged from CI-verified `b7c1220`).
+UI follow-up (2026-11-16): `/opt/otto/releases/model-ui-feedback-20261116T102012Z/`
+updates only `workspace.js`, `i18n.js` and `workspace.css`, with checksums and a full prior UI
+copy in `previous/ui/`. No service restart, migration or database write. Conflict/error feedback
+now renders inside the settings modal instead of behind its backdrop; busy activation has an
+inline explanation, visible disabled styling and live re-enabling when the reply ends. Nine
+browser tests, 56 focused regressions, steward typecheck and the retained conversation journey
+passed. Evidence: `.verification/evidence/model-conflict-ui/`. The backend version is unchanged.
+
+Latest deployment (2026-11-16): model-selection candidate from `4daf270` plus the uncommitted
+workspace changes (not a committed release). Release/receipt:
+`/opt/otto/releases/model-selection-4daf270-dirty-20261116T093635Z/` and `deployment.json`.
+Bundle/map and every UI asset passed SHA-256 checks before and after activation. The full old
+`dist/` and integrity-checked SQLite snapshot are in that release's `previous/` directory.
+Migration `037_model_drafts` applied; no credentials, model configuration, dependencies or
+connector were changed. Code-only rollback: stop `otto`, preserve the current `dist/`, copy
+`previous/dist/` back to `/opt/otto/dist`, and restart. Do not casually restore the database.
+
+Local release checks: complete serial steward suite 888 passed, all seven isolated browser
+journeys passed, health-monitor/improvement selftests and memory/routing/PR-intent faux selftests
+passed. The earlier parallel suite's single alarm failure remains retained; its root cause was
+not established, and the serial pass is not a claim that the parallel race was fixed. Deployment
+health: service active, SQLite quick-check ok, public HTTPS 200, unauthenticated settings 401,
+forged Host 421, doctor zero failures. Real-provider/owner acceptance is pending. Local evidence:
+`.verification/evidence/model-selection-deploy/`. Existing offsite-backup warning remains.
+
+Previous deployment (2026-11-16): `c77f6a5` (runtime source unchanged from CI-verified `b7c1220`).
 Node bundle/map and all 19 UI files were checksum-verified before activation. Bundle SHA-256:
 `d7d435a3cade23e51f2b866e1af67fd331f5680dcbb7db336302e972f19919c8`.
 The release and receipt are `/opt/otto/releases/c77f6a5-20261116T065819Z/` and its

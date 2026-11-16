@@ -23,6 +23,8 @@ import {
   resolveModelConfig,
   resolveModelThinking,
   type ComposerModelInput,
+  type ModelSwitchInput,
+  type ModelSaveResult,
   type StewardThinkingLevel,
 } from "./llm/models.ts";
 import type { SqlExecutor } from "./schema.ts";
@@ -32,6 +34,7 @@ import { WorkspaceError } from "./workspace.ts";
 /** Dependencies the store borrows from the Steward Durable Object. */
 export interface ModelConfigDeps {
   sql: SqlExecutor;
+  tx: <T>(fn: () => T) => T;
   serverKeys: () => Promise<ServerKey[]>;
   /** `env.MODEL_KEY` trimmed, or undefined. Seeds the sealed config on first read. */
   modelKey: () => string | undefined;
@@ -45,9 +48,8 @@ export interface ModelConfigDeps {
 
 /**
  * Model credential storage, connection testing and read-only selection diagnostics.
- * All SQL writes are per-statement (no explicit transaction), exactly as in the original
- * Steward methods — the rotation-convergence re-seal in `sealedKeyFor` and the idempotent
- * `ON CONFLICT` upserts are preserved verbatim.
+ * Live configuration commits use a synchronous transaction after all crypto preparation.
+ * Candidates are separate sealed snapshots; verification cannot modify live dependencies.
  */
 export class ModelConfigStore {
   constructor(private readonly deps: ModelConfigDeps) {}
@@ -68,6 +70,12 @@ export class ModelConfigStore {
    * vars still supply modelId/baseUrl.
    */
   async setModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null): Promise<void> {
+    const commit = await this.prepareModelConfig(provider, apiKey, modelId, baseUrl, thinkingLevel, headers, thinkingJson);
+    this.deps.tx(commit);
+    this.deps.notifyModelChanged();
+  }
+
+  private async prepareModelConfig(provider: string, apiKey?: string, modelId?: string, baseUrl?: string, thinkingLevel?: StewardThinkingLevel, headers?: Record<string, string>, thinkingJson?: string | null): Promise<() => void> {
     if (!provider.trim()) throw new Error("provider is required");
     const providerId = provider.trim();
     const [primary] = await this.deps.serverKeys();
@@ -76,38 +84,135 @@ export class ModelConfigStore {
     // that stored key — a pre-#74 reader of sh_model keeps seeing a matching provider+key.
     const sealedKey = key || (await this.sealedKeyFor(providerId)) || "";
     const apiKeyEnc = sealedKey ? await sealSecret(primary!, sealedKey) : "";
-    if (key) {
-      this.sql`
+    const providerKeyEnc = key ? await sealSecret(primary!, key) : null;
+    const headersEnc = headers !== undefined ? await sealSecret(primary!, JSON.stringify(headers)) : null;
+    return () => {
+      if (key) this.sql`
         INSERT INTO sh_provider_key (provider, apiKeyEnc, updatedAt)
-        VALUES (${providerId}, ${await sealSecret(primary!, key)}, ${Date.now()})
-        ON CONFLICT(provider) DO UPDATE SET
-          apiKeyEnc = excluded.apiKeyEnc, updatedAt = excluded.updatedAt
+        VALUES (${providerId}, ${providerKeyEnc}, ${Date.now()})
+        ON CONFLICT(provider) DO UPDATE SET apiKeyEnc = excluded.apiKeyEnc, updatedAt = excluded.updatedAt
       `;
-    }
-    const modelIdValue = modelId?.trim() || null;
-    const baseUrlValue = baseUrl?.trim() || null;
-    const previous = this.sql<{ provider: string; modelId: string | null; thinkingLevel: StewardThinkingLevel | null }>`SELECT provider, modelId, thinkingLevel FROM sh_model WHERE id = 0`[0];
-    const thinkingValue = thinkingLevel ?? (previous?.provider === providerId && previous.modelId === modelIdValue ? previous.thinkingLevel : null);
-    this.sql`
-      INSERT INTO sh_model (id, provider, apiKeyEnc, modelId, baseUrl, thinkingLevel, updatedAt)
-      VALUES (0, ${providerId}, ${apiKeyEnc}, ${modelIdValue}, ${baseUrlValue}, ${thinkingValue}, ${Date.now()})
-      ON CONFLICT(id) DO UPDATE SET
-        provider = excluded.provider, apiKeyEnc = excluded.apiKeyEnc,
-        modelId = excluded.modelId, baseUrl = excluded.baseUrl, thinkingLevel = excluded.thinkingLevel, updatedAt = excluded.updatedAt
-    `;
-    // The LLM wiring (issue #6) installs the sealed selection lazily (ensureRootModel, before
-    // the next submit) — resetting the memo is enough; the models collection handed to pi at
-    // open stays the same object and is re-keyed in place. The faux provider's scripted state
-    // is per-isolate and never rebuilt.
-    if (modelIdValue) this.sql`
-      INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, thinkingJson, updatedAt)
-      VALUES (${providerId}, ${modelIdValue}, ${baseUrlValue}, ${headers !== undefined ? await sealSecret(primary!, JSON.stringify(headers)) : null}, ${thinkingJson ?? null}, ${Date.now()})
-      ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
-        headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc),
-        thinkingJson = CASE WHEN ${thinkingJson === undefined ? 0 : 1} THEN ${thinkingJson ?? null} ELSE sh_saved_model.thinkingJson END,
-        updatedAt = excluded.updatedAt
-    `;
+      const modelIdValue = modelId?.trim() || null;
+      const baseUrlValue = baseUrl?.trim() || null;
+      const previous = this.sql<{ provider: string; modelId: string | null; thinkingLevel: StewardThinkingLevel | null }>`SELECT provider, modelId, thinkingLevel FROM sh_model WHERE id = 0`[0];
+      const thinkingValue = thinkingLevel ?? (previous?.provider === providerId && previous.modelId === modelIdValue ? previous.thinkingLevel : null);
+      this.sql`
+        INSERT INTO sh_model (id, provider, apiKeyEnc, modelId, baseUrl, thinkingLevel, updatedAt)
+        VALUES (0, ${providerId}, ${apiKeyEnc}, ${modelIdValue}, ${baseUrlValue}, ${thinkingValue}, ${Date.now()})
+        ON CONFLICT(id) DO UPDATE SET
+          provider = excluded.provider, apiKeyEnc = excluded.apiKeyEnc,
+          modelId = excluded.modelId, baseUrl = excluded.baseUrl, thinkingLevel = excluded.thinkingLevel, updatedAt = excluded.updatedAt
+      `;
+      // The runtime installs lazily before the next submit; notify only after the transaction.
+      if (modelIdValue) this.sql`
+        INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, thinkingJson, updatedAt)
+        VALUES (${providerId}, ${modelIdValue}, ${baseUrlValue}, ${headersEnc}, ${thinkingJson ?? null}, ${Date.now()})
+        ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
+          headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc),
+          thinkingJson = CASE WHEN ${thinkingJson === undefined ? 0 : 1} THEN ${thinkingJson ?? null} ELSE sh_saved_model.thinkingJson END,
+          updatedAt = excluded.updatedAt
+      `;
+      this.sql`UPDATE sh_model_generation SET generation = generation + 1 WHERE id = 0`;
+    };
+  }
+
+  async selectIdleModel(input: ComposerModelInput & { baseUrl?: string | null }, busy: () => Promise<boolean>): Promise<void> {
+    const generation = this.generation();
+    const commit = await this.prepareModelConfig(input.provider, undefined, input.modelId, input.baseUrl ?? undefined, input.thinkingLevel);
+    if (await busy()) throw new WorkspaceError('model_busy', 409);
+    this.deps.tx(() => {
+      if (this.generation() !== generation) throw new WorkspaceError('model_conflict', 409);
+      commit();
+    });
     this.deps.notifyModelChanged();
+  }
+
+  private generation(): number {
+    return this.sql<{ generation: number }>`SELECT generation FROM sh_model_generation WHERE id = 0`[0]!.generation;
+  }
+
+  drafts() {
+    // Deliberately excludes the sealed payload, credentials and custom headers.
+    return this.sql<{ id: string; provider: string; modelId: string; revision: number; status: string; testError: string | null }>`
+      SELECT id, provider, modelId, revision, status, testError FROM sh_model_draft ORDER BY updatedAt DESC`;
+  }
+
+  async saveDraft(input: ModelSwitchInput): Promise<ModelSaveResult> {
+    // Freeze inherited credentials/headers now: later changes must not change what was tested.
+    const generation = this.generation();
+    const payload = { ...input, apiKey: input.apiKey ?? await this.sealedKeyFor(input.provider) ?? '',
+      headers: input.headers ?? await this.headersFor(input.provider, input.modelId) ?? {} };
+    const payloadEnc = await sealSecret((await this.deps.serverKeys())[0]!, JSON.stringify(payload));
+    return this.deps.tx(() => {
+      const old = this.sql<{ id: string; revision: number }>`SELECT id, revision FROM sh_model_draft WHERE provider = ${input.provider} AND modelId = ${input.modelId}`[0];
+      const id = old?.id ?? crypto.randomUUID();
+      const revision = (old?.revision ?? 0) + 1;
+      this.sql`INSERT INTO sh_model_draft (id, provider, modelId, revision, generation, payloadEnc, status, updatedAt)
+        VALUES (${id}, ${input.provider}, ${input.modelId}, ${revision}, ${generation}, ${payloadEnc}, 'saved', ${Date.now()})
+        ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, generation = excluded.generation,
+          payloadEnc = excluded.payloadEnc, status = 'saved', testError = NULL, levelsJson = NULL, updatedAt = excluded.updatedAt`;
+      return { ok: true, activated: false, status: 'saved', draftId: id, revision };
+    });
+  }
+
+  private async readDraft(id: string, revision: number) {
+    const row = this.sql<{ payloadEnc: string; generation: number; status: string; levelsJson: string | null }>`
+      SELECT payloadEnc, generation, status, levelsJson FROM sh_model_draft WHERE id = ${id} AND revision = ${revision}`[0];
+    if (!row) throw new WorkspaceError('model_draft_conflict', 409);
+    const opened = await openSecret(await this.deps.serverKeys(), row.payloadEnc);
+    if (!opened) throw new WorkspaceError('model_draft_unreadable', 409);
+    return { ...row, input: JSON.parse(opened.text) as ModelSwitchInput };
+  }
+
+  async verifyDraft(id: string, revision: number): Promise<ModelSaveResult> {
+    const { input } = await this.readDraft(id, revision);
+    // No live verification/probe rows are written before activation.
+    const result = await this.verifyAndProbe(input, { force: false, record: false });
+    const current = this.drafts().find(draft => draft.id === id);
+    if (current?.revision !== revision) return { ok: true, activated: false, status: 'conflict', draftId: id, revision };
+    this.sql`UPDATE sh_model_draft SET status = ${result.ok ? 'verified' : 'verification_failed'},
+      testError = ${result.ok ? null : result.error}, levelsJson = ${result.ok ? JSON.stringify(result.acceptedThinkingLevels ?? null) : null}, updatedAt = ${Date.now()}
+      WHERE id = ${id} AND revision = ${revision}`;
+    return { ok: true, activated: false, draftId: id, revision, status: result.ok ? 'verified' : 'verification_failed',
+      verified: result.ok, ...(!result.ok ? { testError: result.error } : {}),
+      ...(result.ok && result.acceptedThinkingLevels ? { acceptedThinkingLevels: result.acceptedThinkingLevels } : {}) };
+  }
+
+  async activateDraft(id: string, revision: number, busy: () => Promise<boolean>): Promise<ModelSaveResult> {
+    const draft = await this.readDraft(id, revision);
+    const response = (status: ModelSaveResult['status']): ModelSaveResult => ({ ok: true, activated: false, draftId: id, revision, status });
+    if (draft.status !== 'verified') return response('verification_failed');
+    const input = draft.input;
+    const commit = await this.prepareModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel, input.headers, input.thinkingJson);
+    const headersEnc = await sealSecret((await this.deps.serverKeys())[0]!, JSON.stringify(input.headers ?? {}));
+    const hash = await this.modelCredentialHash(input.apiKey ?? '', input.headers);
+    // All crypto/decryption has finished. No external await after the final busy observation.
+    if (await busy()) return response('busy');
+    const outcome = this.deps.tx(() => {
+      const current = this.drafts().find(row => row.id === id);
+      if (current?.revision !== revision || current.status !== 'verified') return response('conflict');
+      if (this.generation() !== draft.generation) return response('conflict');
+      commit();
+      for (const modelId of input.importedModelIds ?? []) this.sql`
+        INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, updatedAt)
+        VALUES (${input.provider}, ${modelId}, ${input.baseUrl ?? null}, ${headersEnc}, ${Date.now()})
+        ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl, headersEnc = excluded.headersEnc, updatedAt = excluded.updatedAt`;
+      this.sql`INSERT INTO sh_verified_model (provider, modelId, baseUrl, credentialHash, verifiedAt)
+        VALUES (${input.provider}, ${input.modelId}, ${input.baseUrl ?? ''}, ${hash}, ${Date.now()})
+        ON CONFLICT(provider, modelId, baseUrl) DO UPDATE SET credentialHash = excluded.credentialHash, verifiedAt = excluded.verifiedAt`;
+      if (draft.levelsJson && draft.levelsJson !== 'null') this.sql`
+        INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt)
+        VALUES (${input.provider}, ${input.modelId}, ${input.baseUrl ?? ''}, ${hash}, ${draft.levelsJson}, ${Date.now()})
+        ON CONFLICT(provider, modelId, baseUrl) DO UPDATE SET credentialHash = excluded.credentialHash, levelsJson = excluded.levelsJson, probedAt = excluded.probedAt`;
+      this.sql`UPDATE sh_model_draft SET status = 'activated', updatedAt = ${Date.now()} WHERE id = ${id}`;
+      return { ok: true, activated: true, status: 'activated', verified: true, draftId: id, revision } satisfies ModelSaveResult;
+    });
+    if (outcome.activated) this.deps.notifyModelChanged();
+    return outcome;
+  }
+
+  deleteDraft(id: string, revision: number): void {
+    this.sql`DELETE FROM sh_model_draft WHERE id = ${id} AND revision = ${revision}`;
   }
 
   savedModels(): { provider: string; modelId: string; baseUrl: string | null; thinkingJson: string | null }[] {
@@ -220,7 +325,7 @@ export class ModelConfigStore {
    */
   async verifyAndProbe(
     input: { provider: string; modelId: string; baseUrl?: string; apiKey?: string; headers?: Record<string, string>; thinkingLevel?: StewardThinkingLevel },
-    options: { force: boolean },
+    options: { force: boolean; record?: boolean },
   ): Promise<{ ok: true; acceptedThinkingLevels?: ModelThinkingLevel[]; cached?: boolean } | { ok: false; error: ConnectionTestError }> {
     const config = { provider: input.provider, modelId: input.modelId, explicit: true, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) };
     const apiKey = input.apiKey ?? await this.sealedKeyFor(input.provider) ?? undefined;
@@ -238,7 +343,7 @@ export class ModelConfigStore {
     const result = await testModelConnection({ ...config, ...(headers ? { headers } : {}), ...(probesLevels ? { thinkingLevel: "auto" as const } : {}) }, apiKey);
     if (!result.ok) return { ok: false, error: result.error };
     if (apiKey && hash) {
-      this.sql`
+      if (options.record !== false) this.sql`
         INSERT INTO sh_verified_model (provider, modelId, baseUrl, credentialHash, verifiedAt)
         VALUES (${input.provider}, ${input.modelId}, ${input.baseUrl ?? ""}, ${hash}, ${Date.now()})
         ON CONFLICT(provider, modelId, baseUrl) DO UPDATE SET credentialHash = excluded.credentialHash, verifiedAt = excluded.verifiedAt
@@ -247,7 +352,7 @@ export class ModelConfigStore {
         // Seven bounded, billable completions — one per level — only ever after a test the
         // owner asked for (a save with auto-test, or the test button).
         const accepted = await probeAcceptedThinkingLevels({ ...config, ...(headers ? { headers } : {}) }, apiKey);
-        this.sql`
+        if (options.record !== false) this.sql`
           INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt)
           VALUES (${input.provider}, ${input.modelId}, ${input.baseUrl ?? ""}, ${hash}, ${JSON.stringify(accepted)}, ${Date.now()})
           ON CONFLICT(provider, modelId, baseUrl) DO UPDATE SET credentialHash = excluded.credentialHash,

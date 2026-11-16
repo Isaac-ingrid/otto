@@ -236,14 +236,20 @@ export type ModelSwitchInput = Pick<StewardModelConfig, "provider" | "modelId" |
   /** The owner's written-down level list for a gateway model, as canonical JSON (models.ts
    *  parseThinkingDeclaration), or null to clear it. */
   thinkingJson?: string | null;
-  /** Save, then run the connection test (and the level probes) automatically — the owner asked
-   *  for the endpoint to be checked on save, so no separate button press is needed. */
+  /** Save a sealed candidate, test it, then attempt guarded activation. False/omitted saves
+   *  only a candidate; it never enables unchecked configuration. Tests may use provider credits. */
   autoTest?: boolean;
 };
 
-/** What a save reports back: the save itself succeeded, plus the automatic check, if any. */
+/** Workspace lifecycle result. Only explicit `activated: true` permits the UI to advance
+ *  onboarding. Saving/testing alone never replaces live credentials, headers or selection.
+ *  Optional fields retain compatibility with older API test doubles. */
 export interface ModelSaveResult {
   ok: true;
+  activated?: boolean;
+  status?: 'saved' | 'verification_failed' | 'verified' | 'activated' | 'busy' | 'conflict';
+  draftId?: string;
+  revision?: number;
   verified?: boolean;
   testError?: string;
   acceptedThinkingLevels?: ModelThinkingLevel[];

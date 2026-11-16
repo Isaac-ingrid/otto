@@ -135,6 +135,17 @@ export function thinkingAfterModelChange(model, current = 'off') {
   return model?.thinkingLevels?.includes(current) ? current : model?.defaultThinkingLevel ?? 'off';
 }
 
+/** Report only a server adjustment to the requested tier, not an intentional tier change. */
+export function thinkingAdjusted(requested, next) {
+  return Boolean(next) && requested?.thinkingLevel !== next.thinkingLevel;
+}
+
+/** The copy key for a reason a save did not activate (issue #70). The server reports the same
+ *  vocabulary as the manual connection test, so the cause reads the same wherever it appears. */
+export function modelRejectionKey(testError) {
+  return `modelTest_${testError || 'provider_error'}`;
+}
+
 /** Only configured providers belong in the chat's model menu. */
 export function availableChatModels(settings) {
   return (settings?.providers ?? []).filter((provider) => settings.keyedProviders.includes(provider.id));

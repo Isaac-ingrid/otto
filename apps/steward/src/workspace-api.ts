@@ -48,6 +48,7 @@ export interface WorkspaceApiDeps {
    * to a previously keyed provider needs no re-entry, while giving a key reseals it (the
    * "fix a rejected key" flow stays the same single form). */
   saveModel?(input: ModelSwitchInput): Promise<ModelSaveResult>;
+  modelDraftAction?(id: string, revision: number, action: 'verify' | 'activate' | 'delete'): Promise<ModelSaveResult>;
   selectModel?(input: ComposerModelInput): Promise<unknown>;
   testModel?(input: ModelSwitchInput): Promise<ConnectionTestResult>;
   importModels?(input: ModelSwitchInput): Promise<{ models: { id: string; name: string }[] }>; 
@@ -250,6 +251,11 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     }
     if (url.pathname === "/app/api/settings/model/test" && deps.testModel) {
       return json(await deps.testModel(parseModelSwitch(await readJson(request))));
+    }
+    if (url.pathname === '/app/api/settings/model/draft' && deps.modelDraftAction) {
+      const { id, revision, action } = await readJson(request);
+      if (typeof id !== 'string' || id.length > 128 || !Number.isSafeInteger(revision) || (revision as number) < 1 || (action !== 'verify' && action !== 'activate' && action !== 'delete')) throw new WorkspaceError('bad_request');
+      return json(await deps.modelDraftAction(id, revision as number, action));
     }
     if (url.pathname === "/app/api/settings/model" && deps.saveModel) {
       return json(await deps.saveModel(parseModelSwitch(await readJson(request))));

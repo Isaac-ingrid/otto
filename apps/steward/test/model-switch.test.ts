@@ -7,6 +7,14 @@
 import { SELF, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Steward } from "../src/steward.ts";
+import type { ModelSwitchInput } from '../src/llm/models.ts';
+import type { ModelConfigStore } from '../src/model-config.ts';
+
+// Trusted fixture setup only. Workspace saves now create candidates, not live settings.
+async function seed(input: ModelSwitchInput) {
+  await ownerStub().setModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel, input.headers, input.thinkingJson);
+}
+type Internals = { modelConfigStore: ModelConfigStore; sql: Sql; testingModel: boolean };
 import { ownerStub, webLogin } from "./helpers.ts";
 
 type Sql = (strings: TemplateStringsArray, ...values: unknown[]) => unknown;
@@ -23,6 +31,7 @@ async function clearModelRow(): Promise<void> {
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_saved_model`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_verified_model`;
     (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_model_thinking_probe`;
+    (instance as unknown as { sql: Sql }).sql.bind(instance)`DELETE FROM sh_model_draft`;
   });
 }
 
@@ -115,7 +124,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("tests saved or draft keys without saving credentials or changing the selected model", async () => {
     const { settings, post } = await browser();
-    await post("settings/model", { provider: "deepseek", modelId: "deepseek-flash", apiKey: "saved-test-key" });
+    await seed({ provider: "deepseek", modelId: "deepseek-flash", apiKey: "saved-test-key" });
     const before = await (await settings()).json();
     const saved = await post("settings/model/test", { provider: "deepseek", modelId: "not-in-catalog" });
     expect(await saved.json()).toEqual({ ok: false, error: "unknown_model" });
@@ -153,31 +162,31 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     // The test env binds MODEL_KEY, so this first read seeds the default provider's key.
     expect(body.keyedProviders).toEqual(["deepseek"]);
 
-    await post("settings/model", { provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-web" });
+    await seed({ provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-web" });
     const after = (await (await settings()).json()) as { keyedProviders: string[] };
     expect(after.keyedProviders).toEqual(["anthropic", "deepseek"]);
   });
 
-  it("POST /app/api/settings/model switches provider + modelId, overriding vars, and the owner sees it reflected back", async () => {
+  it("POST saves a sealed candidate without changing the live selection when no test is requested", async () => {
     const { post, settings } = await browser();
     const res = await post("settings/model", { provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-web" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toMatchObject({ ok: true, activated: false, status: 'saved', revision: 1 });
 
     const after = (await (await settings()).json()) as { model: { provider: string; modelId: string; apiKey: boolean } };
-    expect(after.model).toMatchObject({ provider: "anthropic", modelId: "claude-sonnet-x", apiKey: true });
+    expect(after.model).toMatchObject({ provider: 'faux', modelId: 'faux-1' });
   });
 
   it("carries baseUrl through when given", async () => {
     const { post, settings } = await browser();
-    await post("settings/model", { provider: "openai", modelId: "gpt-x", apiKey: "sk-openai-web", baseUrl: "https://proxy.example/v1" });
+    await seed({ provider: "openai", modelId: "gpt-x", apiKey: "sk-openai-web", baseUrl: "https://proxy.example/v1" });
     const after = (await (await settings()).json()) as { model: { baseUrl: string | null } };
     expect(after.model.baseUrl).toBe("https://proxy.example/v1");
   });
 
   it("shows only accepted tiers for the exact saved gateway and invalidates a rotated key", async () => {
     const { post, settings } = await browser();
-    await post("settings/model", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", apiKey: "key-a", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
+    await seed({ provider: "openai-compatible", modelId: "deepseek-v4.1-flash", apiKey: "key-a", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(["key-a", []])))), (byte) => byte.toString(16).padStart(2, "0")).join("");
     await runInDurableObject(ownerStub(), (instance: Steward) => {
       (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt) VALUES ('openai-compatible', 'deepseek-v4.1-flash', 'https://gateway.example/v1', ${digest}, '["minimal","medium"]', 1)`;
@@ -187,7 +196,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     expect(body.model.thinkingLevels).toEqual(["auto", "minimal", "medium"]);
     expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", thinkingLevel: "medium" })).status).toBe(200);
     expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", thinkingLevel: "max" })).status).toBe(400);
-    await post("settings/model", { provider: "openai-compatible", modelId: "deepseek-v4.1-flash", apiKey: "key-b", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
+    await seed({ provider: "openai-compatible", modelId: "deepseek-v4.1-flash", apiKey: "key-b", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
     const rotated = (await (await settings()).json()) as { thinkingProbes: unknown[]; model: { thinkingLevels: string[] } };
     expect(rotated.thinkingProbes).toEqual([]);
     // Nothing is declared or measured for the rotated key any more, so the picker stops
@@ -197,8 +206,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("stores an owner-written level list and narrows the picker to it, immediately", async () => {
     const { post, settings } = await browser();
-    const declared = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-b", apiKey: "key-b", baseUrl: "https://gateway.example/v1", thinkingJson: JSON.stringify(["minimal", "low", "medium", "high"]), thinkingLevel: "max" });
-    expect(declared.status).toBe(200);
+    await seed({ provider: "openai-compatible", modelId: "gateway-b", apiKey: "key-b", baseUrl: "https://gateway.example/v1", thinkingJson: JSON.stringify(["minimal", "low", "medium", "high"]), thinkingLevel: "max" });
     const body = (await (await settings()).json()) as { savedModels: { modelId: string; thinkingJson: string; thinkingLevels: string[] }[]; model: { thinkingLevel: string; thinkingLevels: string[] } };
     expect(body.savedModels.find((entry) => entry.modelId === "gateway-b")).toMatchObject({ thinkingLevels: ["minimal", "low", "medium", "high"] });
     // A level the owner's own list does not have is dropped back to auto rather than sent.
@@ -206,8 +214,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     expect(body.model.thinkingLevel).toBe("auto");
     expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "gateway-b", thinkingLevel: "medium" })).status).toBe(200);
     expect((await post("settings/model/selection", { provider: "openai-compatible", modelId: "gateway-b", thinkingLevel: "xhigh" })).status).toBe(400);
-    const cleared = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-b", baseUrl: "https://gateway.example/v1", thinkingJson: "", thinkingLevel: "medium" });
-    expect(cleared.status).toBe(200);
+    await seed({ provider: "openai-compatible", modelId: "gateway-b", baseUrl: "https://gateway.example/v1", thinkingJson: null, thinkingLevel: "medium" });
     const after = (await (await settings()).json()) as { model: { thinkingLevels: string[] } };
     expect(after.model.thinkingLevels).toEqual(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   });
@@ -221,7 +228,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("a save with auto-test reuses a probe already measured for the same key", async () => {
     const { post } = await browser();
-    await post("settings/model", { provider: "openai-compatible", modelId: "gateway-d", apiKey: "key-d", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
+    await seed({ provider: "openai-compatible", modelId: "gateway-d", apiKey: "key-d", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto" });
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(["key-d", []])))), (byte) => byte.toString(16).padStart(2, "0")).join("");
     await runInDurableObject(ownerStub(), (instance: Steward) => {
       (instance as unknown as { sql: Sql }).sql.bind(instance)`INSERT INTO sh_model_thinking_probe (provider, modelId, baseUrl, credentialHash, levelsJson, probedAt) VALUES ('openai-compatible', 'gateway-d', 'https://gateway.example/v1', ${digest}, '["low","high"]', 1)`;
@@ -230,7 +237,40 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     // with the cached levels proves the save never spent a request.
     const res = await post("settings/model", { provider: "openai-compatible", modelId: "gateway-d", apiKey: "key-d", baseUrl: "https://gateway.example/v1", thinkingLevel: "auto", autoTest: true });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, verified: true, acceptedThinkingLevels: ["low", "high"] });
+    expect(await res.json()).toMatchObject({ ok: true, verified: true, activated: true, acceptedThinkingLevels: ["low", "high"] });
+  });
+
+  it("a save whose automatic check fails leaves the live configuration exactly as it was (issue #70)", async () => {
+    const { post, settings } = await browser();
+    await seed({ provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-live" });
+    const before = await (await settings()).json();
+
+    // Checking before committing: the candidate names a model the catalog does not ship, so the
+    // check fails before any request goes out and nothing about the running deployment may have
+    // moved — not the provider, not the key, not a saved-model row.
+    const rejected = await post("settings/model", { provider: "deepseek", modelId: "not-in-catalog", apiKey: "sk-bad", autoTest: true });
+    expect(rejected.status).toBe(200);
+    expect(await rejected.json()).toMatchObject({ ok: true, verified: false, activated: false, status: 'verification_failed', testError: "unknown_model" });
+
+    const after = await (await settings()).json() as Record<string, unknown>;
+    expect({ ...after, modelDrafts: [] }).toEqual({ ...before as object, modelDrafts: [] });
+    expect(after.modelDrafts).toEqual([expect.objectContaining({ status: 'verification_failed', testError: 'unknown_model' })]);
+    expect(await ownerStub().modelConfig()).toMatchObject({ provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-live" });
+    // Neither rejected candidate's key was sealed, so neither can leak into a later switch.
+    expect(await ownerStub().keyedProviders()).toEqual(["anthropic"]);
+  });
+
+  it("a rejected candidate never overwrites the live provider's key (issue #70)", async () => {
+    const { post, settings } = await browser();
+    await seed({ provider: "deepseek", modelId: "deepseek-flash", apiKey: "sk-live" });
+    expect((await ownerStub().modelConfig())?.apiKey).toBe("sk-live");
+
+    // The same provider with a new key: activating first and rolling back after would already
+    // have overwritten the key the deployment was running on.
+    await post("settings/model", { provider: "deepseek", modelId: "not-in-catalog", apiKey: "sk-bad", autoTest: true });
+    expect(await ownerStub().modelConfig()).toMatchObject({ provider: "deepseek", modelId: "deepseek-flash", apiKey: "sk-live" });
+    const listed = (await (await settings()).json()) as { savedModels: { modelId: string }[] };
+    expect(listed.savedModels.some((entry) => entry.modelId === "not-in-catalog")).toBe(false);
   });
 
   it("keeps the saved level until the endpoint is declared or measured", async () => {
@@ -243,7 +283,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("lists only verified saved models and invalidates verification when the key changes", async () => {
     const { post, settings } = await browser();
-    await post("settings/model", { provider: "openai-compatible", modelId: "gateway-a", apiKey: "key-a", baseUrl: "https://gateway.example/v1" });
+    await seed({ provider: "openai-compatible", modelId: "gateway-a", apiKey: "key-a", baseUrl: "https://gateway.example/v1" });
     const before = (await (await settings()).json()) as { verifiedModels: unknown[] };
     expect(before.verifiedModels).toEqual([]);
     const canonical = JSON.stringify(["key-a", []]);
@@ -253,17 +293,25 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     });
     const ready = (await (await settings()).json()) as { verifiedModels: unknown[] };
     expect(ready.verifiedModels).toEqual([{ provider: "openai-compatible", modelId: "gateway-a" }]);
-    await post("settings/model", { provider: "openai-compatible", modelId: "gateway-a", apiKey: "key-b", baseUrl: "https://gateway.example/v1" });
+    await seed({ provider: "openai-compatible", modelId: "gateway-a", apiKey: "key-b", baseUrl: "https://gateway.example/v1" });
     const rotated = (await (await settings()).json()) as { verifiedModels: unknown[] };
     expect(rotated.verifiedModels).toEqual([]);
   });
 
-  it("persists imported model identifiers for later switching", async () => {
+  it("persists imported identifiers only with a verified activation", async () => {
     const { post, settings } = await browser();
-    const saved = await post("settings/model", {
-      provider: "openai-compatible", modelId: "gateway-a", apiKey: "sk-test", baseUrl: "https://gateway.example/v1",
-      importedModelIds: ["gateway-a", "gateway-b"],
+    // External-boundary substitute only; the real activation/SQL path runs below.
+    await runInDurableObject(ownerStub(), async (instance: Steward) => {
+      const store = (instance as unknown as Internals).modelConfigStore;
+      const draft = await store.saveDraft({ provider: 'openai-compatible', modelId: 'gateway-a', apiKey: 'sk-test', baseUrl: 'https://gateway.example/v1', importedModelIds: ['gateway-a', 'gateway-b'] });
+      const original = store.verifyAndProbe;
+      try {
+        store.verifyAndProbe = async () => ({ ok: true });
+        await store.verifyDraft(draft.draftId!, draft.revision!);
+        expect((await store.activateDraft(draft.draftId!, draft.revision!, async () => false)).activated).toBe(true);
+      } finally { store.verifyAndProbe = original; }
     });
+    const saved = await settings();
     expect(saved.status).toBe(200);
     const list = (await (await settings()).json()) as { savedModels: { modelId: string }[] };
     expect(list.savedModels.map((entry) => entry.modelId)).toEqual(expect.arrayContaining(["gateway-a", "gateway-b"]));
@@ -272,8 +320,8 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("keeps multiple saved gateway models and switches back to each endpoint", async () => {
     const { post, settings } = await browser();
-    await post("settings/model", { provider: "deepseek", modelId: "gateway-a", apiKey: "sk-gateway", baseUrl: "https://a.example/v1" });
-    await post("settings/model", { provider: "deepseek", modelId: "gateway-b", baseUrl: "https://b.example/v1" });
+    await seed({ provider: "deepseek", modelId: "gateway-a", apiKey: "sk-gateway", baseUrl: "https://a.example/v1" });
+    await seed({ provider: "deepseek", modelId: "gateway-b", baseUrl: "https://b.example/v1" });
     const listed = (await (await settings()).json()) as { savedModels: { modelId: string; baseUrl: string | null }[] };
     expect(listed.savedModels).toEqual(expect.arrayContaining([
       expect.objectContaining({ modelId: "gateway-a", baseUrl: "https://a.example/v1" }),
@@ -287,11 +335,10 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("a switch without apiKey keeps the provider's sealed key (issue #74)", async () => {
     const { post, settings } = await browser();
-    await post("settings/model", { provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-web" });
-    await post("settings/model", { provider: "openai", modelId: "gpt-o", apiKey: "sk-openai-web" });
+    await seed({ provider: "anthropic", modelId: "claude-sonnet-x", apiKey: "sk-ant-web" });
+    await seed({ provider: "openai", modelId: "gpt-o", apiKey: "sk-openai-web" });
 
-    const back = await post("settings/model", { provider: "anthropic", modelId: "claude-sonnet-y" });
-    expect(back.status).toBe(200);
+    await seed({ provider: "anthropic", modelId: "claude-sonnet-y" });
     const after = (await (await settings()).json()) as { model: { provider: string; modelId: string; apiKey: boolean }; keyedProviders: string[] };
     expect(after.model).toMatchObject({ provider: "anthropic", modelId: "claude-sonnet-y", apiKey: true });
     // No settings read happened first, so MODEL_KEY never seeded: only the saved keys.
@@ -304,7 +351,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     // (`model_not_available`), and passing no baseUrl on the switch would have dropped the
     // gateway and re-pointed the deployment at the vendor's first-party API.
     const { post, settings } = await browser();
-    await post("settings/model", { provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", apiKey: "sk-gateway", baseUrl: "https://gw.example/v1" });
+    await seed({ provider: "deepseek", modelId: "deepseek-v4.1-flash-1017", apiKey: "sk-gateway", baseUrl: "https://gw.example/v1" });
     const before = ((await (await settings()).json()) as { model: { thinkingLevel: string; thinkingLevels: string[] } }).model;
     expect(before.thinkingLevel).toBeTruthy();
     const next = before.thinkingLevels.find((level) => level !== before.thinkingLevel)!;
@@ -317,7 +364,7 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
 
   it("rejects a thinking level the resolved model does not support, and an unknown provider", async () => {
     const { post } = await browser();
-    await post("settings/model", { provider: "deepseek", modelId: "deepseek-flash", apiKey: "sk-ds" });
+    await seed({ provider: "deepseek", modelId: "deepseek-flash", apiKey: "sk-ds" });
     const levels = (await ownerStub().llmSelection()).thinkingLevels;
     const unsupported = (["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const).find((level) => !levels.includes(level))!;
     const bad = await post("settings/model/selection", { provider: "deepseek", modelId: "deepseek-flash", thinkingLevel: unsupported });

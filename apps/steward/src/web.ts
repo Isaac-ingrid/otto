@@ -268,6 +268,7 @@ export interface WebDeps {
     | "stopTurn"
     | "settings"
     | "saveModel"
+    | "modelDraftAction"
     | "selectModel"
     | "testModel"
     | "importModels"

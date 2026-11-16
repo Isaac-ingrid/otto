@@ -2,6 +2,7 @@ import { test, expect, chromium, type Browser, type BrowserContext, type Page } 
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { writeFile } from "node:fs/promises";
 import { TURN_STOPPED_NOTICE } from "../src/owner-notices.ts";
+import type { ModelConfigStore } from '../src/model-config.ts';
 import { startBrowserTestServer, type BrowserTestServer } from "./server-fixture.ts";
 
 let browser: Browser;
@@ -226,6 +227,90 @@ test.describe("Workspace browser smoke suite", () => {
       status: 409,
     });
     expect((await server.steward.debugSnapshot()).routines).toHaveLength(1);
+  });
+
+  test('8. model failure survives reload; retry and activation are distinct owner actions', async () => {
+    // Substitute only the external provider response; browser forms, auth, API, crypto and
+    // SQLite are real. This does not claim that these fake credentials work with DeepSeek.
+    const store = (server.steward as unknown as { modelConfigStore: ModelConfigStore }).modelConfigStore;
+    const original = store.verifyAndProbe;
+    let succeeds = false;
+    store.verifyAndProbe = async () => succeeds ? { ok: true } : { ok: false, error: 'authentication' };
+    try {
+      await signInToWorkspace(page, server);
+      await page.locator('[data-action="account"]').click();
+      await page.locator('#dialog .more-providers > summary').click();
+      await page.locator('#dialog [data-action="provider"][data-provider="deepseek"]').click();
+      await page.locator('#model-key').fill('browser-candidate-key');
+      await page.locator('#model-form button[type="submit"]').click();
+      await expect(page.locator('#model-form [role="alert"]')).toContainText('current model is unchanged');
+      expect(await server.steward.modelConfig()).toMatchObject({ provider: 'faux' });
+      await page.reload();
+      await expect(page.locator('#workspace')).toBeVisible();
+      await page.locator('[data-action="account"]').click();
+      await expect(page.locator('#dialog .connection-test')).toContainText('Connection test failed');
+      succeeds = true;
+      await page.locator('#dialog [data-operation="verify"]').click();
+      await expect(page.locator('#dialog [data-operation="activate"]')).toBeVisible();
+      expect(await server.steward.modelConfig()).toMatchObject({ provider: 'faux' });
+      await page.locator('#dialog [data-operation="activate"]').click();
+      await expect(page.locator('#dialog [data-operation="activate"]')).toHaveCount(0);
+      expect(await server.steward.modelConfig()).toMatchObject({ provider: 'deepseek', apiKey: 'browser-candidate-key' });
+    } finally { store.verifyAndProbe = original; }
+  });
+
+  test('9. stale model activation shows the conflict inside the settings dialog', async () => {
+    await server.steward.setModelConfig('deepseek', 'fixture-key', 'deepseek-flash');
+    const store = (server.steward as unknown as { modelConfigStore: ModelConfigStore }).modelConfigStore;
+    const draft = await store.saveDraft({ provider: 'deepseek', modelId: 'deepseek-flash', apiKey: 'fixture-key' });
+    const original = store.verifyAndProbe;
+    try {
+      store.verifyAndProbe = async () => ({ ok: true });
+      await store.verifyDraft(draft.draftId!, draft.revision!);
+    } finally { store.verifyAndProbe = original; }
+    await signInToWorkspace(page, server);
+    await page.locator('[data-action="account"]').click();
+    await expect(page.locator('#dialog [data-operation="activate"]')).toBeEnabled();
+    // Another window's authenticated public composer action, without a model call.
+    const { csrf } = await (await context.request.get(`${server.baseUrl}/app/api/workspace`)).json();
+    const switched = await context.request.post(`${server.baseUrl}/app/api/settings/model/selection`, {
+      headers: { 'x-csrf-token': csrf, origin: server.baseUrl },
+      data: { provider: 'deepseek', modelId: 'deepseek-v4-pro', thinkingLevel: 'high' },
+    });
+    expect(switched.status()).toBe(200);
+    await page.locator('#dialog [data-operation="activate"]').click();
+    await expect(page.locator('#dialog [role="alert"]')).toContainText('Configuration changed');
+    expect(await server.steward.modelConfig()).toMatchObject({ modelId: 'deepseek-v4-pro' });
+  });
+
+  test('10. model activation explains busy and re-enables after a reply stops without closing settings', async () => {
+    const store = (server.steward as unknown as { modelConfigStore: ModelConfigStore }).modelConfigStore;
+    const draft = await store.saveDraft({ provider: 'deepseek', modelId: 'deepseek-flash', apiKey: 'fixture-key' });
+    const original = store.verifyAndProbe;
+    try {
+      store.verifyAndProbe = async () => ({ ok: true });
+      await store.verifyDraft(draft.draftId!, draft.revision!);
+    } finally { store.verifyAndProbe = original; }
+    await server.streamRepliesAt(2);
+    await server.scriptModel(fauxAssistantMessage([fauxText('A long streaming reply. '.repeat(100))]));
+    await signInToWorkspace(page, server);
+    const other = await context.newPage();
+    try {
+      await other.goto(`${server.baseUrl}/app`);
+      await expect(other.locator('#workspace')).toBeVisible();
+      await expect(other.locator('#connection')).toHaveAttribute('data-state', 'live');
+      await page.locator('[data-action="account"]').click();
+      await expect(page.locator('#dialog [data-operation="activate"]')).toBeEnabled();
+      await other.locator('#message-input').fill('Write a long reply for the busy regression.');
+      await other.locator('#send-button').click();
+      await expect(other.locator('[data-action="stop-turn"]')).toBeVisible();
+      await expect(page.locator('#dialog [data-operation="activate"]')).toBeDisabled();
+      await expect(page.locator('#dialog')).toContainText('A reply is in progress');
+      await other.locator('[data-action="stop-turn"]').click();
+      await expect(page.locator('#dialog [data-operation="activate"]')).toBeEnabled();
+      await expect(page.locator('#dialog')).not.toContainText('A reply is in progress');
+      expect(await server.steward.modelConfig()).toMatchObject({ provider: 'faux' });
+    } finally { await other.close(); }
   });
 
   test("7. stale PR watch approval card beyond TTL cannot activate watch", async () => {

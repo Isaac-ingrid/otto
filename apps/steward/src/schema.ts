@@ -1074,4 +1074,17 @@ export const MIGRATIONS: readonly Migration[] = [
       )`;
     },
   },
+  {
+    id: '037_model_drafts',
+    up: sql => {
+      sql`CREATE TABLE sh_model_generation (id INTEGER PRIMARY KEY CHECK(id = 0), generation INTEGER NOT NULL)`;
+      sql`INSERT INTO sh_model_generation VALUES (0, 0)`;
+      sql`CREATE TABLE sh_model_draft (
+        id TEXT PRIMARY KEY, provider TEXT NOT NULL, modelId TEXT NOT NULL,
+        revision INTEGER NOT NULL, generation INTEGER NOT NULL, payloadEnc TEXT NOT NULL,
+        status TEXT NOT NULL, testError TEXT, levelsJson TEXT, updatedAt INTEGER NOT NULL,
+        UNIQUE(provider, modelId)
+      )`;
+    },
+  },
 ];

@@ -110,7 +110,6 @@ import { HistorySubscriptions, type ConnState } from "./history-subscriptions.ts
 import { ConnectorProtocol } from "./connector-protocol.ts";
 import type { OutboxRow } from "./steward-types.ts";
 export type { OutboxRow };
-import { sealSecret } from "./secretbox.ts";
 import { PushService } from "./push.ts";
 import { escapeMarkers, verifyWakeText, wakeOwnerNotified, watchdogWakeText } from "./wake-text.ts";
 import { WorkspaceError, cardOpen, cardView, type WorkspaceActionInput, type WorkspaceInput } from "./workspace.ts";
@@ -755,6 +754,7 @@ export class Steward extends Agent<Env> {
         stopTurn: (input) => this.stopTurn(input),
         settings: async () => ({
           model: await this.llmSelection(),
+          modelDrafts: this.modelConfigStore.drafts(),
           passkeys: this.web.listPasskeys(),
           push: this.push.settings(),
           providers: providerCatalog(),
@@ -767,33 +767,30 @@ export class Steward extends Agent<Env> {
           if (this.testingModel) return { ok: false, error: "busy" };
           this.testingModel = true;
           try {
-            return await this.modelConfigStore.verifyAndProbe(input, { force: true });
+            return await this.modelConfigStore.verifyAndProbe(input, { force: true, record: false });
           } finally {
             this.testingModel = false;
           }
         },
         importModels: async (input) => importProviderModels({ ...input, headers: input.headers ?? await this.modelConfigStore.headersFor(input.provider, input.modelId) }, input.apiKey || await this.modelConfigStore.sealedKeyFor(input.provider) || undefined),
-        saveModel: async (input) => {
-          await this.setModelConfig(input.provider, input.apiKey, input.modelId, input.baseUrl, input.thinkingLevel, input.headers, input.thinkingJson);
-          for (const id of input.importedModelIds ?? []) this.sql`
-            INSERT INTO sh_saved_model (provider, modelId, baseUrl, headersEnc, updatedAt)
-            VALUES (${input.provider}, ${id}, ${input.baseUrl ?? null}, ${input.headers ? await sealSecret((await this.serverKeys())[0]!, JSON.stringify(input.headers)) : null}, ${Date.now()})
-            ON CONFLICT(provider, modelId) DO UPDATE SET baseUrl = excluded.baseUrl,
-              headersEnc = COALESCE(excluded.headersEnc, sh_saved_model.headersEnc), updatedAt = excluded.updatedAt
-          `;
-          // A save is where an owner expects the endpoint to be checked (there is no separate
-          // "verify" chore). Cached results are reused, so re-saving without changing the key
-          // costs nothing; the manual test button forces a fresh probe.
-          if (!input.autoTest || this.testingModel) return { ok: true };
+        saveModel: async input => {
+          const saved = await this.modelConfigStore.saveDraft(input);
+          if (!input.autoTest) return saved;
+          if (this.testingModel) return { ...saved, status: 'busy', testError: 'busy' };
           this.testingModel = true;
           try {
-            const probe = await this.modelConfigStore.verifyAndProbe(input, { force: false });
-            return probe.ok
-              ? { ok: true, verified: true, ...(probe.acceptedThinkingLevels ? { acceptedThinkingLevels: probe.acceptedThinkingLevels } : {}) }
-              : { ok: true, verified: false, testError: probe.error };
-          } finally {
-            this.testingModel = false;
-          }
+            const tested = await this.modelConfigStore.verifyDraft(saved.draftId!, saved.revision!);
+            if (!tested.verified) return tested;
+            return { ...tested, ...await this.modelConfigStore.activateDraft(saved.draftId!, saved.revision!, () => this.piHarness.session().busy()) };
+          } finally { this.testingModel = false; }
+        },
+        modelDraftAction: async (id, revision, action) => {
+          if (action === 'delete') { this.modelConfigStore.deleteDraft(id, revision); return { ok: true, activated: false, status: 'saved' }; }
+          if (action === 'activate') return this.modelConfigStore.activateDraft(id, revision, () => this.piHarness.session().busy());
+          if (this.testingModel) return { ok: true, activated: false, status: 'busy', testError: 'busy' };
+          this.testingModel = true;
+          try { return await this.modelConfigStore.verifyDraft(id, revision); }
+          finally { this.testingModel = false; }
         },
         selectModel: (input) => this.selectComposerModel(input),
         pairing: (id: string) => this.webPairing(id),
@@ -2422,6 +2419,7 @@ export class Steward extends Agent<Env> {
   private get modelConfigStore(): ModelConfigStore {
     return (this.modelConfigStore_ ??= new ModelConfigStore({
       sql: this.sql.bind(this),
+      tx: fn => this.ctx.storage.transactionSync(fn),
       serverKeys: () => this.serverKeys(),
       modelKey: () => this.env.MODEL_KEY?.trim() || undefined,
       stewardModelVars: () => this.env.STEWARD_MODEL,
@@ -2484,7 +2482,7 @@ export class Steward extends Agent<Env> {
     // The endpoint rides along: setModelConfig writes what it is given, so passing undefined
     // here would drop a gateway deployment's baseUrl and re-point it at the vendor's own API
     // the moment the owner nudges a thinking level.
-    await store.setModelConfig(input.provider, undefined, input.modelId, baseUrl, input.thinkingLevel);
+    await store.selectIdleModel({ ...input, baseUrl }, () => this.piHarness.session().busy());
     await this.ensureRootModel();
     return store.llmSelection();
   }
