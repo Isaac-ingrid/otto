@@ -1,5 +1,6 @@
 import { test, expect, chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { writeFile } from "node:fs/promises";
 import { TURN_STOPPED_NOTICE } from "../src/owner-notices.ts";
 import { startBrowserTestServer, type BrowserTestServer } from "./server-fixture.ts";
 
@@ -41,10 +42,25 @@ test.beforeEach(async () => {
   await context.clearCookies();
 });
 
-test.afterEach(async () => {
-  await page.goto("about:blank").catch(() => {});
-  if (server) await server.close();
-  expect(blockedBrowserRequests).toEqual([]);
+test.afterEach(async ({}, testInfo) => {
+  try {
+    if (process.env.OTTO_VERIFY_EVIDENCE === "1" && server && !page.isClosed()) {
+      const screenshot = testInfo.outputPath("final-ui.png");
+      await page.screenshot({ path: screenshot });
+      await testInfo.attach("final-ui", { path: screenshot, contentType: "image/png" });
+      // Observe via the authenticated public workspace API, never a test-only setter.
+      const response = await context.request.get(`${server.baseUrl}/app/api/workspace`);
+      expect(response.ok()).toBe(true);
+      const { messages, threads, machines, busy } = await response.json();
+      const statePath = testInfo.outputPath("workspace-state.json");
+      await writeFile(statePath, JSON.stringify({ title: testInfo.title, messages, threads, machines, busy }, null, 2) + "\n");
+      await testInfo.attach("workspace-state", { path: statePath, contentType: "application/json" });
+    }
+  } finally {
+    await page.goto("about:blank").catch(() => {});
+    if (server) await server.close();
+    expect(blockedBrowserRequests).toEqual([]);
+  }
 });
 
 async function signInToWorkspace(page: Page, srv: BrowserTestServer): Promise<void> {

@@ -1,0 +1,43 @@
+name: Event delivery model
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'formal/**'
+      - 'scripts/verification/**'
+      - 'apps/connector/src/client.ts'
+      - 'apps/connector/src/events.ts'
+      - 'apps/connector/src/store.ts'
+      - 'apps/steward/src/connector-protocol.ts'
+      - 'apps/steward/src/ledger.ts'
+      - 'apps/steward/test/event-ack-contract.test.ts'
+      - 'apps/connector/test/client.test.ts'
+      - 'apps/connector/test/events.test.ts'
+      - '.agents/skills/verify-otto/**'
+      - '.github/workflows/formal-verification.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: node --test scripts/verification/verification.test.mjs
+      - run: node scripts/verification/setup-tla.mjs
+      - run: node scripts/verification/run-tla.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: event-delivery-model-evidence
+          path: .verification/evidence/
+          if-no-files-found: ignore

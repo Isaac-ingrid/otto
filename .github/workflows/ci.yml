@@ -105,4 +105,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @isaac2ingrid/steward typecheck:node-host
-      - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts test/e2e-loop.test.ts test/turn-stop.test.ts test/crash-window.test.ts test/owner-api-boundaries.test.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts node-host/testing/body-limit.test.ts node-host/testing/browser-network.test.ts
+      - run: pnpm --filter @isaac2ingrid/steward exec vitest run --config vitest.node.config.ts test/e2e-loop.test.ts test/turn-stop.test.ts test/crash-window.test.ts test/owner-api-boundaries.test.ts test/event-ack-contract.test.ts node-host/testing/public-origin.test.ts test/node-host-client-ip.test.ts node-host/testing/tcp.test.ts node-host/testing/body-limit.test.ts node-host/testing/browser-network.test.ts

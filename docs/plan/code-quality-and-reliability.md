@@ -341,6 +341,7 @@ Node 22/24 并非必须统一版本的缺陷；目标是验证承诺支持的运
 ## 相关文档
 
 - [领域与术语](../../CONTEXT.md)
+- [后续验证 skill + TLA+ 小试点](../research/experiments/0008-verification-skill-tla-pilot.md)（独立开发验证，不扩大本计划的生产或运维验收范围）
 - [路由评测](../routing-eval.md)
 - [记忆评测](../memory-eval.md)
 - [Node 宿主设计](../design/node-host.md)

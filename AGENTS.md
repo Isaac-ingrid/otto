@@ -26,6 +26,10 @@ Four packages: `apps/steward` (the Worker/Durable Object plus `node-host/`), `ap
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Verification pilot
+
+Use `.agents/skills/verify-otto/SKILL.md` for reproducible browser/transport checks and retained evidence. `formal/README.md` maps the bounded event-delivery TLA+ model to real code and regressions. For covered protocol changes, run the normal code tests plus `node scripts/verification/run-tla.mjs` (including both required negative controls). A TLC pass verifies the finite model, not TypeScript refinement or production behavior. Do not weaken invariants, fairness assumptions, or acceptance tests to make a candidate pass; intentional policy changes need separate owner review.
+
 ### Windows working copies
 
 Four things about a Windows checkout bite in ways that look like real defects. None of them is one.
