@@ -483,10 +483,32 @@ export class Steward extends Agent<Env> {
    * and only when its provider matches the selection — a key sealed for another provider is
    * not silently sent elsewhere.
    */
-  private async ensureRootModel(): Promise<void> {
+  private async ensureRootModel(threadId?: string | null): Promise<void> {
     const sealed = await this.modelConfig();
     const vars = this.modelVarsConfig;
-    const config = mergeModelSelection(sealed, vars);
+    const thread = threadId ? this.ledger.threads.get(threadId) : null;
+    let config = mergeModelSelection(sealed, vars);
+    let apiKey = sealed && sealed.provider === config.provider ? sealed.apiKey : undefined;
+    if (thread?.modelProvider && thread?.modelId) {
+      const overrideKey = await this.modelConfigStore.sealedKeyFor(thread.modelProvider);
+      if (overrideKey && this.modelConfigStore.isProfileEnabled(thread.modelProvider)) {
+        const profile = this.modelConfigStore.profileById(thread.modelProvider);
+        const saved = this.modelConfigStore.savedModels().find(
+          (entry) => entry.provider === thread.modelProvider && entry.modelId === thread.modelId,
+        );
+        const dialect = this.modelConfigStore.dialectFor(thread.modelProvider);
+        const baseUrl = saved?.baseUrl ?? profile?.baseUrl ?? undefined;
+        config = {
+          provider: thread.modelProvider,
+          ...(dialect !== thread.modelProvider ? { dialect } : {}),
+          modelId: thread.modelId,
+          ...(baseUrl ? { baseUrl } : {}),
+          thinkingLevel: (thread.thinkingLevel as StewardThinkingLevel | null) ?? "off",
+          explicit: true,
+        };
+        apiKey = overrideKey;
+      }
+    }
     const dialect = config.dialect ?? this.modelConfigStore.dialectFor(config.provider);
     if (dialect !== config.provider) config.dialect = dialect;
     config.headers = await this.modelConfigStore.headersFor(config.provider, config.modelId);
@@ -497,7 +519,6 @@ export class Steward extends Agent<Env> {
       const known = await this.modelConfigStore.thinkingLevelsFor(config.provider, config.modelId, config.baseUrl);
       if (config.thinkingLevel !== "auto" && known && !known.includes(config.thinkingLevel ?? "off")) config.thinkingLevel = "auto";
     }
-    const apiKey = sealed && sealed.provider === config.provider ? sealed.apiKey : undefined;
     installModel(this.llmModels.models, config, apiKey);
     // Review #10: a provider/model combination the catalog does not know (e.g. a sealed
     // provider whose key was collected for another vendor while vars still carry the default
@@ -803,6 +824,7 @@ export class Steward extends Agent<Env> {
           }
         },
         selectModel: (input) => this.selectComposerModel(input),
+        setThreadModel: (input) => this.setThreadModel(input),
         setModelEnabled: async (input) => {
           if (!this.modelConfigStore.setModelEnabled(input.provider, input.modelId, input.enabled)) {
             throw new WorkspaceError("not_found", 404);
@@ -2485,16 +2507,7 @@ export class Steward extends Agent<Env> {
     return this.modelConfigStore.llmSelection(varsRaw);
   }
 
-  private async selectComposerModel(input: ComposerModelInput) {
-    // Resolved, not looked up (issue #70 × self-hosting): a gateway names its own model ids and
-    // the catalog has never heard of them, so a bare catalog lookup made the active model
-    // unselectable — "model_not_available" on the very selection that was already running. The
-    // stored endpoint is what makes an unknown id legitimate (resolveCatalogModel clones a
-    // sibling's dialect only when a baseUrl is given; without one a typo must not silently
-    // address the first-party API).
-    // The endpoint may come from either side of the merge: a Settings-page switch writes it
-    // into sh_model, a self-hosted deployment writes it into vars.STEWARD_MODEL. Whatever the
-    // deployment is *currently* addressing is the thing an unknown id may be resolved against.
+  private async validateComposerModel(input: ComposerModelInput): Promise<{ baseUrl: string | undefined }> {
     const store = this.modelConfigStore;
     const current = mergeModelSelection(await store.modelConfig(), resolveModelConfig(this.env.STEWARD_MODEL));
     const saved = store.savedModels().find((entry) => entry.provider === input.provider && entry.modelId === input.modelId);
@@ -2506,13 +2519,30 @@ export class Steward extends Agent<Env> {
     const accepted = await store.thinkingLevelsFor(input.provider, input.modelId, baseUrl);
     if (dialect === "openai-compatible" && input.thinkingLevel !== "auto" && accepted && !accepted.includes(input.thinkingLevel)) throw new WorkspaceError("thinking_not_supported");
     if (dialect !== "openai-compatible" && !getSupportedThinkingLevels(model).includes(input.thinkingLevel as ModelThinkingLevel)) throw new WorkspaceError("thinking_not_supported");
+    return { baseUrl };
+  }
+
+  private async selectComposerModel(input: ComposerModelInput) {
+    const { baseUrl } = await this.validateComposerModel(input);
     if (await this.piHarness.session().busy()) throw new WorkspaceError("model_busy", 409);
     // The endpoint rides along: setModelConfig writes what it is given, so passing undefined
     // here would drop a gateway deployment's baseUrl and re-point it at the vendor's own API
     // the moment the owner nudges a thinking level.
-    await store.setModelConfig(input.provider, undefined, input.modelId, baseUrl, input.thinkingLevel);
+    await this.modelConfigStore.setModelConfig(input.provider, undefined, input.modelId, baseUrl, input.thinkingLevel);
     await this.ensureRootModel();
-    return store.llmSelection();
+    return this.modelConfigStore.llmSelection();
+  }
+
+  private async setThreadModel(input: { threadId: string; model: ComposerModelInput | null }) {
+    const thread = this.ledger.threads.get(input.threadId);
+    if (!thread) throw new WorkspaceError("thread_not_found", 404);
+    if (input.model === null) {
+      this.ledger.threads.setModelOverride(input.threadId, null);
+      return { ok: true, modelOverride: null };
+    }
+    await this.validateComposerModel(input.model);
+    this.ledger.threads.setModelOverride(input.threadId, input.model);
+    return { ok: true, modelOverride: input.model };
   }
 
   // ---- Owner HTTP API (ADR-0003): the Worker pre-checked SERVER_KEY; these run in the DO ----
@@ -2882,7 +2912,7 @@ export class Steward extends Agent<Env> {
       return; // already submitted (sh_inbound dedup normally catches this first)
     }
     try {
-      await this.ensureRootModel();
+      await this.ensureRootModel(routedId);
       await this.piHarness.submit(text, { operationId, whenBusy: "followUp" });
     } catch (err) {
       this.logChannel("submit_failed", `${operationId} ${errorText(err)}`);
@@ -2918,10 +2948,14 @@ export class Steward extends Agent<Env> {
     const parentId = typeof quoted?.providerMsgId === "string" ? quoted.providerMsgId : undefined;
     const msgId = `web:${input.id}`;
     this.admitMessageRequest(input.id, payload);
+    const notes: string[] = [];
+    if (thread) notes.push(`用户指定这条消息归属 Thread「${escapeMarkers(thread.title)}」（${thread.threadId}）。`);
+    if (input.agent) notes.push(`用户指定执行平台 agent=${escapeMarkers(input.agent)}（调用 start_worker 时请传入 agent: "${escapeMarkers(input.agent)}"）。`);
+    if (input.machineHint) notes.push(`用户指定目标机器 machineHint=${escapeMarkers(input.machineHint)}（调用 start_worker 时请传入 machineHint: "${escapeMarkers(input.machineHint)}"）。`);
     const work = this.submitUserMessage({
       msgId, text: input.text, ...(parentId ? { parentId } : {}),
       routedThreadId: thread?.threadId ?? null,
-      ...(thread ? { prefilledNote: `（系统注：用户指定这条消息归属 Thread「${escapeMarkers(thread.title)}」（${thread.threadId}）。）\n` } : {}),
+      ...(notes.length ? { prefilledNote: `（系统注：${notes.join("")}）\n` } : {}),
     }).then(() => { this.ledger.webRequests.complete(input.id); }).finally(() => { this.webInputs.delete(input.id); });
     this.webInputs.set(input.id, work);
     return work;
@@ -3080,7 +3114,7 @@ export class Steward extends Agent<Env> {
           // Crash between the sh_run write and submit (§11): resubmit — the operationId
           // guarantees the harness treats it as one input, never two.
           try {
-            await this.ensureRootModel();
+            await this.ensureRootModel(run.routedThreadId);
             await this.piHarness.submit(run.text, { operationId: run.operationId, whenBusy: "followUp" });
             stillOpen = true;
           } catch (err) {
@@ -3274,7 +3308,7 @@ export class Steward extends Agent<Env> {
     }
     this.logChannel("verify_dispatch_claim", `${run.operationId} "${claimed.slice(0, 80)}"`);
     try {
-      await this.ensureRootModel();
+      await this.ensureRootModel(run.routedThreadId);
       await this.piHarness.submit(text, { operationId, whenBusy: "followUp" });
     } catch (err) {
       this.logChannel("submit_failed", `${operationId} ${errorText(err)}`);

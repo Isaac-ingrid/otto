@@ -1103,4 +1103,14 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`UPDATE sh_model SET dialect = provider WHERE dialect IS NULL`;
     },
   },
+  {
+    id: "039_thread_model_override",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_thread ADD COLUMN modelProvider TEXT`;
+        sql`ALTER TABLE sh_thread ADD COLUMN modelId TEXT`;
+        sql`ALTER TABLE sh_thread ADD COLUMN thinkingLevel TEXT`;
+      });
+    },
+  },
 ];

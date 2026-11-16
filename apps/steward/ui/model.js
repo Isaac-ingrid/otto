@@ -22,11 +22,69 @@ export function threadMatches(thread, query) {
   return haystack.filter(Boolean).join('\n').toLowerCase().includes(needle);
 }
 
-/** Threads grouped for the sidebar: waiting on the owner first, then running, then idle. */
-export function groupThreads(threads, query) {
-  const shown = threads.filter((thread) => threadMatches(thread, query));
+const KNOWN_AGENT_ORDER = ['pi', 'claude-code'];
+
+export function threadPlatformFilters(snapshot) {
+  const machines = (snapshot?.machines ?? []).filter((machine) => !machine.revoked);
+  const agentSet = new Set();
+  for (const machine of machines) {
+    for (const agent of machine.agents ?? []) if (agent) agentSet.add(agent);
+  }
+  for (const thread of snapshot?.threads ?? []) {
+    for (const worker of thread.workers ?? []) if (worker.agent) agentSet.add(worker.agent);
+  }
+  const agents = [...agentSet].sort((a, b) => {
+    const ai = KNOWN_AGENT_ORDER.indexOf(a);
+    const bi = KNOWN_AGENT_ORDER.indexOf(b);
+    if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    return a.localeCompare(b);
+  });
+  return { agents, machines };
+}
+
+/** Threads grouped for the sidebar: by status (default), agent platform, or machine, with optional filters. */
+export function groupThreads(threads, query, options = {}) {
+  const { groupBy = 'status', agent = 'all', machine = 'all' } = options;
+  const shown = threads.filter((thread) => {
+    if (!threadMatches(thread, query)) return false;
+    if (agent && agent !== 'all' && !(thread.workers ?? []).some((worker) => worker.agent === agent)) return false;
+    if (machine && machine !== 'all') {
+      const onMachine = thread.machine === machine || (thread.workers ?? []).some((worker) => worker.machine === machine);
+      if (!onMachine) return false;
+    }
+    return true;
+  });
+  if (groupBy === 'agent') {
+    const buckets = new Map();
+    for (const thread of shown) {
+      const key = thread.workers?.length ? thread.workers[thread.workers.length - 1].agent : 'unassigned';
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(thread);
+    }
+    return [...buckets.entries()]
+      .sort(([a], [b]) => {
+        if (a === 'unassigned') return 1;
+        if (b === 'unassigned') return -1;
+        const ai = KNOWN_AGENT_ORDER.indexOf(a);
+        const bi = KNOWN_AGENT_ORDER.indexOf(b);
+        if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+        return a.localeCompare(b);
+      })
+      .map(([key, items]) => ({ key, agent: key, threads: items }));
+  }
+  if (groupBy === 'machine') {
+    const buckets = new Map();
+    for (const thread of shown) {
+      const key = thread.machine || thread.workers?.[thread.workers.length - 1]?.machine || 'unassigned';
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(thread);
+    }
+    return [...buckets.entries()]
+      .sort(([a], [b]) => (a === 'unassigned' ? 1 : b === 'unassigned' ? -1 : a.localeCompare(b)))
+      .map(([key, items]) => ({ key, machine: key, threads: items }));
+  }
   return THREAD_STATE_ORDER
-    .map((state) => ({ state, threads: shown.filter((thread) => thread.state === state) }))
+    .map((state) => ({ key: state, state, threads: shown.filter((thread) => thread.state === state) }))
     .filter((group) => group.threads.length > 0);
 }
 

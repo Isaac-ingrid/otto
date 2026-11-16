@@ -269,6 +269,7 @@ export interface WebDeps {
     | "settings"
     | "saveModel"
     | "selectModel"
+    | "setThreadModel"
     | "setModelEnabled"
     | "setProfileEnabled"
     | "deleteProfile"

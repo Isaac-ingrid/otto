@@ -7,7 +7,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
-import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, formatContextWindow, groupByDay, groupThreads, isModelEnabled, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
+import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, formatContextWindow, groupByDay, groupThreads, isModelEnabled, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, threadPlatformFilters, withPending, workOn } from "../ui/model.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -279,11 +279,40 @@ describe("what the page derives from a snapshot", () => {
 
   it("groups threads by who is waiting on whom, and searches every field that identifies one", () => {
     const threads = [thread("a"), thread("b", { state: "running" }), thread("c", { state: "waiting_you", repos: ["billing"] }), thread("d", { machine: "mac-mini", workers: [{ agent: "claude", machine: "mac-mini", branch: null, state: "idle" }] })];
-    expect(groupThreads(threads, "").map((group) => [group.state, group.threads.map((entry: { id: string }) => entry.id)])).toEqual([["waiting_you", ["c"]], ["running", ["b"]], ["idle", ["a", "d"]]]);
+    expect(groupThreads(threads, "").map((group: { state?: string; threads: Array<{ id: string }> }) => [group.state, group.threads.map((entry: { id: string }) => entry.id)])).toEqual([["waiting_you", ["c"]], ["running", ["b"]], ["idle", ["a", "d"]]]);
     expect(groupThreads(threads, "billing").flatMap((group) => group.threads.map((entry: { id: string }) => entry.id))).toEqual(["c"]);
     expect(groupThreads(threads, "CLAUDE").flatMap((group) => group.threads.map((entry: { id: string }) => entry.id))).toEqual(["d"]);
     expect(threadMatches(threads[0], "otto/a")).toBe(true); // by branch
     expect(groupThreads(threads, "nothing like this")).toEqual([]);
+  });
+
+  it("groups and filters threads by agent platform and machine (P2-2)", () => {
+    const threads = [
+      thread("a", { machine: "mac-studio", workers: [{ agent: "pi", machine: "mac-studio", branch: null, state: "idle" }] }),
+      thread("b", { machine: "mac-mini", workers: [{ agent: "claude-code", machine: "mac-mini", branch: null, state: "running" }] }),
+      thread("c", { machine: null, workers: [] }),
+    ];
+    expect(groupThreads(threads, "", { groupBy: "agent" }).map((g: { agent?: string; threads: Array<{ id: string }> }) => [g.agent, g.threads.map((t) => t.id)])).toEqual([
+      ["pi", ["a"]],
+      ["claude-code", ["b"]],
+      ["unassigned", ["c"]],
+    ]);
+    expect(groupThreads(threads, "", { groupBy: "machine" }).map((g: { machine?: string; threads: Array<{ id: string }> }) => [g.machine, g.threads.map((t) => t.id)])).toEqual([
+      ["mac-mini", ["b"]],
+      ["mac-studio", ["a"]],
+      ["unassigned", ["c"]],
+    ]);
+    expect(groupThreads(threads, "", { agent: "claude-code" }).flatMap((g: { threads: Array<{ id: string }> }) => g.threads.map((t) => t.id))).toEqual(["b"]);
+    expect(groupThreads(threads, "", { machine: "mac-mini" }).flatMap((g: { threads: Array<{ id: string }> }) => g.threads.map((t) => t.id))).toEqual(["b"]);
+    const filters = threadPlatformFilters({
+      machines: [
+        { name: "mac-studio", revoked: false, agents: ["claude-code", "custom-agent"] },
+        { name: "old-box", revoked: true, agents: ["legacy"] },
+      ],
+      threads,
+    });
+    expect(filters.agents).toEqual(["pi", "claude-code", "custom-agent"]);
+    expect(filters.machines.map((m: { name: string }) => m.name)).toEqual(["mac-studio"]);
   });
 
   it("shows a message you just sent until the server has it, then only the server's", () => {

@@ -142,6 +142,7 @@ describe("review #5 (round 2): budget invariants — no omission is ever silent"
   const thread = (id: string, state: string, title = `标题${id}`) => ({
     threadId: id, title, goal: null, summary: null, summaryAt: null, state, unread: false,
     lastMachine: null, lastActivityAt: 0, archived: false, createdFromMsg: null, createdAt: 0,
+    modelProvider: null, modelId: null, thinkingLevel: null,
   }) as ReturnType<Ledger["threads"]["get"]>;
 
   function stubLedger(

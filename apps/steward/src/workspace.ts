@@ -18,6 +18,10 @@ export interface WorkspaceInput {
   threadId?: string;
   /** The id of the card or message being answered (an outbound row id). */
   replyTo?: string;
+  /** Optional preferred execution platform (e.g. 'pi', 'claude-code') chosen in the composer. */
+  agent?: string;
+  /** Optional preferred target machine name or deviceId chosen in the composer. */
+  machineHint?: string;
 }
 
 /** A button the owner pressed on a card. `cardId` is the outbound row id of that card. */
@@ -338,6 +342,9 @@ export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; 
       createdAt: thread.createdAt,
       lastActivityAt: thread.lastActivityAt,
       machine: thread.lastMachine ? (machineName.get(thread.lastMachine) ?? thread.lastMachine) : null,
+      modelOverride: thread.modelProvider && thread.modelId
+        ? { provider: thread.modelProvider, modelId: thread.modelId, thinkingLevel: thread.thinkingLevel ?? "off" }
+        : null,
       repos: thread.repoIds.map((repoId) => repoName.get(repoId) ?? repoId),
       workers: thread.workers.map((worker) => {
         const git = worker.report?.git ?? null;

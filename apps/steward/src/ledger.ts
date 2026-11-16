@@ -87,6 +87,9 @@ export interface ThreadRow {
   archived: boolean;
   createdFromMsg: string | null;
   createdAt: number;
+  modelProvider: string | null;
+  modelId: string | null;
+  thinkingLevel: string | null;
 }
 
 export interface WorkerRow {
@@ -655,6 +658,9 @@ export function createLedger(deps: LedgerDeps) {
     archived: !!r.archived,
     createdFromMsg: (r.createdFromMsg as string | null) ?? null,
     createdAt: r.createdAt as number,
+    modelProvider: (r.modelProvider as string | null) ?? null,
+    modelId: (r.modelId as string | null) ?? null,
+    thinkingLevel: (r.thinkingLevel as string | null) ?? null,
   });
 
   function recordRepository(deviceId: string, repo: HelloMessage["repos"][number]): void {
@@ -770,6 +776,16 @@ export function createLedger(deps: LedgerDeps) {
     /** Reply or card click on the Thread's message = the user has seen it (§6.5). */
     markRead(threadId: string): void {
       sql`UPDATE sh_thread SET unread = 0 WHERE threadId = ${threadId}`;
+    },
+    setModelOverride(threadId: string, override: { provider: string; modelId: string; thinkingLevel: string } | null): boolean {
+      sql`
+        UPDATE sh_thread
+        SET modelProvider = ${override?.provider ?? null},
+            modelId = ${override?.modelId ?? null},
+            thinkingLevel = ${override?.thinkingLevel ?? null}
+        WHERE threadId = ${threadId}
+      `;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
     },
     /** The steward's bookkeeping update (§2.6): summaries capped at 600 characters; each
      *  landed summary is versioned (last 5 kept) and the Nth-bounded updates trigger the

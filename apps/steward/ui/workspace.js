@@ -14,7 +14,7 @@ import { markup } from './markup.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
-  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, formatContextWindow, groupByDay, groupThreads, isActiveWorker, isModelEnabled, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
+  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, formatContextWindow, groupByDay, groupThreads, isActiveWorker, isModelEnabled, messagesFor, modelAfterProviderChange, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadPlatformFilters, withPending, workOn,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -28,6 +28,11 @@ const state = {
   csrf: '',
   selected: null,
   filter: '',
+  sidebarGroupBy: 'status',
+  sidebarAgentFilter: 'all',
+  sidebarMachineFilter: 'all',
+  composerAgent: '',
+  composerMachine: '',
   pending: new Map(), // request id -> { id, text, threadId, replyTo, at, status: 'sending' | 'failed' }
   busyCards: new Set(),
   replyTo: null, // outbound id of the card the composer is answering
@@ -178,21 +183,70 @@ function renderConnection() {
   $('#connection-label').textContent = t(state.connection === 'live' ? 'live' : state.connection);
 }
 
+function renderSidebarFilters(snapshot) {
+  const container = $('#sidebar-filters');
+  if (!container) return;
+  const { agents, machines } = threadPlatformFilters(snapshot);
+  if (state.sidebarAgentFilter !== 'all' && !agents.includes(state.sidebarAgentFilter)) state.sidebarAgentFilter = 'all';
+  if (state.sidebarMachineFilter !== 'all' && !machines.some((m) => m.name === state.sidebarMachineFilter) && !snapshot.threads.some((tEntry) => tEntry.machine === state.sidebarMachineFilter)) state.sidebarMachineFilter = 'all';
+  const machineNames = [...new Set([...machines.map((m) => m.name), ...snapshot.threads.map((tEntry) => tEntry.machine).filter(Boolean)])].sort();
+  redraw('sidebar-filters', [getLocale(), state.sidebarGroupBy, state.sidebarAgentFilter, state.sidebarMachineFilter, agents, machineNames], () => preservingFocus(container, () => {
+    const tabs = [
+      { id: 'status', label: t('groupByStatus') },
+      { id: 'agent', label: t('groupByPlatform') },
+      { id: 'machine', label: t('groupByMachine') },
+    ];
+    container.replaceChildren(
+      h('div', { class: 'sidebar-group-tabs', role: 'group', 'aria-label': t('threadNavigation') },
+        tabs.map((tab) => h('button', {
+          type: 'button',
+          class: 'sidebar-group-tab',
+          dataset: { groupBy: tab.id, focus: `group:${tab.id}` },
+          'aria-pressed': String(state.sidebarGroupBy === tab.id),
+        }, tab.label))),
+      (agents.length > 0 || machineNames.length > 0) ? h('div', { class: 'sidebar-filter-selects' },
+        h('select', { id: 'sidebar-agent-filter', class: 'sidebar-filter-select', 'aria-label': t('filterPlatformLabel'), dataset: { focus: 'filter:agent' } },
+          h('option', { value: 'all', selected: state.sidebarAgentFilter === 'all' ? true : null }, t('filterAllPlatforms')),
+          agents.map((agent) => h('option', { value: agent, selected: state.sidebarAgentFilter === agent ? true : null }, agentName(agent)))),
+        h('select', { id: 'sidebar-machine-filter', class: 'sidebar-filter-select', 'aria-label': t('filterMachineLabel'), dataset: { focus: 'filter:machine' } },
+          h('option', { value: 'all', selected: state.sidebarMachineFilter === 'all' ? true : null }, t('filterAllMachines')),
+          machineNames.map((name) => h('option', { value: name, selected: state.sidebarMachineFilter === name ? true : null }, name)))) : null,
+    );
+  }));
+}
+
+function groupHeading(group) {
+  if (state.sidebarGroupBy === 'agent') {
+    return [icon('layers'), group.agent === 'unassigned' ? t('unassignedGroup') : agentName(group.agent)];
+  }
+  if (state.sidebarGroupBy === 'machine') {
+    return [icon('laptop'), group.machine === 'unassigned' ? t('unassignedGroup') : group.machine];
+  }
+  return [h('span', { class: `status-dot ${stateColor(group.state)}` }), stateLabel(group.state)];
+}
+
 function renderSidebar() {
   const snapshot = state.snapshot;
+  renderSidebarFilters(snapshot);
   const list = $('#thread-list');
   const rows = snapshot.threads.map((thread) => [thread.id, thread.title, thread.state, thread.unread, thread.lastActivityAt, thread.machine, thread.workers.map((worker) => worker.agent), previewOf(thread, snapshot.messages)]);
-  redraw('threads', [getLocale(), state.filter, state.selected, rows, minuteBucket()], () => preservingFocus(list, () => {
-    const groups = groupThreads(snapshot.threads, state.filter);
+  redraw('threads', [getLocale(), state.filter, state.sidebarGroupBy, state.sidebarAgentFilter, state.sidebarMachineFilter, state.selected, rows, minuteBucket()], () => preservingFocus(list, () => {
+    const groups = groupThreads(snapshot.threads, state.filter, {
+      groupBy: state.sidebarGroupBy,
+      agent: state.sidebarAgentFilter,
+      machine: state.sidebarMachineFilter,
+    });
     if (groups.length === 0) {
       const searching = state.filter.trim() !== '';
-      list.replaceChildren(h('div', { class: 'empty-state' }, icon(searching ? 'search' : 'layers'),
-        h('strong', null, t(searching ? 'noResults' : 'noThreads')), h('p', null, t(searching ? 'searchHint' : 'noThreadsHelp')),
-        searching ? h('button', { type: 'button', class: 'button', dataset: { action: 'clear-search' } }, t('clearSearch')) : null));
+      const filtering = state.sidebarAgentFilter !== 'all' || state.sidebarMachineFilter !== 'all';
+      list.replaceChildren(h('div', { class: 'empty-state' }, icon(searching || filtering ? 'search' : 'layers'),
+        h('strong', null, t(searching || filtering ? 'noResults' : 'noThreads')), h('p', null, t(searching || filtering ? 'searchHint' : 'noThreadsHelp')),
+        filtering ? h('button', { type: 'button', class: 'button', dataset: { action: 'clear-filters' } }, t('clearFilters'))
+          : searching ? h('button', { type: 'button', class: 'button', dataset: { action: 'clear-search' } }, t('clearSearch')) : null));
       return;
     }
     list.replaceChildren(...groups.map((group) => h('section', { class: 'thread-group' },
-      h('h2', { class: 'group-label' }, h('span', { class: `status-dot ${stateColor(group.state)}` }), stateLabel(group.state), h('span', { class: 'group-count' }, t(group.threads.length === 1 ? 'threadCountOne' : 'threadCount', { count: group.threads.length }))),
+      h('h2', { class: 'group-label' }, ...groupHeading(group), h('span', { class: 'group-count' }, t(group.threads.length === 1 ? 'threadCountOne' : 'threadCount', { count: group.threads.length }))),
       group.threads.map((thread) => {
         const active = state.selected === thread.id;
         const meta = [[...new Set(thread.workers.map((worker) => worker.agent))].join(', '), thread.machine].filter(Boolean).join(' · ');
@@ -420,7 +474,31 @@ function resizeInput() {
   input.style.height = `${Math.min(input.scrollHeight, 128)}px`;
 }
 
+function renderComposerDispatch() {
+  const container = $('#composer-dispatch-controls');
+  if (!container || !state.snapshot) return;
+  const { agents, machines } = threadPlatformFilters(state.snapshot);
+  if (state.composerAgent && !agents.includes(state.composerAgent)) state.composerAgent = '';
+  if (state.composerMachine && !machines.some((m) => m.name === state.composerMachine)) state.composerMachine = '';
+  redraw('composer-dispatch', [getLocale(), state.composerAgent, state.composerMachine, agents, machines.map((m) => [m.name, m.online])], () => preservingFocus(container, () => {
+    if (agents.length === 0 && machines.length === 0) {
+      container.replaceChildren();
+      return;
+    }
+    container.replaceChildren(
+      agents.length > 0 ? h('select', { id: 'composer-agent-select', class: 'composer-select', 'aria-label': t('dispatchAgentLabel'), dataset: { focus: 'dispatch:agent' } },
+        h('option', { value: '', selected: state.composerAgent === '' ? true : null }, t('dispatchAgentAuto')),
+        agents.map((agent) => h('option', { value: agent, selected: state.composerAgent === agent ? true : null }, agentName(agent)))) : null,
+      machines.length > 0 ? h('select', { id: 'composer-machine-select', class: 'composer-select', 'aria-label': t('dispatchMachineLabel'), dataset: { focus: 'dispatch:machine' } },
+        h('option', { value: '', selected: state.composerMachine === '' ? true : null }, t('dispatchMachineAuto')),
+        machines.map((machine) => h('option', { value: machine.name, selected: state.composerMachine === machine.name ? true : null },
+          machine.online ? machine.name : `${machine.name} (${t('offline')})`))) : null,
+    );
+  }));
+}
+
 function renderComposer() {
+  renderComposerDispatch();
   renderComposerModels();
   const thread = state.selected ? threadById(state.selected) : null;
   const target = state.replyTo ? state.snapshot.attention.find((item) => item.id === state.replyTo) : null;
@@ -454,9 +532,14 @@ const profileGroupName = (id) => {
 
 function renderComposerModels() {
   const node = $('#composer-model-controls');
-  const model = state.settings?.model;
+  const globalModel = state.settings?.model;
+  const thread = state.selected ? threadById(state.selected) : null;
+  const override = thread?.modelOverride ?? null;
+  const model = globalModel && override
+    ? { ...globalModel, provider: override.provider, modelId: override.modelId, thinkingLevel: override.thinkingLevel ?? 'off' }
+    : globalModel;
   const busy = state.changingModel;
-  redraw('composer-model', [getLocale(), state.settings, busy, state.pendingModelSwitch], () => {
+  redraw('composer-model', [getLocale(), state.settings, state.selected, override, busy, state.pendingModelSwitch], () => {
     if (!model?.apiKey) { node.replaceChildren(); return; }
     const verified = (provider, modelId) => (state.settings.verifiedModels ?? []).some((entry) => entry.provider === provider && entry.modelId === modelId);
     const savedModels = state.settings.savedModels ?? [];
@@ -486,15 +569,17 @@ function renderComposerModels() {
     const activeDialect = dialectFor(model.provider);
     const levels = activeDialect === 'openai-compatible' ? compatibleThinkingLevels(model.provider, model.modelId) : selected?.thinkingLevels ?? model.thinkingLevels;
     const ready = Boolean(levels?.includes(model.thinkingLevel));
+    const activeProfileLabel = profileGroupName(model.provider);
     node.replaceChildren(...[
       modelPicker(entries, selected?.id ?? model.modelId, (id) => {
         const entry = entries.find((item) => item.id === id);
         if (entry) void changeComposerModel({ provider: entry.provider, modelId: entry.modelId, thinkingLevel: thinkingAfterModelChange(entry, model.thinkingLevel) });
-      }, { name: 'chat-model', compact: true, disabled: busy || !ready, label: `${t('composerModel')}: ${selected?.name ?? model.modelId}`, minWidth: 320 }),
+      }, { name: 'chat-model', compact: true, disabled: busy || !ready, label: `${t('composerModel')}: ${activeProfileLabel} · ${selected?.name ?? model.modelId}`, minWidth: 320 }),
       ready ? modelPicker(levels.map((level) => ({ id: level, name: t(`thinking_${level}`) })), model.thinkingLevel, (level) => {
         void changeComposerModel({ provider: model.provider, modelId: model.modelId, thinkingLevel: level });
       }, { name: 'chat-thinking', compact: true, searchable: false, leadingIcon: 'memory', disabled: busy || levels.length < 2, label: `${t('thinkingTitle')}: ${t(`thinking_${model.thinkingLevel}`)}`, minWidth: 180 })
         : h('button', { type: 'button', class: 'model-picker-trigger model-choice-chip', disabled: busy, dataset: { action: 'retry-settings' } }, t('modelOptionsReload')),
+      override ? h('button', { type: 'button', class: 'button quiet', disabled: busy, dataset: { action: 'clear-thread-model', focus: 'clear-thread-model' }, title: t('modelThreadOverride') }, t('modelFollowGlobal')) : null,
       state.changingModel ? h('span', { class: 'model-saving', role: 'status' }, t('modelSaving'))
         : state.pendingModelSwitch ? h('span', { class: 'model-saving', role: 'status' }, t('modelSwitchPending')) : null].filter(Boolean));
   });
@@ -502,7 +587,8 @@ function renderComposerModels() {
 
 async function changeComposerModel(input) {
   if (state.changingModel) return;
-  if (working()) {
+  const threadId = state.selected;
+  if (!threadId && working()) {
     state.pendingModelSwitch = input;
     toast(t('modelSwitchQueued'));
     renderComposer();
@@ -512,6 +598,16 @@ async function changeComposerModel(input) {
   renderComposer();
   $('#send-button').disabled = true;
   try {
+    if (threadId) {
+      const { status, data } = await request(`/app/api/threads/${threadId}/model`, input);
+      if (status === 200) {
+        patchThread(threadId, (entry) => ({ ...entry, modelOverride: data?.modelOverride ?? null }));
+      } else if (status !== 401) {
+        const code = typeof data?.error === 'string' && data.error ? ` (${data.error})` : '';
+        toast(`${t('modelChangeFailed')}${code}`);
+      }
+      return;
+    }
     const { status, data } = await request('/app/api/settings/model/selection', input);
     if (status === 200 && data?.model) {
       const adjusted = state.settings.model.thinkingLevel !== data.model.thinkingLevel && state.settings.model.modelId !== data.model.modelId;
@@ -521,8 +617,6 @@ async function changeComposerModel(input) {
       state.pendingModelSwitch = input;
       toast(t('modelSwitchQueued'));
     } else if (status !== 401) {
-      // The server's own code, when it gives one, turns "it did not switch" into something
-      // actionable instead of a dead end.
       const code = typeof data?.error === 'string' && data.error ? ` (${data.error})` : '';
       toast(`${t('modelChangeFailed')}${code}`);
     }
@@ -531,6 +625,27 @@ async function changeComposerModel(input) {
     state.changingModel = false;
     renderComposer();
     $('#send-button').disabled = state.changingModel || !$('#message-input').value.trim();
+  }
+}
+
+async function clearThreadModel() {
+  const threadId = state.selected;
+  if (!threadId || state.changingModel) return;
+  state.changingModel = true;
+  renderComposer();
+  try {
+    const { status, data } = await request(`/app/api/threads/${threadId}/model`, { clear: true });
+    if (status === 200) {
+      patchThread(threadId, (entry) => ({ ...entry, modelOverride: null }));
+      toast(t('modelThreadOverrideCleared'));
+    } else if (status !== 401) {
+      const code = typeof data?.error === 'string' && data.error ? ` (${data.error})` : '';
+      toast(`${t('modelChangeFailed')}${code}`);
+    }
+  } catch { toast(t('modelChangeFailed')); }
+  finally {
+    state.changingModel = false;
+    renderComposer();
   }
 }
 
@@ -1743,7 +1858,7 @@ async function postMessage(entry) {
   renderFeed(true);
   renderComposer();
   try {
-    const { status, data } = await request('/app/api/messages', { id: entry.id, text: entry.text, threadId: entry.threadId ?? undefined, replyTo: entry.replyTo ?? undefined });
+    const { status, data } = await request('/app/api/messages', { id: entry.id, text: entry.text, threadId: entry.threadId ?? undefined, replyTo: entry.replyTo ?? undefined, agent: entry.agent ?? undefined, machineHint: entry.machineHint ?? undefined });
     if (status === 202) {
       await refresh();
       return;
@@ -1764,7 +1879,7 @@ function send() {
   const input = $('#message-input');
   const text = input.value;
   if (!text.trim() || state.changingModel) return;
-  const entry = { id: uuid(), text, threadId: state.selected, replyTo: state.replyTo, at: Date.now(), status: 'sending' };
+  const entry = { id: uuid(), text, threadId: state.selected, replyTo: state.replyTo, agent: state.composerAgent || undefined, machineHint: state.composerMachine || undefined, at: Date.now(), status: 'sending' };
   state.pending.set(entry.id, entry);
   input.value = '';
   state.drafts.delete(scopeKey());
@@ -2524,6 +2639,11 @@ document.addEventListener('click', (event) => {
     return select(dataset.select === 'all' ? null : dataset.select);
   }
   if (dataset.jump) return jumpTo(dataset.jump);
+  if (dataset.groupBy) {
+    state.sidebarGroupBy = dataset.groupBy;
+    if (state.snapshot) renderSidebar();
+    return;
+  }
   switch (dataset.action) {
     case 'stop-turn': return void stopTurn();
     case 'provider': return openProvider(dataset.provider);
@@ -2561,9 +2681,17 @@ document.addEventListener('click', (event) => {
       $('#thread-search').value = '';
       renderSidebar();
       return $('#thread-search').focus();
+    case 'clear-filters':
+      state.filter = '';
+      state.sidebarAgentFilter = 'all';
+      state.sidebarMachineFilter = 'all';
+      $('#thread-search').value = '';
+      renderSidebar();
+      return $('#thread-search').focus();
     case 'clear-reply':
       state.replyTo = null;
       return renderComposer();
+    case 'clear-thread-model': return void clearThreadModel();
     case 'sign-out': return void signOut();
     case 'push-enable': return void enablePush();
     case 'push-disable': return void disablePush();
@@ -2689,6 +2817,26 @@ document.addEventListener('input', (event) => {
   if (event.target.id === 'passkey-label') state.passkeyLabelDraft = event.target.value;
 });
 document.addEventListener('change', (event) => {
+  if (event.target.id === 'sidebar-agent-filter') {
+    state.sidebarAgentFilter = event.target.value || 'all';
+    if (state.snapshot) renderSidebar();
+    return;
+  }
+  if (event.target.id === 'sidebar-machine-filter') {
+    state.sidebarMachineFilter = event.target.value || 'all';
+    if (state.snapshot) renderSidebar();
+    return;
+  }
+  if (event.target.id === 'composer-agent-select') {
+    state.composerAgent = event.target.value || '';
+    renderComposerDispatch();
+    return;
+  }
+  if (event.target.id === 'composer-machine-select') {
+    state.composerMachine = event.target.value || '';
+    renderComposerDispatch();
+    return;
+  }
   if (event.target.id === 'model-auto-test' && state.dialog) {
     state.dialog.autoTest = event.target.checked;
     return;

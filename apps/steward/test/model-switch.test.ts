@@ -449,4 +449,123 @@ describe("the Settings page's model switch (HTTP level, ADR-0004)", () => {
     expect(sAfterDelete.keyedProviders).not.toContain("prof_relay1");
     expect(sAfterDelete.savedModels.some((m) => m.provider === "prof_relay1")).toBe(false);
   });
+
+  it("supports per-thread model override, workspace snapshot projection, and clearing back to global (P2-1)", async () => {
+    const cookie = await webLogin();
+    const { post } = await browser();
+
+    // Configure two profiles: global active is deepseek, thread override will use openai-compatible profile
+    await post("settings/model", {
+      provider: "prof_thread",
+      dialect: "openai-compatible",
+      profileName: "Thread Relay",
+      modelId: "thread-model",
+      apiKey: "sk-thread-relay",
+      baseUrl: "https://thread.example/v1",
+      thinkingLevel: "auto",
+    });
+    await post("settings/model", {
+      provider: "deepseek",
+      modelId: "deepseek-flash",
+      apiKey: "sk-global-ds",
+      thinkingLevel: "off",
+    });
+
+    // Seed a thread directly in the ledger
+    const threadId = await runInDurableObject(ownerStub(), (instance: Steward) => {
+      const ledger = (instance as unknown as { ledger: import("../src/ledger.ts").Ledger }).ledger;
+      return ledger.threads.create({ title: "Override Thread", goal: "test per-thread model" }).threadId;
+    });
+
+    // 404 on unknown thread
+    const missing = await post("threads/non-existent-thread/model", {
+      provider: "prof_thread",
+      modelId: "thread-model",
+      thinkingLevel: "auto",
+    });
+    expect(missing.status).toBe(404);
+
+    // 400 on unavailable model
+    const badModel = await post(`threads/${threadId}/model`, {
+      provider: "nobody",
+      modelId: "missing-model",
+      thinkingLevel: "off",
+    });
+    expect(badModel.status).toBe(400);
+
+    // Set override on thread
+    const setRes = await post(`threads/${threadId}/model`, {
+      provider: "prof_thread",
+      modelId: "thread-model",
+      thinkingLevel: "high",
+    });
+    expect(setRes.status).toBe(200);
+    expect(await setRes.json()).toEqual({
+      ok: true,
+      modelOverride: { provider: "prof_thread", modelId: "thread-model", thinkingLevel: "high" },
+    });
+
+    // Workspace snapshot exposes thread.modelOverride
+    const ws1 = (await (await SELF.fetch(`${BASE}/app/api/workspace`, { headers: { cookie } })).json()) as {
+      threads: Array<{ id: string; modelOverride: { provider: string; modelId: string; thinkingLevel: string } | null }>;
+    };
+    expect(ws1.threads.find((t) => t.id === threadId)?.modelOverride).toEqual({
+      provider: "prof_thread",
+      modelId: "thread-model",
+      thinkingLevel: "high",
+    });
+
+    // ensureRootModel(threadId) configures root session with override, while ensureRootModel() uses global
+    await runInDurableObject(ownerStub(), async (instance: Steward) => {
+      const s = instance as unknown as {
+        ensureRootModel(threadId?: string | null): Promise<void>;
+        appliedRootModel?: string;
+      };
+      await s.ensureRootModel(threadId);
+      expect(s.appliedRootModel).toContain('"prof_thread"');
+      expect(s.appliedRootModel).toContain('"thread-model"');
+      expect(s.appliedRootModel).toContain('"high"');
+
+      await s.ensureRootModel();
+      expect(s.appliedRootModel).toContain('"deepseek"');
+      expect(s.appliedRootModel).toContain('"deepseek-flash"');
+    });
+
+    // Clear override back to global
+    const clearRes = await post(`threads/${threadId}/model`, { clear: true });
+    expect(clearRes.status).toBe(200);
+    expect(await clearRes.json()).toEqual({ ok: true, modelOverride: null });
+
+    const ws2 = (await (await SELF.fetch(`${BASE}/app/api/workspace`, { headers: { cookie } })).json()) as {
+      threads: Array<{ id: string; modelOverride: unknown }>;
+    };
+    expect(ws2.threads.find((t) => t.id === threadId)?.modelOverride).toBeNull();
+  });
+
+  it("validates and accepts agent and machineHint on POST /app/api/messages (P2-2)", async () => {
+    const { post } = await browser();
+    const badAgent = await post("messages", {
+      id: "msg-bad-agent",
+      text: "hello",
+      agent: "invalid agent!",
+    });
+    expect(badAgent.status).toBe(400);
+    expect(await badAgent.json()).toEqual({ error: "bad_request" });
+
+    const badMachine = await post("messages", {
+      id: "msg-bad-machine",
+      text: "hello",
+      machineHint: "   ",
+    });
+    expect(badMachine.status).toBe(400);
+    expect(await badMachine.json()).toEqual({ error: "bad_request" });
+
+    const ok = await post("messages", {
+      id: "msg-dispatch-ok",
+      text: "run tests on mini",
+      agent: "claude-code",
+      machineHint: "mac-mini",
+    });
+    expect(ok.status).toBe(202);
+  });
 });

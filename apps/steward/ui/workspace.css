@@ -931,3 +931,21 @@ dialog::backdrop { background: rgba(3,6,4,.72); backdrop-filter: blur(3px); }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
+
+/* ---- Alma-style platform & machine filters and composer dispatch controls ---- */
+.sidebar-filters { display: flex; flex-direction: column; gap: 6px; margin: 0 8px 14px; }
+.sidebar-group-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.sidebar-group-tab { padding: 4px 6px; border-radius: 3px; font: 10px/1.4 var(--mono); color: var(--muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-group-tab:hover { color: var(--green); }
+.sidebar-group-tab[aria-pressed="true"] { background: var(--green-wash); color: var(--green); }
+.sidebar-filter-selects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.sidebar-filter-select, .composer-select { width: 100%; min-width: 0; padding: 4px 6px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); color: var(--muted); font: 10px/1.4 var(--mono); }
+.sidebar-filter-select:hover, .composer-select:hover { border-color: var(--line-strong); color: var(--ink); }
+.sidebar-filter-select:focus-visible, .composer-select:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
+.composer-toolbar { flex-wrap: wrap; }
+.composer-dispatch-controls { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.composer-select { width: auto; max-width: 150px; }
+@media (max-width: 650px) {
+  .sidebar-filters { margin: 0 10px 16px; }
+  .sidebar-filter-select, .composer-select { font-size: 12px; min-height: 36px; }
+}

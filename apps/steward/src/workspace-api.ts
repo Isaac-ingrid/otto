@@ -49,6 +49,7 @@ export interface WorkspaceApiDeps {
    * "fix a rejected key" flow stays the same single form). */
   saveModel?(input: ModelSwitchInput): Promise<ModelSaveResult>;
   selectModel?(input: ComposerModelInput): Promise<unknown>;
+  setThreadModel?(input: { threadId: string; model: ComposerModelInput | null }): Promise<unknown>;
   setModelEnabled?(input: { provider: string; modelId: string; enabled: boolean }): Promise<{ ok: true }>;
   setProfileEnabled?(input: { profileId: string; enabled: boolean }): Promise<{ ok: true }>;
   deleteProfile?(input: { profileId: string }): Promise<{ ok: true }>;
@@ -138,10 +139,19 @@ export function parseApiMessage(body: Record<string, unknown>): { id?: string; t
 
 function parseMessage(body: Record<string, unknown>): WorkspaceInput {
   const { id, text, replyTo } = parseApiMessage(body);
-  const { threadId } = body;
+  const { threadId, agent, machineHint } = body;
   if (id === undefined) throw new WorkspaceError("bad_request");
   if (threadId !== undefined && (typeof threadId !== "string" || !THREAD_ID.test(threadId))) throw new WorkspaceError("bad_request");
-  return { id, text, ...(threadId ? { threadId } : {}), ...(replyTo ? { replyTo } : {}) };
+  if (agent !== undefined && (typeof agent !== "string" || !/^[\w.-]{1,64}$/.test(agent))) throw new WorkspaceError("bad_request");
+  if (machineHint !== undefined && (typeof machineHint !== "string" || !machineHint.trim() || machineHint.length > 128)) throw new WorkspaceError("bad_request");
+  return {
+    id,
+    text,
+    ...(threadId ? { threadId } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    ...(agent ? { agent } : {}),
+    ...(machineHint ? { machineHint: machineHint.trim() } : {}),
+  };
 }
 
 function parseAction(body: Record<string, unknown>): WorkspaceActionInput {
@@ -353,6 +363,19 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       if (!deps.ledger.threads.get(read[1]!)) return json({ error: "thread_not_found" }, 404);
       deps.ledger.threads.markRead(read[1]!);
       return json({ ok: true });
+    }
+    const threadModel = /^\/app\/api\/threads\/([\w-]{1,128})\/model$/.exec(url.pathname);
+    if (threadModel && deps.setThreadModel) {
+      const body = await readJson(request);
+      if (body.clear === true || body.provider === null) {
+        return json(await deps.setThreadModel({ threadId: threadModel[1]!, model: null }));
+      }
+      const input = parseModelSwitch(body);
+      if (input.thinkingLevel === undefined) throw new WorkspaceError("bad_request");
+      return json(await deps.setThreadModel({
+        threadId: threadModel[1]!,
+        model: { provider: input.provider, modelId: input.modelId, thinkingLevel: input.thinkingLevel },
+      }));
     }
     return json({ error: "not_found" }, 404);
   } catch (error) {

@@ -36,6 +36,7 @@
       <div class="sidebar-top"><button type="button" class="icon-button sidebar-mobile-close" data-mobile-view="chat" data-i18n-label="backToChat" aria-label="Back to chat" data-icon="chevron-left"></button><span class="eyebrow" data-i18n="threads">Threads</span><button class="icon-button" data-action="new" data-i18n-title="newThread" data-i18n-label="newThread" title="New task" aria-label="New task" data-icon="plus"></button></div>
       <a class="all-conversation active" href="/app" data-nav="all"><span data-icon="chat"></span><span data-i18n="allMessages">All messages</span><span class="shortcut">⌘ K</span></a>
       <label class="search-box"><span data-icon="search"></span><input id="thread-search" type="search" data-i18n-placeholder="searchThreads" data-i18n-label="searchThreads" placeholder="Search threads" aria-label="Search threads" autocomplete="off"></label>
+      <div class="sidebar-filters" id="sidebar-filters"></div>
       <nav id="thread-list" class="thread-list" data-i18n-label="threadNavigation" aria-label="Threads by status"></nav>
       <div class="sidebar-bottom">
         <button class="machine-heading" data-action="machines"><span class="eyebrow"><span data-i18n="machines">Machines</span><span id="online-count"></span></span><span data-icon="chevron-right"></span></button>
@@ -53,7 +54,7 @@
       <div class="composer-area">
         <div class="queued-message" id="queue" hidden></div>
         <form id="composer-form" class="composer">
-          <div class="composer-toolbar"><button type="button" class="scope-chip" id="scope-chip" data-action="scope"><span data-icon="route"></span><span id="scope-label">Auto</span><span data-icon="chevron-down"></span></button><span class="composer-status" id="composer-status"></span></div>
+          <div class="composer-toolbar"><button type="button" class="scope-chip" id="scope-chip" data-action="scope"><span data-icon="route"></span><span id="scope-label">Auto</span><span data-icon="chevron-down"></span></button><div class="composer-dispatch-controls" id="composer-dispatch-controls"></div><span class="composer-status" id="composer-status"></span></div>
           <div class="reply-chip" id="reply-chip" hidden></div>
           <label class="sr-only" for="message-input" data-i18n="inputLabel">Message Otto</label><textarea id="message-input" rows="2" placeholder="Message Otto…" maxlength="16000"></textarea>
           <div class="composer-bottom"><span class="composer-shortcuts"><kbd>↵</kbd> <span data-i18n="send">Send</span><span class="keyboard-separator">·</span><kbd>Shift ↵</kbd> <span data-i18n="newline">New line</span></span><div id="composer-model-controls" class="composer-model-controls"></div><button type="submit" class="send-button" id="send-button" data-i18n-label="send" aria-label="Send" disabled data-icon="arrow-up"></button></div>
