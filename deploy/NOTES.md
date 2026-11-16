@@ -116,7 +116,24 @@ bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
 Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
 `apps/steward/ui` only needs re-copying when the page itself changes.
 
-Latest deployment (2026-11-13): `9fc76c7`, including `d25e65a`'s persistent PR watches and
+Latest deployment (2026-11-16): `c77f6a5` (runtime source unchanged from CI-verified `b7c1220`).
+Node bundle/map and all 19 UI files were checksum-verified before activation. Bundle SHA-256:
+`d7d435a3cade23e51f2b866e1af67fd331f5680dcbb7db336302e972f19919c8`.
+The release and receipt are `/opt/otto/releases/c77f6a5-20261116T065819Z/` and its
+`deployment.json`. `previous/dist/` preserves the complete old bundle/map/UI;
+`previous/steward.sqlite` is an integrity-checked pre-upgrade snapshot. Code-only rollback uses
+that saved `dist/` plus a service restart; do not restore the database casually.
+
+No active turns existed at activation. Migration remains `036_pr_watch_approvals`; database
+quick-check passed. Local and outside-client HTTPS returned 200, unauthenticated workspace API
+and WebSocket returned 401, and the forged-Host probe returned 421. `deploy/doctor.sh` reported
+zero failures. No login/model/coding-agent acceptance was performed. Existing credentials,
+model settings, systemd/nginx configuration and server `ws` 8.22.1 were preserved (the workspace
+pin is 8.22.0; no dependency install or downgrade was performed). The local connector was not
+upgraded, no npm package was published, and encrypted offsite backup remains disabled.
+Verification skills and Java/TLC tools remain development-side, not installed on the VPS.
+
+Previous recorded deployment (2026-11-13): `9fc76c7`, including `d25e65a`'s persistent PR watches and
 `20a61d3`'s offline improvement tooling. Bundle SHA-256:
 `4abc3a7479bee962d96ff7575d478cf96f56dc265744d5cadee9442b610f8552`.
 Migration `035_pr_watch_evidence_mode` applied; existing config/data/UI were preserved. The
@@ -124,7 +141,7 @@ previous bundle/map and a verified SQLite snapshot live under
 `/opt/otto/releases/9fc76c7/previous/` (root-only). Do not restore the database casually on rollback;
 the schema addition is backward-compatible and restoring a snapshot would discard later data.
 
-Live [statuses-only acceptance](../docs/research/experiments/0003-statuses-only.md) verified a
+That earlier release's live [statuses-only acceptance](../docs/research/experiments/0003-statuses-only.md) verified a
 synthetic failure → success, actual service restart, deduplicated notices and independent watch
 cancellation. No model run, workflow creation or repository-file edit was involved. Checks access
 with the selected-repository fine-grained PAT returned 403, so the scope was explicitly narrowed;
