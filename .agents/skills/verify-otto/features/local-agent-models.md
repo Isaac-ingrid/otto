@@ -57,6 +57,17 @@ probe; experiment 0010 and `.verification/evidence/pi-local-catalog-deploy/` rec
 This is not permission for another production journey or paid call; the scripted verification
 command above remains isolated and credentials-free. Claude explicit selection is gated off.
 
+Another separately authorized isolated real-pi run (experiment 0011) accepted one in-flight
+connector host crash and automatic cold resume with the default backoff, retained session/nonce
+and frozen model facts, no duplicate prompt and only report tool calls. Its steward broker was
+mocked, not a real cloud/production journey. It does not accept manual/stall/power-loss recovery.
+
+Experiment 0012 adds separately authorized, isolated real command-level manual cold resume
+and first-strike stall recovery after suspending only the owned SDK child. It retained default
+8-minute silence and real CPU sampling; no fake clock/CPU or safety intervention produced the
+pass. The original task was repeated, so changed-task precedence and second-stall termination
+are not real-CLI accepted. This record grants no new paid or production operation permission.
+
 Not accepted yet: general real CLI startup/resume/alias behavior, other provider permissions/data egress,
 further paid calls, package publishing, other real connector upgrades, conversational single-shot selection,
 independent thinking levels, or an actual Codex adapter. Real CLI verification needs explicit

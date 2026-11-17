@@ -117,6 +117,18 @@ its directory/registration removed, and model facts survived a real connector re
 accepts only the observed pi/provider/task path; it does not establish upstream routing identity,
 general recovery behavior or Claude behavior. See experiment 0009 for rollback/setup failures
 and retained evidence.
+[Experiment 0011](../research/experiments/0011-pi-real-connector-crash-recovery.md) subsequently
+accepted one isolated real-pi in-flight connector host crash and default-30-second automatic
+cold resume, retaining session/history/model identity and rejecting duplicate prompt delivery.
+Its broker was a loopback mock, tools were report-only, and no safety ceiling fired. This does
+not accept manual/stall recovery, arbitrary tool orphans, power loss or production supervision.
+
+[Experiment 0012](../research/experiments/0012-pi-manual-and-stall-recovery.md) adds scoped
+real command-level manual cold resume and a successful first watchdog respawn after OS-induced
+suspension. Default 8-minute silence and real Windows CPU sampling were retained. No safeguards
+intervened; session/model facts persisted. Second-stall termination and changed task requirements
+across stall remain unaccepted, as do the broader exclusions above.
+
 The event-delivery finite model covers delivery/ack/reduction invariants, not correctness of model
 choice or all recovery semantics. Its baseline and negative controls are separate regressions;
 passing TLC is not real CLI acceptance or TypeScript refinement.

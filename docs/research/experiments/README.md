@@ -18,4 +18,12 @@ installed pi metadata instead of library suggestions, refresh/cache/advanced-inp
 scripted browser/transport checks, metadata-only real CLI observation and the subsequently
 owner-authorized production refresh check (no task/completion probe).
 
+[Experiment 0011](0011-pi-real-connector-crash-recovery.md) records an authorized isolated
+real-pi in-flight connector-process crash, default-backoff automatic cold resume and duplicate
+command check. It does not accept manual/stall recovery or production daemon supervision.
+
+[Experiment 0012](0012-pi-manual-and-stall-recovery.md) records explicit real-pi manual cold
+resume and first watchdog respawn after an OS-induced stall, using unchanged 8-minute silence
+and real CPU sampling. Both scoped cases passed; second-stall/changed-task cases remain unaccepted.
+
 No automatic acceptance, agent launch, or production write is implied by adding a record.
