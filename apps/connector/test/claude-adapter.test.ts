@@ -325,15 +325,16 @@ describe("detectClaude / defaultAdapters (hello.agents advertises only what is i
     // A stand-in "claude" binary that answers --version like the real CLI.
     const fakeBin = join(dir, "fake-claude-bin.mjs");
     writeFileSync(fakeBin, "console.log('1.0.42 (Claude Code)');\n");
+    const missing = [process.execPath, join(dir, "no-such-bin.mjs")];
     const found = detectClaude([process.execPath, fakeBin]);
     expect(found).toMatchObject({ installed: true, version: "1.0.42 (Claude Code)" });
-    expect(detectClaude([process.execPath, join(dir, "no-such-bin.mjs")]).installed).toBe(false);
+    expect(detectClaude(missing).installed).toBe(false);
 
-    const adapters = defaultAdapters(stateDir, [process.execPath, fakeBin]);
+    const adapters = defaultAdapters(stateDir, [process.execPath, fakeBin], missing);
     expect(adapters.map((a) => a.kind)).toEqual(["pi", "claude-code"]);
     expect(adapters[1]!.version).toBe("1.0.42 (Claude Code)");
     // Not installed → hello.agents carries pi only.
-    expect(defaultAdapters(stateDir, [process.execPath, join(dir, "no-such-bin.mjs")]).map((a) => a.kind)).toEqual([
+    expect(defaultAdapters(stateDir, missing, missing).map((a) => a.kind)).toEqual([
       "pi",
     ]);
   });

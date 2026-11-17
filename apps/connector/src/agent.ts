@@ -4,7 +4,7 @@
 
 import type { AgentModelCatalog, AgentModelObservation, HistoryPage } from "@isaac2ingrid/protocol";
 
-export type AgentKind = "pi" | "claude-code" | "codex";
+export type AgentKind = "pi" | "claude-code" | "codex" | "antigravity";
 
 export interface AgentCapabilities {
   /** Change direction immediately while running (takes effect after the current tool finishes). */

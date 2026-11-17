@@ -191,3 +191,25 @@ export function claudeSessionPath(cwd: string, sessionId: string, configDir: str
   }
   return null;
 }
+
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Antigravity CLI stores native forensic transcripts at
+ * `<geminiConfigDir>/antigravity-cli/brain/<sessionId>/.system_generated/logs/transcript.jsonl`.
+ * Accepts a single directory or an ordered search list (isolated API-key profile first, then `~/.gemini`).
+ */
+export function antigravitySessionPath(
+  sessionId: string,
+  geminiConfigDir: string | string[] = process.env.AGY_CONFIG_DIR ?? join(homedir(), ".gemini"),
+): string | null {
+  if (!SAFE_SESSION_ID.test(sessionId) || sessionId.includes("..")) {
+    throw failure("no_history", "That is not a valid Antigravity session id.");
+  }
+  const dirs = Array.isArray(geminiConfigDir) ? geminiConfigDir : [geminiConfigDir];
+  for (const dir of dirs) {
+    const candidate = join(dir, "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl");
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}

@@ -19,11 +19,13 @@ import { findSessionHolders } from "./session-holders.ts";
 import { ProgressThrottle } from "./progress.ts";
 import { inspectSessionTail, type SessionTail } from "./session-tail.ts";
 import { readSessionHistory } from "./session-history.ts";
-import { readFullSessionHistory, claudeSessionPath } from "./full-session-history.ts";
+import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath } from "./full-session-history.ts";
+import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
 import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
 import { WorktreeManager, createReadonlyWorktree } from "./worktree.ts";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -1546,6 +1548,11 @@ export class WorkerManager {
       if (worker.agent === "claude-code") {
         const cwd = worker.worktree ?? this.store.getRepo(worker.repoId)?.path;
         path = worker.sessionId && cwd ? claudeSessionPath(cwd, worker.sessionId) : null;
+      } else if (worker.agent === "antigravity") {
+        const defaultDir = process.env.AGY_CONFIG_DIR ?? join(homedir(), ".gemini");
+        path = worker.sessionId
+          ? antigravitySessionPath(worker.sessionId, [isolatedAgyGeminiDir(this.stateDir), defaultDir])
+          : null;
       }
       if (!path) throw new CommandError("no_history", "This worker has not recorded a local session yet.");
       return readFullSessionHistory(path, since, maxBytes);

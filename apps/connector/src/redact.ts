@@ -12,6 +12,9 @@ const KEY_PATTERNS: Array<{ re: RegExp; replacement: string }> = [
   { re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: "[redacted]" },
   // AWS access key ids
   { re: /\bAKIA[0-9A-Z]{16}\b/g, replacement: "[redacted]" },
+  // Google / Gemini API keys (legacy AIza… and AI Studio AQ.… authorization keys)
+  { re: /\bAIza[0-9A-Za-z_-]{20,}\b/g, replacement: "[redacted]" },
+  { re: /\bAQ\.[A-Za-z0-9._-]{20,}\b/g, replacement: "[redacted]" },
   // Authorization headers of any shape
   { re: /\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*/g, replacement: "$1[redacted]" },
 ];

@@ -30,6 +30,11 @@ export interface Credentials {
   connEpoch: number;
 }
 
+export interface AntigravityApiKeyConfig {
+  apiKey: string;
+  model: string;
+}
+
 export class WritePolicyError extends Error {}
 
 export class LocalStore {
@@ -236,6 +241,41 @@ export class LocalStore {
 
   clearProxyConfig(): void {
     this.db.prepare("DELETE FROM config WHERE key = 'proxy'").run();
+  }
+
+  /** Isolated Antigravity Gemini API key profile (`otto agy-key`), or null when using the
+   *  default Google Account OAuth login (`~/.gemini` + OS keyring). */
+  getAntigravityApiKeyConfig(): AntigravityApiKeyConfig | null {
+    const row = this.db.prepare("SELECT value FROM config WHERE key = 'antigravity_api_key'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as { apiKey?: unknown; model?: unknown };
+      if (typeof parsed.apiKey !== "string" || parsed.apiKey.trim().length === 0) return null;
+      const model =
+        typeof parsed.model === "string" && parsed.model.trim().length > 0
+          ? parsed.model.trim()
+          : "Gemini 4 Hydrogen (High)";
+      return { apiKey: parsed.apiKey.trim(), model };
+    } catch {
+      return null;
+    }
+  }
+
+  setAntigravityApiKeyConfig(config: AntigravityApiKeyConfig): void {
+    const apiKey = config.apiKey.trim();
+    if (!apiKey) throw new Error("Antigravity API key must not be empty");
+    const model = config.model.trim() || "Gemini 4 Hydrogen (High)";
+    this.db
+      .prepare(
+        "INSERT INTO config (key, value) VALUES ('antigravity_api_key', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(JSON.stringify({ apiKey, model }));
+  }
+
+  clearAntigravityApiKeyConfig(): void {
+    this.db.prepare("DELETE FROM config WHERE key = 'antigravity_api_key'").run();
   }
 
   close(): void {

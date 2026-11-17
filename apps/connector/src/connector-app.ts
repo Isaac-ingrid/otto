@@ -11,12 +11,13 @@ import { CommandLog, type CommandResult } from "./commands.ts";
 import { RegisterRepoArgsSchema, type CmdMessage } from "@isaac2ingrid/protocol";
 import { registerRepository } from "./repository.ts";
 import { EventLog } from "./events.ts";
-import type { LocalStore } from "./store.ts";
+import type { LocalStore, AntigravityApiKeyConfig } from "./store.ts";
 import type { StallWatchdogOptions } from "./watchdog.ts";
 import { CommandError, WorkerManager, type RecoveryOptions } from "./worker-manager.ts";
 import type { AgentAdapter } from "./agent.ts";
 import { PiAdapter } from "./pi-adapter.ts";
 import { ClaudeAdapter, detectClaude } from "./claude-adapter.ts";
+import { AntigravityAdapter, agyCommandFromEnv, detectAntigravity } from "./antigravity-adapter.ts";
 import { VERSION } from "./version.ts";
 import type { PrExec } from "./pr.ts";
 
@@ -35,6 +36,10 @@ export interface ConnectorAppOptions {
   /** The claude argv prefix for the default adapter set (issue #17); tests point it at
    *  fake-claude. Ignored when `adapters`/`adapter` is given. */
   claudeCommand?: string[];
+  /** The agy argv prefix for the default adapter set; tests point it at fake-agy. */
+  agyCommand?: string[];
+  /** Optional isolated Antigravity Gemini API key profile (`otto agy-key`). */
+  agyApiKeyConfig?: AntigravityApiKeyConfig | null;
   /** §9 recovery knobs (tests shrink timers and inject process I/O). */
   recovery?: RecoveryOptions;
   /** Stall-watchdog knobs (tests shrink timers and inject CPU samples). */
@@ -53,13 +58,29 @@ export function maxWorkersFromMemory(): number {
   return Math.min(8, Math.max(1, Math.floor(0.5 * (os.totalmem() / 1_000_000) / 250)));
 }
 
-/** Issue #17: the connector's default agent set — pi always, Claude Code when the binary is
- *  on the machine (hello.agents advertises only what is actually installed). */
-export function defaultAdapters(stateDir: string, claudeCommand: string[] = ["claude"]): AgentAdapter[] {
+/** Issue #17: the connector's default agent set — pi always, plus Claude Code and
+ *  Antigravity CLI when their binaries are installed on the machine. */
+export function defaultAdapters(
+  stateDir: string,
+  claudeCommand: string[] = ["claude"],
+  agyCommand: string[] = agyCommandFromEnv() ?? ["agy"],
+  agyApiKeyConfig?: AntigravityApiKeyConfig | null,
+): AgentAdapter[] {
   const adapters: AgentAdapter[] = [new PiAdapter({ stateDir })];
   const claude = detectClaude(claudeCommand);
   if (claude.installed) {
     adapters.push(new ClaudeAdapter({ stateDir, command: claudeCommand, version: claude.version }));
+  }
+  const agy = detectAntigravity(agyCommand);
+  if (agy.installed) {
+    adapters.push(
+      new AntigravityAdapter({
+        stateDir,
+        command: agyCommand,
+        version: agy.version,
+        ...(agyApiKeyConfig ? { apiKeyConfig: agyApiKeyConfig } : {}),
+      }),
+    );
   }
   return adapters;
 }
@@ -77,7 +98,16 @@ export class ConnectorApp {
     this.log = options.log;
     const events = new EventLog(options.store.database);
     this.commandLog = new CommandLog(options.store.database);
-    const adapters = options.adapters ?? (options.adapter ? [options.adapter] : defaultAdapters(options.stateDir, options.claudeCommand));
+    const adapters =
+      options.adapters ??
+      (options.adapter
+        ? [options.adapter]
+        : defaultAdapters(
+            options.stateDir,
+            options.claudeCommand,
+            options.agyCommand,
+            options.agyApiKeyConfig ?? options.store.getAntigravityApiKeyConfig(),
+          ));
     this.manager = new WorkerManager({
       store: options.store,
       stateDir: options.stateDir,

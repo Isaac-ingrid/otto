@@ -43,10 +43,14 @@ export async function runDaemon(options: DaemonOptions): Promise<DaemonHandle> {
     throw new Error("not paired: no credentials in the local store; run `otto connect <url> <code>` first");
   }
 
-  // The device token is the one secret the daemon holds; the logger scrubs it from every line.
+  // The device token (plus any stored Antigravity API key) is scrubbed from every log line.
+  const agyApiKey = store.getAntigravityApiKeyConfig();
   const logger =
     options.logger ??
-    new Logger({ dir: join(options.stateDir, "logs"), secrets: [credentials.token] });
+    new Logger({
+      dir: join(options.stateDir, "logs"),
+      secrets: [credentials.token, ...(agyApiKey ? [agyApiKey.apiKey] : [])],
+    });
 
   // Every boot rewrites the versioned extension and prompt files (issue #26): after an
   // upgrade the new package's assets land here before any worker starts.
@@ -71,6 +75,8 @@ export async function runDaemon(options: DaemonOptions): Promise<DaemonHandle> {
     piDetail: piLaunch.detail ?? null,
     piError: piLaunch.error ?? null,
     piSpawnable: piCheck.ok,
+    agyAuthMode: agyApiKey ? "isolated-api-key" : "default-oauth",
+    ...(agyApiKey ? { agyModel: agyApiKey.model } : {}),
   });
 
   // Issue #68: a proxy stored by `otto connect --proxy` / `otto proxy` is activated at boot —
@@ -96,6 +102,7 @@ export async function runDaemon(options: DaemonOptions): Promise<DaemonHandle> {
     machineName: options.machineName,
     adapters: options.adapters ?? (options.adapter ? [options.adapter] : undefined),
     adapter: options.adapter,
+    agyApiKeyConfig: agyApiKey,
     WebSocketImpl: options.WebSocketImpl,
     wsAgent,
     log: (event, fields) => logger.info(event, fields),
