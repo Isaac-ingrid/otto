@@ -6,7 +6,7 @@
 import { isThinkingLevel, parseThinkingDeclaration, type ComposerModelInput, type ModelSaveResult, type ModelSwitchInput } from "./llm/models.ts";
 import type { ConnectionTestResult } from "./llm/connection-test.ts";
 import type { BudgetState } from "./budget.ts";
-import { DirectoryBrowseArgsSchema, RegisterRepoArgsSchema, type DirectoryBrowseArgs, type DirectoryListing, type RegisterRepoResult } from "@isaac2ingrid/protocol";
+import { AgentModelIdSchema, DirectoryBrowseArgsSchema, RegisterRepoArgsSchema, type DirectoryBrowseArgs, type DirectoryListing, type RegisterRepoResult } from "@isaac2ingrid/protocol";
 import type { Ledger } from "./ledger.ts";
 import {
   WorkspaceError,
@@ -48,6 +48,8 @@ export interface WorkspaceApiDeps {
    * to a previously keyed provider needs no re-entry, while giving a key reseals it (the
    * "fix a rejected key" flow stays the same single form). */
   saveModel?(input: ModelSwitchInput): Promise<ModelSaveResult>;
+  saveAgentModel?(deviceId: string, agent: string, model: string | null): void;
+  refreshAgentModels?(input: { deviceId: string; agent: string }, signal: AbortSignal): Promise<{ ok: boolean; code?: string }>;
   modelDraftAction?(id: string, revision: number, action: 'verify' | 'activate' | 'delete'): Promise<ModelSaveResult>;
   selectModel?(input: ComposerModelInput): Promise<unknown>;
   testModel?(input: ModelSwitchInput): Promise<ConnectionTestResult>;
@@ -205,7 +207,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
   if (request.method !== "POST") return json({ error: "not_found" }, 404);
 
   const origin = request.headers.get("origin");
-  const requireOrigin = deps.requireOrigin || url.pathname.startsWith("/app/api/machines/directories") || url.pathname.startsWith("/app/api/push/");
+  const requireOrigin = deps.requireOrigin || url.pathname === '/app/api/settings/agent-model/refresh' || url.pathname.startsWith("/app/api/machines/directories") || url.pathname.startsWith("/app/api/push/");
   if (!sameSecret(request.headers.get("x-csrf-token") ?? "", session.csrf) || (requireOrigin ? origin !== url.origin : origin !== null && origin !== url.origin)) {
     return json({ error: "forbidden" }, 403);
   }
@@ -251,6 +253,17 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     }
     if (url.pathname === "/app/api/settings/model/test" && deps.testModel) {
       return json(await deps.testModel(parseModelSwitch(await readJson(request))));
+    }
+    if (url.pathname === '/app/api/settings/agent-model' && deps.saveAgentModel) {
+      const { deviceId, agent, model } = await readJson(request);
+      if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 256 || typeof agent !== 'string' || !/^[a-z0-9-]{1,64}$/.test(agent) || (model !== null && !AgentModelIdSchema.safeParse(model).success)) throw new WorkspaceError('bad_request');
+      deps.saveAgentModel(deviceId, agent, model as string | null);
+      return json({ ok: true });
+    }
+    if (url.pathname === '/app/api/settings/agent-model/refresh' && deps.refreshAgentModels) {
+      const { deviceId, agent } = await readJson(request);
+      if (typeof deviceId !== 'string' || !/^[\w-]{1,128}$/.test(deviceId) || typeof agent !== 'string' || !/^[a-z0-9-]{1,64}$/.test(agent)) throw new WorkspaceError('bad_request');
+      return json(await deps.refreshAgentModels({ deviceId, agent }, request.signal));
     }
     if (url.pathname === '/app/api/settings/model/draft' && deps.modelDraftAction) {
       const { id, revision, action } = await readJson(request);

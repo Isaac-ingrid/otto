@@ -103,6 +103,7 @@ async function main() {
   writeLine({
     type: "system",
     subtype: "init",
+    ...(startup.model ? { model: startup.model } : {}),
     session_id: sessionId,
     mcp_servers: [{ name: "otto", status: startup.mcpStatus ?? "connected" }],
   });

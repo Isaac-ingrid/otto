@@ -70,6 +70,7 @@ export class ConnectorApp {
   readonly manager: WorkerManager;
   readonly client: ConnectorClient;
   private commandLog: CommandLog;
+  private stopped = false;
 
   constructor(options: ConnectorAppOptions) {
     this.store = options.store;
@@ -109,6 +110,7 @@ export class ConnectorApp {
       handleCommand: (cmd: CmdMessage) => this.runCommand(cmd),
       snapshot: () => this.snapshot(),
       workersSnapshot: () => this.workersSnapshot(),
+      discoverModels: agent => this.manager.refreshAgentModels(agent),
       // L3 raw-history reads (§11.4): live get_entries while the process runs, the session
       // JSONL along the current branch otherwise. Logged at lifecycle level only — the
       // transcript itself never reaches the log.
@@ -130,10 +132,17 @@ export class ConnectorApp {
    */
   async start(): Promise<void> {
     await this.manager.reconcileStartup();
-    this.client.start();
+    for (const agent of this.manager.agents) {
+      if (!this.stopped && agent.modelCatalog?.refreshable) {
+        try { await this.manager.refreshAgentModels(agent.kind); }
+        catch { this.log?.('model_discovery_failed', { agent: agent.kind }); }
+      }
+    }
+    if (!this.stopped) this.client.start();
   }
 
   stop(): void {
+    this.stopped = true;
     this.manager.stop();
     this.client.stop();
   }
@@ -187,6 +196,9 @@ export class ConnectorApp {
       lastSeq: events.nextSeq(w.workerId) - 1,
       sessionId: w.sessionId ?? "",
       lastOutcome: w.lastOutcome ?? "",
+      requestedModel: w.requestedModel ?? null,
+      launchObservedModel: w.launchObservedModel ? JSON.parse(w.launchObservedModel) : null,
+      lastObservedModel: w.lastObservedModel ? JSON.parse(w.lastObservedModel) : null,
     }));
   }
 
@@ -198,6 +210,7 @@ export class ConnectorApp {
         kind: a.kind,
         version: a.version ?? VERSION,
         capabilities: a.capabilities,
+        ...(a.modelCatalog ? { modelCatalog: a.modelCatalog } : {}),
       })),
       repos: this.store.listRepos().map((r) => ({
         repoId: r.repoId,

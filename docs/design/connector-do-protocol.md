@@ -396,6 +396,26 @@ Sent once on subscribe and then only when it changes (compared against the last 
 
 Pushes ride the same coalescing nudge as `workspace_changed` (150 ms): one pass per burst, one indexed `(threadId, id)` query per subscribed connection, a bounded number of pages per pass with the remainder re-arming the nudge. That way no ledger write path can forget to notify, a burst does not fan out, and a watcher that fell far behind is caught up rather than silently truncated. No model is involved — this must work with the model unavailable, like the rest of the workspace.
 
+### 6.10 Local agent model discovery (ephemeral metadata)
+
+Owner-only `POST /app/api/settings/agent-model/refresh` requires a session, CSRF token and
+same-origin Origin. It sends `agent_models { id, agent }` only to the owning live connector
+whose catalog declares `refreshable`. The connector replies with
+`agent_models_result { re, ok: true, catalog }` or a bounded failure code. Replies correlate
+both request ID and authenticated connection/device; unsolicited, cross-device and late replies
+are ignored. Reads time out at 15 seconds, cancel on disconnect/revoke, allow one pending read
+per device (32 globally), and do not enter the command outbox, worker event stream or replay.
+Catalog updates never modify the saved task default or a worker's frozen request/observations.
+
+Pi discovery invokes only local metadata RPCs in an offline/no-session process, never a prompt,
+`set_model` or completion probe. Fields shared/cached are IDs/names, the discovery-time default,
+source, timestamps, status and truncation (100 entries). No keys/headers/base URLs/auth data are
+projected. Local snapshots are suggestions: executable extensions/MCP/project context are not
+loaded, so project/extension-only models may require advanced input. Failure/offline retains
+cached metadata with its original success timestamp; it is not upstream availability proof.
+This metadata read is outside the finite event-delivery model; shared transport regressions and
+that model remain required checks for shared client/protocol edits, not a proof of discovery.
+
 ## 7. Key flows
 
 ### 7.1 Dispatching a task

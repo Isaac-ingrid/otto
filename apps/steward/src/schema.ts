@@ -1087,4 +1087,15 @@ export const MIGRATIONS: readonly Migration[] = [
       )`;
     },
   },
+  {
+    id: '038_agent_model_selection',
+    up: sql => {
+      sql`ALTER TABLE sh_machine ADD COLUMN modelCatalogs TEXT`;
+      sql`ALTER TABLE sh_worker ADD COLUMN requestedModel TEXT`;
+      sql`ALTER TABLE sh_worker ADD COLUMN modelSource TEXT NOT NULL DEFAULT 'agent-default'`;
+      sql`ALTER TABLE sh_worker ADD COLUMN launchObservedModel TEXT`;
+      sql`ALTER TABLE sh_worker ADD COLUMN lastObservedModel TEXT`;
+      sql`CREATE TABLE sh_agent_model_default (deviceId TEXT NOT NULL, agent TEXT NOT NULL, model TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(deviceId, agent))`;
+    },
+  },
 ];

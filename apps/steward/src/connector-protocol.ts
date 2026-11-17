@@ -11,6 +11,9 @@ import type { Connection } from "agents";
 import type { ServerKey } from "@isaac2ingrid/protocol";
 import {
   CloseCode,
+  AgentModelsResultSchema,
+  agentModelCatalogFor,
+  type AgentModelCatalog,
   CmdAckMessageSchema,
   CmdResultMessageSchema,
   DIRECTORY_BROWSE_TIMEOUT_MS,
@@ -101,6 +104,9 @@ export interface ConnectorProtocolDeps {
  * read map and the browse timeout.
  */
 export class ConnectorProtocol {
+  private modelDiscoveryTimeoutMs = 15_000;
+  setModelDiscoveryTimeoutForTest(ms: number): void { this.modelDiscoveryTimeoutMs = ms; }
+  private readonly modelReads = new Map<string, { deviceId: string; connectionId: string; agent: string; finish(catalog?: AgentModelCatalog): void }>();
   private directoryBrowseTimeoutMs = DIRECTORY_BROWSE_TIMEOUT_MS;
   private readonly directoryReads = new Map<string, {
     deviceId: string;
@@ -609,6 +615,47 @@ export class ConnectorProtocol {
     pending.finish(parsed.success ? parsed.data : { ok: false, code: "browse_failed" });
   }
 
+  async refreshAgentModels(input: { deviceId: string; agent: string }, signal: AbortSignal): Promise<{ ok: boolean; code?: string }> {
+    const machine = this.deps.ledger.machines.get(input.deviceId);
+    const catalog = agentModelCatalogFor(machine?.modelCatalogs, input.agent);
+    if (!machine || !catalog?.refreshable) throw new WorkspaceError('unsupported', 409);
+    const connection = this.deps.connFor(input.deviceId);
+    if (!connection) throw new WorkspaceError('machine_offline', 409);
+    if (this.modelReads.size >= 32 || [...this.modelReads.values()].some(p => p.deviceId === input.deviceId)) throw new WorkspaceError('busy', 429);
+    return new Promise(resolve => {
+      const id = ulid();
+      const finish = (fresh?: AgentModelCatalog) => {
+        if (!this.modelReads.delete(id)) return;
+        clearTimeout(timer); signal.removeEventListener('abort', abort);
+        let ok = false;
+        try {
+          const stored = this.deps.ledger.machines.setModelCatalog(input.deviceId, input.agent,
+            fresh ?? { ...catalog, status: 'unavailable', attemptedAt: Date.now() });
+          ok = stored && fresh?.status === 'ready';
+        } catch {
+          try { this.deps.logChannel('model_catalog_store_failed', input.deviceId); }
+          catch { /* Metadata reads must still settle when storage/audit is unavailable. */ }
+        }
+        resolve({ ok, ...(ok ? {} : { code: 'discovery_unavailable' }) });
+      };
+      const abort = () => finish();
+      const timer = setTimeout(abort, this.modelDiscoveryTimeoutMs);
+      this.modelReads.set(id, { ...input, connectionId: connection.id, finish });
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) { abort(); return; }
+      try { connection.send(JSON.stringify({ t: 'agent_models', id, agent: input.agent })); }
+      catch { finish(); }
+    });
+  }
+
+  handleAgentModels(connection: Connection, raw: unknown): void {
+    const parsed = AgentModelsResultSchema.safeParse(raw);
+    if (!parsed.success) return;
+    const reply = parsed.data, pending = this.modelReads.get(reply.re);
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== (connection.state as ConnState | null)?.deviceId) return;
+    pending.finish(reply.ok ? reply.catalog : undefined);
+  }
+
   async addMachineDirectory(input: MachineDirectoryInput): Promise<MachineDirectoryResult> {
     const cmdId = `web-directory:${input.id}`;
     const payload = JSON.stringify({ path: input.path });
@@ -644,12 +691,14 @@ export class ConnectorProtocol {
 
   /** Cancel directory reads whose connection is closing or device is going offline. */
   cancelReadsForConnection(connectionId: string, result: DirectoryReadResult): void {
+    for (const pending of this.modelReads.values()) if (pending.connectionId === connectionId) pending.finish();
     for (const pending of this.directoryReads.values()) {
       if (pending.connectionId === connectionId) pending.finish(result);
     }
   }
 
   cancelReadsForDevice(deviceId: string, result: DirectoryReadResult): void {
+    for (const pending of this.modelReads.values()) if (pending.deviceId === deviceId) pending.finish();
     for (const pending of this.directoryReads.values()) {
       if (pending.deviceId === deviceId) pending.finish(result);
     }

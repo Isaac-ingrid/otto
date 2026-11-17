@@ -49,6 +49,11 @@ describe("adjudicate (connector-pi.md §5.2 order)", () => {
     });
   });
 
+  it('preserves a real model-not-found failure and does not let an earlier done report mask it', () => {
+    const message = '404: {"message":"模型不存在","type":"model_not_found","code":"model_not_found"}';
+    expect(adjudicate({ aborted: false, lastAssistant: { stopReason: 'error', errorMessage: message, text: '' }, report })).toEqual({ outcome: 'error', errorClass: 'unknown', errorMessage: message });
+  });
+
   it("3. report called in the window → reported", () => {
     expect(adjudicate({ aborted: false, report })).toEqual({ outcome: "reported", report });
   });
@@ -80,6 +85,7 @@ describe("classifyError (§5.2 item 2)", () => {
     ["Your credit balance is too low to access the API", "auth"],
     ["insufficient quota", "auth"],
     ["402 payment required", "auth"],
+    ['404: {"message":"模型不存在","code":"model_not_found"}', 'unknown'],
     ["something odd happened", "unknown"],
   ])("%s → %s", (message, expected) => {
     expect(classifyError(message)).toBe(expected);

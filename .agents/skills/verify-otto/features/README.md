@@ -4,6 +4,7 @@ Run from repository root. The helper owns one isolated fixture at a time; eviden
 
 | User-facing feature | Journey / command | Coverage boundary |
 | --- | --- | --- |
+| [Local-agent model defaults](local-agent-models.md) | Direct isolated Playwright tests 11–13; see feature file | Owner forms/SQLite, local discovery refresh/cache/legacy UI and scripted authenticated connector replies; not real-provider acceptance |
 | [Steward model candidates](model-selection.md) | Direct isolated Playwright test 8; see feature file | Real browser + Node/SQLite, scripted provider; no real credentials |
 | [Conversation and stop](conversation.md) | `node scripts/verification/verify-otto.mjs run conversation` | Real browser + Node steward, scripted model; no real coding worker |
 | [PR watch confirmation](pr-watch.md) | `node scripts/verification/verify-otto.mjs run pr-watch` | Browser create/confirm/refusal/expiry + API/approval contracts; fixed external evidence |

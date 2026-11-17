@@ -106,6 +106,7 @@ import {
 } from "./report-template.ts";
 import { MIGRATIONS, runMigrations } from "./schema.ts";
 import { ModelConfigStore } from "./model-config.ts";
+import { AgentModelConfig } from './agent-model-config.ts';
 import { HistorySubscriptions, type ConnState } from "./history-subscriptions.ts";
 import { ConnectorProtocol } from "./connector-protocol.ts";
 import type { OutboxRow } from "./steward-types.ts";
@@ -619,6 +620,7 @@ export class Steward extends Agent<Env> {
   private get dispatcher(): Dispatcher {
     return (this.dispatcher_ ??= new Dispatcher({
       ledger: this.ledger,
+      agentModelDefault: (deviceId, agent) => this.agentModelConfig.get(deviceId, agent),
       enqueueCommand: (deviceId, kind, args, opts) => this.enqueue(deviceId, kind, args, opts),
       // Withdraw only what never left the DO (still `queued`); a sent command may already be
       // persisted connector-side, and at-most-once beats a maybe-duplicate cancel (§4.2).
@@ -755,6 +757,7 @@ export class Steward extends Agent<Env> {
         settings: async () => ({
           model: await this.llmSelection(),
           modelDrafts: this.modelConfigStore.drafts(),
+          localAgentModels: this.agentModelConfig.list(),
           passkeys: this.web.listPasskeys(),
           push: this.push.settings(),
           providers: providerCatalog(),
@@ -791,6 +794,17 @@ export class Steward extends Agent<Env> {
           this.testingModel = true;
           try { return await this.modelConfigStore.verifyDraft(id, revision); }
           finally { this.testingModel = false; }
+        },
+        refreshAgentModels: async (input, signal) => {
+          const result = await this.connectorProto.refreshAgentModels(input, signal);
+          const frame = JSON.stringify({ t: 'model_changed' });
+          for (const connection of this.getConnections(WORKSPACE_TAG)) if (this.webConnectionAlive(connection)) connection.send(frame);
+          return result;
+        },
+        saveAgentModel: (deviceId, agent, model) => {
+          this.agentModelConfig.set(deviceId, agent, model);
+          const frame = JSON.stringify({ t: 'model_changed' });
+          for (const connection of this.getConnections(WORKSPACE_TAG)) if (this.webConnectionAlive(connection)) connection.send(frame);
         },
         selectModel: (input) => this.selectComposerModel(input),
         pairing: (id: string) => this.webPairing(id),
@@ -1497,6 +1511,9 @@ export class Steward extends Agent<Env> {
         return;
       case "history_chunk":
         this.historySubs.handleHistoryChunk(connection, message);
+        return;
+      case 'agent_models_result':
+        this.connectorProto.handleAgentModels(connection, message);
         return;
       case "directory_listing":
         this.connectorProto.handleDirectoryListing(connection, message);
@@ -2415,6 +2432,8 @@ export class Steward extends Agent<Env> {
   // (phase 5 split): the sealed-key registry, saved/verified/probe rows and the connection
   // test live in ModelConfigStore. The LLM wiring (ensureRootModel, selectComposerModel)
   // stays here because it touches the PiHarness and installModel.
+  private get agentModelConfig(): AgentModelConfig { return new AgentModelConfig(this.sql.bind(this), this.ledger); }
+
   private modelConfigStore_?: ModelConfigStore;
   private get modelConfigStore(): ModelConfigStore {
     return (this.modelConfigStore_ ??= new ModelConfigStore({

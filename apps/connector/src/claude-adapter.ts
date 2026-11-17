@@ -138,6 +138,14 @@ interface WorkerRuntime {
 export class ClaudeAdapter implements AgentAdapter {
   readonly kind = "claude-code" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
+  readonly modelCatalog = {
+    // Pi-only rollout: retain Claude's existing default behavior, but do not advertise
+    // explicit model selection before real Claude startup/resume acceptance.
+    capabilities: { selection: 'none', discovery: 'suggested', customModelInput: false, actualModelObservation: true, thinkingSelection: false },
+    status: 'ready',
+    // CLI aliases are suggestions and may resolve to changing concrete models.
+    models: ['sonnet', 'opus', 'haiku'].map(id => ({ id, name: id })),
+  } satisfies import('@isaac2ingrid/protocol').AgentModelCatalog;
 
   private readonly options: ClaudeAdapterOptions;
   private readonly workerLogsDir: string | null;
@@ -286,6 +294,9 @@ export class ClaudeAdapter implements AgentAdapter {
           "startup_failed",
           `otto MCP server status '${mcp.status}': the report tool is not available; refusing to run unreported`,
         );
+      }
+      if (typeof init.model === 'string' && init.model.length > 0 && init.model.length <= 256 && !/[\x00-\x1f\x7f]/.test(init.model)) {
+        spec.onModelObserved?.({ id: init.model, source: 'init', observedAt: Date.now() });
       }
       const handle: WorkerHandle = { workerId: spec.workerId, sessionId, cwd: spec.cwd };
       setImmediate(() => this.flushBuffered(runtime));

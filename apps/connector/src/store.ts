@@ -11,7 +11,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { GitCapability, PlainCapability, RepoCapability } from "@isaac2ingrid/protocol";
+import type { AgentModelObservation, GitCapability, PlainCapability, RepoCapability } from "@isaac2ingrid/protocol";
 import type { ProcRef } from "./descendants.ts";
 import { normalizeProxyConfig, type ProxyConfig } from "./proxy.ts";
 import {
@@ -98,6 +98,10 @@ export class LocalStore {
     )`);
     // Issue #17: which AgentAdapter owns the worker — set at start, immutable afterwards.
     this.addColumnIfMissing("worker", "agent", "TEXT NOT NULL DEFAULT 'pi'");
+    this.addColumnIfMissing('worker', 'requestedModel', 'TEXT');
+    this.addColumnIfMissing('worker', 'modelSource', "TEXT NOT NULL DEFAULT 'agent-default'");
+    this.addColumnIfMissing('worker', 'launchObservedModel', 'TEXT');
+    this.addColumnIfMissing('worker', 'lastObservedModel', 'TEXT');
     // The worktree base (§8.2) persisted so a restarted connector can still collect git
     // facts for a retroactive report (§9.1) — spikes kept it only in memory.
     this.addColumnIfMissing("worker", "base", "TEXT");
@@ -314,8 +318,8 @@ export class LocalStore {
   upsertWorker(worker: WorkerRow): void {
     this.db
       .prepare(
-        `INSERT INTO worker (workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, agent, lastOutcome, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO worker (workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(workerId) DO UPDATE SET state = excluded.state, sessionId = excluded.sessionId,
            sessionFile = excluded.sessionFile, lastKnownEntryId = excluded.lastKnownEntryId,
            branch = excluded.branch, worktree = excluded.worktree,
@@ -337,6 +341,8 @@ export class LocalStore {
         worker.lastOutcome ?? null,
         worker.createdAt ?? Date.now(),
         Date.now(),
+        worker.requestedModel ?? null,
+        worker.modelSource ?? 'agent-default',
       );
   }
 
@@ -344,11 +350,16 @@ export class LocalStore {
     return (
       (this.db
         .prepare(
-          `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt
+          `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource, launchObservedModel, lastObservedModel
            FROM worker WHERE workerId = ?`,
         )
         .get(workerId) as WorkerRow | undefined) ?? null
     );
+  }
+
+  setModelObservation(workerId: string, observation: AgentModelObservation, initialLaunch = false): void {
+    const json = JSON.stringify(observation);
+    this.db.prepare('UPDATE worker SET launchObservedModel = CASE WHEN ? THEN COALESCE(launchObservedModel, ?) ELSE launchObservedModel END, lastObservedModel = ?, updatedAt = ? WHERE workerId = ?').run(initialLaunch ? 1 : 0, json, json, Date.now(), workerId);
   }
 
   /** §10: refresh the worker's session file and external-activity baseline. */
@@ -368,7 +379,7 @@ export class LocalStore {
     // Creation order (workerId as tiebreak): the serial write queue drains FIFO on it.
     return this.db
       .prepare(
-        `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt
+        `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource, launchObservedModel, lastObservedModel
          FROM worker ORDER BY createdAt, workerId`,
       )
       .all() as unknown as WorkerRow[];
@@ -512,6 +523,11 @@ export interface WorkerRow {
   state: string;
   /** Which agent owns the worker (issue #17); 'pi' for rows predating Claude Code. */
   agent?: string | null;
+  requestedModel?: string | null;
+  modelSource?: 'agent-default' | 'task-default' | 'override';
+  /** JSON-encoded trusted CLI observations; never filled from requestedModel. */
+  launchObservedModel?: string | null;
+  lastObservedModel?: string | null;
   sessionId?: string | null;
   sessionFile?: string | null;
   /** §10: the last session entry id the connector saw (pre-launch external-change baseline). */

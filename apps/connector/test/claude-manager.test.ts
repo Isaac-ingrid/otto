@@ -115,6 +115,12 @@ describe("hello.agents and worker identity (issue #17 AC)", () => {
 });
 
 describe("capability degradation at the manager (§3, issue #17 AC)", () => {
+  it('keeps Claude explicit model selection disabled during the pi-only rollout', async () => {
+    setup([], []);
+    expect(manager.agents.find(agent => agent.kind === 'claude-code')?.modelCatalog?.capabilities.selection).toBe('none');
+    await expect(manager.handleCommand('claude-model-gate', 'start_worker', { ...args(), model: 'sonnet' })).rejects.toMatchObject({ code: 'unsupported_model' });
+    expect(store.getWorker('w-claude-m1')).toBeNull();
+  });
   it("refuses readonly tasks and images for an agent that honestly cannot do them", async () => {
     setup([], []);
     await expect(

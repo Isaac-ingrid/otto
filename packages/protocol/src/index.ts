@@ -11,3 +11,4 @@ export * from "./git.ts";
 export * from "./directories.ts";
 export * from "./direct-worker-cmd.ts";
 export * from "./thread-subscription.ts";
+export * from './agent-models.ts';

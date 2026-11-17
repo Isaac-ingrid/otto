@@ -51,7 +51,7 @@ export async function resetLedgerState(): Promise<void> {
     // SDK class, hence the shape cast.
     const storage = (instance as unknown as { ctx: { storage: { sql: { exec: (query: string) => unknown } } } }).ctx.storage;
     for (const table of [
-      "sh_machine", "sh_repo", "sh_thread", "sh_thread_repo", "sh_thread_summary", "sh_worker", "sh_report",
+      "sh_agent_model_default", "sh_machine", "sh_repo", "sh_thread", "sh_thread_repo", "sh_thread_summary", "sh_worker", "sh_report",
       "sh_timeline", "sh_question", "sh_notify", "sh_offline_dispatch", "sh_note", "sh_note_log", "event_inbox", "worker_ack", "outbox",
       "sh_web_link", "sh_web_session", "sh_web_request", "sh_web_pairing", "sh_deploy", "device", "pairing", "sh_reap_pending", "sh_pr_consent",
       "sh_web_credential", "sh_web_webauthn_nonce",

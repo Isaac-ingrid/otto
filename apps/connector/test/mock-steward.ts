@@ -21,6 +21,8 @@ export interface MockSteward {
   sendHistoryReq: (workerId: string, opts?: { since?: string; maxBytes?: number; format?: "full" }) => string;
   /** §6.6: relay a browser ack for chunk `n`. */
   ackHistory: (reqId: string, n: number) => void;
+  sendAgentModels: (id: string, agent?: string) => void;
+  modelsFor: (id: string) => Record<string, unknown> | undefined;
   dropConn: () => void;
   events: () => Array<Record<string, unknown>>;
   hellos: () => Array<Record<string, unknown>>;
@@ -41,6 +43,7 @@ export function startMockSteward(): MockSteward {
   const deviceId = "dev_mock";
   const events: Array<Record<string, unknown>> = [];
   const hellos: Array<Record<string, unknown>> = [];
+  const modelReplies = new Map<string, Record<string, unknown>>();
   const cmdAcks = new Map<string, Record<string, unknown>>();
   const cmdResults = new Map<string, Record<string, unknown>>();
   const historyChunks = new Map<string, Array<Record<string, unknown>>>();
@@ -83,6 +86,7 @@ export function startMockSteward(): MockSteward {
       ws.on("message", (data) => {
         const m = JSON.parse(String(data)) as Record<string, unknown>;
         switch (m.t) {
+          case 'agent_models_result': modelReplies.set(String(m.re), m); break;
           case "ping":
             pingCount++;
             if (!swallowAllFrames && !swallowPongs) ws.send(JSON.stringify({ t: "pong", re: m.id }));
@@ -200,6 +204,8 @@ export function startMockSteward(): MockSteward {
     waitHello,
     sendCmd,
     sendHistoryReq,
+    sendAgentModels: (id, agent = 'pi') => send({ t: 'agent_models', id, agent }),
+    modelsFor: id => modelReplies.get(id),
     ackHistory: (reqId, n) => send({ t: "history_ack", re: reqId, n }),
     dropConn: () => {
       try {

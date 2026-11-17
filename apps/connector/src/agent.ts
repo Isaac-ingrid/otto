@@ -2,7 +2,7 @@
 // minimal set every agent implements; the rest is expressed through capability declarations
 // and the WorkerManager degrades (and tells the steward) when a capability is missing.
 
-import type { HistoryPage } from "@isaac2ingrid/protocol";
+import type { AgentModelCatalog, AgentModelObservation, HistoryPage } from "@isaac2ingrid/protocol";
 
 export type AgentKind = "pi" | "claude-code" | "codex";
 
@@ -45,6 +45,8 @@ export interface StartSpec {
   approveProject?: boolean;
   images?: { data: string; mimeType: string }[];
   model?: string;
+  /** Trusted CLI state, never a model's own prose or the requested value. */
+  onModelObserved?: (observation: AgentModelObservation) => void;
   /** Continuation launches (send-relaunch, resume, stall respawn) set this when the worker
    *  already has a session: agents whose session id is not the workerId (Claude Code's UUID)
    *  resume with it instead of deriving a fresh one. Pi ignores it — its session id IS the
@@ -166,6 +168,13 @@ export interface AgentAdapter {
   readonly capabilities: AgentCapabilities;
   /** Reported in hello.agents (protocol §6.1); defaults to the connector's own version. */
   readonly version?: string;
+  /** Bounded, credentials-free suggestions or an adapter-owned complete catalog. */
+  readonly modelCatalog?: AgentModelCatalog;
+  /** Metadata-only refresh; must not submit a prompt or probe model completions. */
+  refreshModels?(): Promise<AgentModelCatalog>;
+  stopDiscovery?(): void;
+  /** Optional adapter-specific narrowing, in addition to the common argv-value check. */
+  validateModel?(model: string): boolean;
 
   start(spec: StartSpec): Promise<WorkerHandle>; // must
   send(

@@ -7,6 +7,9 @@ import os from "node:os";
 import WebSocket from "ws";
 import {
   CloseCode,
+  AgentModelsRequestSchema,
+  AgentModelCatalogSchema,
+  type AgentModelCatalog,
   DirectoryListMessageSchema,
   PROTOCOL_VERSION,
   reconnectOn,
@@ -41,6 +44,7 @@ export interface ClientOptions {
   // connector rejects every kind so the DO's outbox row settles immediately.
   handleCommand?: CommandHandler;
   workersSnapshot?: () => Array<Record<string, unknown>>;
+  discoverModels?: (agent: string) => Promise<AgentModelCatalog>;
   /** Honest hello snapshot for the non-worker sections (protocol §6.1): agents, repos, limits. */
   snapshot?: () => { agents: unknown[]; repos: unknown[]; limits: { maxWorkers: number; running: number } };
   /** L3 raw-history loader (connector-pi.md §11.4): when set, `history_req` messages are
@@ -88,6 +92,7 @@ export class ConnectorClient {
   private sendQueue: StoredEvent[] = [];
   private flushTimer?: NodeJS.Timeout;
   private directoryReads = 0;
+  private discoveringModels = false;
   private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
   private readonly history: HistoryStreams | undefined;
@@ -266,6 +271,23 @@ export class ConnectorClient {
       case "cmd":
         this.handleCmd(ws, message as unknown as CmdMessage);
         return;
+      case 'agent_models': {
+        const parsed = AgentModelsRequestSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.discoverModels || this.discoveringModels) {
+          this.send(ws, { t: 'agent_models_result', re: request.id, ok: false, code: this.discoveringModels ? 'busy' : 'unsupported' });
+          return;
+        }
+        this.discoveringModels = true;
+        void this.options.discoverModels(request.agent).then(raw => {
+          const catalog = AgentModelCatalogSchema.parse(raw);
+          if (this.ws === ws) this.send(ws, { t: 'agent_models_result', re: request.id, ok: true, catalog });
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: 'agent_models_result', re: request.id, ok: false, code: 'discovery_failed' });
+        }).finally(() => { this.discoveringModels = false; });
+        return;
+      }
       case "directory_list": {
         const parsed = DirectoryListMessageSchema.safeParse(message);
         if (!parsed.success) return;

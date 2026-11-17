@@ -116,6 +116,62 @@ bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
 Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
 `apps/steward/ui` only needs re-copying when the page itself changes.
 
+Local-pi discovery deployment (2026-11-17, explicitly owner approved):
+`/opt/otto/releases/agent-models-pi-local-catalog-9ac4510-dirty-20261117T085658Z/`.
+
+- Backend SHA-256: `ce05ad70f5c0760ef7b1d4b1d82e9dfbf589de818b699ccdc60b8eb2780ebeeb`.
+  All backend/UI asset hashes verified. No new migration; 038 remains applied. Env and steward
+  model/provider-key/generation table hashes unchanged, including the final post-UI check.
+- Full previous dist and consistent SQLite backup are under `previous/`. Roll back code only:
+  stop otto, preserve current dist, copy previous dist back, restart and check health. Do not
+  casually restore the database or erase later data.
+- Local Windows release `~/.otto/releases/pi-local-catalog-20261117T085523Z/current/`:
+  CLI SHA-256 `b59a192209593bb8d6c2dccc3187874358b2aaa3fcd2242bc2d1095603f73135`.
+  Exact running predecessor (not a rebuild) plus SQLite backup retained alongside it. Pairing,
+  Run key/autostart setup and all 11 existing workers/model facts retained unchanged.
+- Source matched all 271 runtime/test inputs verified in experiment 0010; both builds passed.
+  Actual production browser saw nine locally discovered models, default
+  `ctaigw/deepseek-v4.1-flash`, collapsed Advanced, and a working metadata-only refresh with
+  newer timestamps and matching local cache/server result. Settings/Machines and reload agree.
+  Task default and steward model unchanged. No task, `set_model` or paid completion probe.
+- Root 200, unauthenticated settings 401, forged public Host 421, SQLite quick-check ok, remote
+  doctor zero failures; existing offsite-backup-disabled warning remains. No rollback needed.
+  Evidence `.verification/evidence/pi-local-catalog-deploy/`; production auth traces/cookies
+  are not retained there. Same package version 0.2.1; no npm publication, commit or push.
+  Claude explicit selection remains disabled; broader provider/CLI/recovery acceptance is pending.
+
+Pi-only pilot deployment (2026-11-17, explicitly owner approved):
+`/opt/otto/releases/agent-models-pi-9ac4510-dirty-20261117T060239Z/`.
+
+- Backend SHA-256: `4d8b62e20cd12b409dda44063fc5b4e1d5c34190ea022faf36851f96b52f05cc`.
+  Backend/UI assets verified; migration `038_agent_model_selection` applied. Env and steward
+  model/provider-key/generation table checksums unchanged. No npm publication, commit or push.
+- `previous/dist/` and `previous/steward.sqlite` are the code/data backups. Code-only rollback:
+  stop otto, preserve current dist, copy this release's previous dist back, restart and check
+  health. Do not restore the database casually: retain the additive migration and later data.
+- First attempt `/opt/otto/releases/agent-models-pi-9ac4510-dirty-20261117T060004Z/`
+  retains the original pre-038 DB backup and failed candidate. It automatically rolled code
+  back when the script incorrectly tested public Host rejection at the Node loopback root.
+  Old code also returned 200 there; the public nginx boundary correctly returns 421. Corrected
+  only the check target; no application/nginx/security policy was weakened.
+- Windows connector runs a versioned private build at
+  `~/.otto/releases/pi-models-20261117T055649Z/current/`, not the mutable checkout. Previous
+  clean `9ac4510` build and pre/post-smoke SQLite backups are alongside it. Same package
+  version 0.2.1; artifact identity is SHA-256
+  `ac042f11209dd5463e9396f19edecf4781bec7db6c3ea8baebecee6ff40f2cc7`.
+  Existing pairing retained; Run key/autostart installation unchanged. Claude explicit model
+  selection is disabled; following its own default remains unchanged.
+- Full Linux baseline gates passed; final pi-only delta: Linux connector 535, protocol 66,
+  connector types; Windows 53 focused tests, recursive/Node-host types and builds. One actual
+  production browser/steward/connector/pi/provider readonly task used only `read`/`report`
+  against a synthetic fixture, returned its nonce and reached `reported:done`. Requested and
+  CLI-observed model IDs matched. Previous default restored, temporary directory/registration
+  removed, model facts retained after connector restart. Synthetic thread remains auditable.
+- Final remote doctor: zero failures; existing offsite-backup-disabled warning remains.
+  Evidence `.verification/evidence/pi-only-rollout/` retains successful checks and all failed
+  setup/activation attempts. No production auth trace or session token is retained there.
+  Broader provider/CLI/recovery acceptance and independent review are not claimed.
+
 UI follow-up (2026-11-16): `/opt/otto/releases/model-ui-feedback-20261116T102012Z/`
 updates only `workspace.js`, `i18n.js` and `workspace.css`, with checksums and a full prior UI
 copy in `previous/ui/`. No service restart, migration or database write. Conflict/error feedback
@@ -124,7 +180,7 @@ inline explanation, visible disabled styling and live re-enabling when the reply
 browser tests, 56 focused regressions, steward typecheck and the retained conversation journey
 passed. Evidence: `.verification/evidence/model-conflict-ui/`. The backend version is unchanged.
 
-Latest deployment (2026-11-16): model-selection candidate from `4daf270` plus the uncommitted
+Previous backend deployment (2026-11-16): model-selection candidate from `4daf270` plus the uncommitted
 workspace changes (not a committed release). Release/receipt:
 `/opt/otto/releases/model-selection-4daf270-dirty-20261116T093635Z/` and `deployment.json`.
 Bundle/map and every UI asset passed SHA-256 checks before and after activation. The full old

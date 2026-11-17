@@ -22,6 +22,7 @@ export const HIGH_CONTEXT_USAGE = 0.8;
 /** Why a continuation starts a new session instead of resuming (spec §5.3 case 2). */
 export type NewSessionReason =
   | "fresh_review" // the user asked for a fresh, unbiased look
+  | "model_switch" // an explicitly requested model needs a new session
   | "agent_switch" // a different agent takes over
   | "machine_switch" // a different machine takes over
   | "repo_switch" // the continuation targets a different repository
@@ -36,7 +37,7 @@ export type ContinuationDecision =
 /** The facts `decideContinuation` needs; `previous` is the Thread's latest worker. */
 export interface ContinuationInput {
   previous: WorkerRow | null;
-  next: { agent: string; deviceId: string; repoId: string | null; mode: string };
+  next: { agent: string; deviceId: string; repoId: string | null; mode: string; model?: string };
   /** The user asked for a fresh perspective (independent review) — always a new session. */
   freshReview: boolean;
 }
@@ -60,6 +61,9 @@ export function decideContinuation(input: ContinuationInput): ContinuationDecisi
   if (!resumableSession(previous)) return { action: "new_session", from: previous, reason: "session_unusable" };
   if (previous.repoId !== null && input.next.repoId !== null && previous.repoId !== input.next.repoId) {
     return { action: "new_session", from: previous, reason: "repo_switch" };
+  }
+  if (input.next.model !== undefined && input.next.model !== previous.requestedModel) {
+    return { action: 'new_session', from: previous, reason: 'model_switch' };
   }
   if (previous.mode !== input.next.mode) return { action: "new_session", from: previous, reason: "mode_switch" };
   if ((previous.contextPercent ?? 0) >= HIGH_CONTEXT_USAGE * 100) {

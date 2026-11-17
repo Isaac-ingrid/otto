@@ -1,6 +1,7 @@
 import { test, expect, chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { writeFile } from "node:fs/promises";
+import WebSocket from 'ws';
 import { TURN_STOPPED_NOTICE } from "../src/owner-notices.ts";
 import type { ModelConfigStore } from '../src/model-config.ts';
 import { startBrowserTestServer, type BrowserTestServer } from "./server-fixture.ts";
@@ -311,6 +312,111 @@ test.describe("Workspace browser smoke suite", () => {
       await expect(page.locator('#dialog')).not.toContainText('A reply is in progress');
       expect(await server.steward.modelConfig()).toMatchObject({ provider: 'faux' });
     } finally { await other.close(); }
+  });
+
+  test('11. local-agent defaults are separate from the steward model and shared by Settings and Machines', async () => {
+    // Only machine facts are fixture prerequisites; saving/resetting uses real owner forms.
+    server.db.prepare("INSERT INTO device (deviceId, name, epoch, revoked, createdAt) VALUES ('model-machine', 'Local model machine', 1, 0, ?)").run(Date.now());
+    server.ledger.machines.upsertFromHello({
+      t: 'hello', id: 'models', protocol: { min: 1, max: 1 }, deviceId: 'model-machine', bootId: 'fake', connEpoch: 1,
+      connector: { version: 'fake', os: 'test', arch: 'test', node: 'test' }, machine: { name: 'Local model machine', memTotalMB: 1024, memFreeMB: 512 },
+      agents: [{ kind: 'codex', version: 'fake', capabilities: {}, modelCatalog: { status: 'ready', capabilities: { selection: 'launch', discovery: 'suggested', customModelInput: true, actualModelObservation: false, thinkingSelection: false }, models: [{ id: 'suggested-model', name: 'Suggested' }] } }],
+      repos: [], workers: [], pendingAcks: [], limits: { maxWorkers: 1, running: 0 },
+    });
+    await signInToWorkspace(page, server);
+    await page.locator('[data-action="account"]').click();
+    const form = page.locator('#dialog form[data-agent-model="codex"]');
+    await expect(form).toBeVisible();
+    await form.locator('[name="model"]').fill('custom/model');
+    await form.locator('button[type="submit"]').click();
+    await expect(page.locator('#dialog')).toContainText('Task default saved');
+    expect(await server.steward.modelConfig()).toMatchObject({ provider: 'faux', modelId: 'faux-1' });
+    await page.reload();
+    await expect(page.locator('#workspace')).toBeVisible();
+    await page.locator('[data-action="machines"]').first().click();
+    const machineForm = page.locator('#dialog form[data-agent-model="codex"]');
+    await expect(machineForm.locator('[name="model"]')).toHaveValue('custom/model');
+    await machineForm.locator('[name="model"]').fill('');
+    await machineForm.locator('button[type="submit"]').click();
+    await expect(machineForm.locator('[name="model"]')).toHaveValue('');
+    const settings = await (await context.request.get(`${server.baseUrl}/app/api/settings`)).json();
+    expect(settings.localAgentModels).toEqual([expect.objectContaining({ deviceId: 'model-machine', agent: 'codex', model: null })]);
+    expect(settings.model).toMatchObject({ provider: 'faux', modelId: 'faux-1' });
+  });
+
+  test('12. pi picker discovers local models, refreshes without changing defaults, and labels offline cache', async () => {
+    const { code } = await server.steward.createPairing();
+    const paired = await server.steward.pair(code, 'Local pi discovery');
+    if (!paired.ok) throw new Error('Fixture pairing failed');
+    const local = { status: 'ready', source: 'local-pi', refreshable: true, discoveredAt: Date.now() - 60_000, defaultModel: 'mine/alpha',
+      capabilities: { selection: 'launch', discovery: 'suggested', customModelInput: true, actualModelObservation: true, thinkingSelection: false, idFormat: 'qualified' },
+      models: [{ id: 'mine/alpha', name: 'My Alpha' }] };
+    let fail = false, requests = 0;
+    const ws = new WebSocket(`${server.baseUrl.replace('http:', 'ws:')}/agents/steward/owner?role=connector`, { headers: { authorization: `Bearer ${paired.token}` } });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.on('error', reject);
+        ws.on('message', raw => {
+          const frame = JSON.parse(raw.toString());
+          if (frame.t === 'welcome') resolve();
+          if (frame.t === 'agent_models') {
+            requests++;
+            ws.send(JSON.stringify(fail ? { t: 'agent_models_result', re: frame.id, ok: false, code: 'discovery_failed' }
+              : { t: 'agent_models_result', re: frame.id, ok: true, catalog: { ...local, discoveredAt: Date.now(), defaultModel: 'mine/beta', models: [{ id: 'mine/beta', name: 'My Beta' }] } }));
+          }
+        });
+        ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', id: 'local-discovery', protocol: { min: 1, max: 1 }, deviceId: paired.deviceId, bootId: 'scripted-local-discovery', connEpoch: 1,
+          connector: { version: 'scripted', os: 'test', arch: 'test', node: 'test' }, machine: { name: 'Local pi discovery', memTotalMB: 1024, memFreeMB: 512 },
+          agents: [{ kind: 'pi', version: 'scripted', capabilities: {}, modelCatalog: local }], repos: [], workers: [], pendingAcks: [], limits: { maxWorkers: 1, running: 0 } })));
+      });
+      await signInToWorkspace(page, server);
+      await page.locator('[data-action="account"]').click();
+      const form = page.locator('#dialog form[data-agent-model="pi"]');
+      await expect(form.locator('select[name="model"] option')).toHaveCount(2);
+      await expect(form).toContainText('Pi default at discovery: mine/alpha');
+      await expect(form.locator('.agent-model-advanced')).not.toHaveAttribute('open');
+      await form.locator('select[name="model"]').selectOption('mine/alpha');
+      await form.locator('button[type="submit"]').click();
+      await expect(page.locator('#dialog')).toContainText('Task default saved');
+      await form.locator('[data-action="agent-model-refresh"]').click();
+      await expect(page.locator('#dialog')).toContainText('Local model list refreshed');
+      await expect(form.locator('select[name="model"]')).toHaveValue('mine/alpha');
+      await expect(form.locator('select[name="model"] option[value="mine/beta"]')).toHaveCount(1);
+      await form.locator('.agent-model-advanced summary').click();
+      await form.locator('[name="useCustomModel"]').check();
+      await form.locator('[name="customModel"]').fill('mine/custom');
+      await form.locator('button[type="submit"]').click();
+      await expect(form.locator('select[name="model"]')).toHaveValue('mine/custom');
+      fail = true;
+      await form.locator('[data-action="agent-model-refresh"]').click();
+      await expect(page.locator('#dialog')).toContainText('Could not refresh');
+      await expect(form).toContainText('Cached discovery:');
+      await expect(form.locator('select[name="model"] option[value="mine/beta"]')).toHaveCount(1);
+      ws.close();
+      await expect(form.locator('[data-action="agent-model-refresh"]')).toBeDisabled();
+      await expect(form).toContainText('Machine offline');
+      expect(requests).toBe(2);
+      const settings = await (await context.request.get(`${server.baseUrl}/app/api/settings`)).json();
+      expect(settings.localAgentModels[0]).toMatchObject({ model: 'mine/custom', catalog: { status: 'unavailable', defaultModel: 'mine/beta' } });
+      expect(settings.model).toMatchObject({ provider: 'faux', modelId: 'faux-1' });
+      expect((await (await context.request.get(`${server.baseUrl}/app/api/workspace`)).json()).threads).toHaveLength(0);
+    } finally { ws.close(); }
+  });
+
+  test('13. legacy pi library suggestions are hidden rather than presented as local discovery', async () => {
+    server.db.prepare("INSERT INTO device (deviceId, name, epoch, revoked, createdAt) VALUES ('legacy-pi', 'Legacy pi', 1, 0, ?)").run(Date.now());
+    server.ledger.machines.upsertFromHello({
+      t: 'hello', id: 'legacy-pi', protocol: { min: 1, max: 1 }, deviceId: 'legacy-pi', bootId: 'fake', connEpoch: 1,
+      connector: { version: 'fake', os: 'test', arch: 'test', node: 'test' }, machine: { name: 'Legacy pi', memTotalMB: 1024, memFreeMB: 512 },
+      agents: [{ kind: 'pi', version: 'fake', capabilities: {}, modelCatalog: { status: 'ready', capabilities: { selection: 'launch', discovery: 'suggested', customModelInput: true, actualModelObservation: true, thinkingSelection: false }, models: Array.from({ length: 100 }, (_, i) => ({ id: `library/m${i}`, name: `Library model ${i}` })) } }],
+      repos: [], workers: [], pendingAcks: [], limits: { maxWorkers: 1, running: 0 },
+    });
+    await signInToWorkspace(page, server);await page.locator('[data-action="account"]').click();
+    const form = page.locator('#dialog form[data-agent-model="pi"]');
+    await expect(form.locator('select[name="model"] option')).toHaveCount(1);
+    await expect(form).toContainText('Library-wide suggestions are not shown');
+    await expect(form.locator('[data-action="agent-model-refresh"]')).toBeDisabled();
+    await expect(form.locator('.agent-model-advanced')).not.toHaveAttribute('open');
   });
 
   test("7. stale PR watch approval card beyond TTL cannot activate watch", async () => {

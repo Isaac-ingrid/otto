@@ -20,7 +20,7 @@ import { ProgressThrottle } from "./progress.ts";
 import { inspectSessionTail, type SessionTail } from "./session-tail.ts";
 import { readSessionHistory } from "./session-history.ts";
 import { readFullSessionHistory, claudeSessionPath } from "./full-session-history.ts";
-import type { HistoryPage } from "@isaac2ingrid/protocol";
+import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
 import { WorktreeManager, createReadonlyWorktree } from "./worktree.ts";
@@ -118,6 +118,7 @@ export interface StartWorkerArgs {
   base?: string;
   images?: { data: string; mimeType: string }[];
   model?: string;
+  modelSource?: 'agent-default' | 'task-default' | 'override';
 }
 
 export interface StartWorkerResult {
@@ -309,7 +310,13 @@ export class WorkerManager {
   }
 
   get agents() {
-    return [...this.adapters.values()].map((a) => ({ kind: a.kind, version: a.version, capabilities: a.capabilities }));
+    return [...this.adapters.values()].map((a) => ({ kind: a.kind, version: a.version, capabilities: a.capabilities, modelCatalog: a.modelCatalog }));
+  }
+
+  async refreshAgentModels(kind: string) {
+    const adapter = this.adapterFor(kind);
+    if (!adapter.refreshModels) throw new CommandError('unsupported', 'Model discovery is unavailable');
+    return adapter.refreshModels();
   }
 
   /** The adapter for an agent kind; unknown kinds fail loudly (never silently fall back —
@@ -393,6 +400,27 @@ export class WorkerManager {
     }
   }
 
+  private validateRequestedModel(adapter: AgentAdapter, model: string | undefined): void {
+    if (!acceptsAgentModel(adapter.modelCatalog, model) || (model !== undefined && adapter.validateModel && !adapter.validateModel(model))) {
+      throw new CommandError('unsupported_model', 'Agent does not support this explicit model selection; use its default or a supported model');
+    }
+  }
+
+  private modelEventFields(workerId: string): Record<string, unknown> {
+    const worker = this.store.getWorker(workerId);
+    return {
+      requestedModel: worker?.requestedModel ?? null,
+      modelSource: worker?.modelSource ?? 'agent-default',
+      launchObservedModel: worker?.launchObservedModel ? JSON.parse(worker.launchObservedModel) : null,
+      lastObservedModel: worker?.lastObservedModel ? JSON.parse(worker.lastObservedModel) : null,
+    };
+  }
+
+  private workerModelSpec(worker: WorkerRow): Pick<StartSpec, 'model' | 'onModelObserved'> {
+    const model = worker.requestedModel ?? undefined;
+    return { model, onModelObserved: observation => this.store.setModelObservation(worker.workerId, observation) };
+  }
+
   async startWorker(commandId: string, args: StartWorkerArgs): Promise<StartWorkerResult> {
     // Command dedup (§6.3) is the transport's job: ConnectorClient's CommandLog answers
     // redeliveries with `duplicate` and calls this handler only for unseen commandIds.
@@ -416,6 +444,7 @@ export class WorkerManager {
     // honest declarations are enforced — never quietly run a task the agent cannot honor.
     const agentKind = args.agent ?? "pi";
     const adapter = this.adapterFor(agentKind);
+    this.validateRequestedModel(adapter, args.model);
     if (args.images && args.images.length > 0 && !adapter.capabilities.images) {
       throw new CommandError(
         "unsupported_capability",
@@ -439,6 +468,10 @@ export class WorkerManager {
       );
     }
 
+    if (existingRow && (existingRow.requestedModel ?? null) !== (args.model ?? null)) {
+      throw new CommandError('model_mismatch', 'A worker keeps its original model request; start a new session to change it');
+    }
+
     // --- Repository whitelist (§8.1): a start_worker for an unregistered repo is rejected.
     const repo = this.store.getRepo(args.repoId);
     if (!repo) {
@@ -457,6 +490,8 @@ export class WorkerManager {
           threadId: args.threadId,
           repoId: args.repoId,
           agent: agentKind,
+          requestedModel: args.model ?? null,
+          modelSource: args.modelSource ?? (args.model ? 'override' : 'agent-default'),
           mode: "write",
           state: "queued",
           branch: null,
@@ -486,12 +521,14 @@ export class WorkerManager {
    * window (finding 3): a stop landing after the claim sees `starting`, not `queued`. */
   private async launchWorker(commandId: string, args: StartWorkerArgs, repo: RegisteredRepo): Promise<StartWorkerResult> {
     const adapter = this.adapterFor(args.agent); // unknown agents never reach a lock or a row
+    this.validateRequestedModel(adapter, args.model);
     // --- One process per session (§4.3): lock file, `lock_held` when alive, stale removed.
     const lock = acquireLock(this.stateDir, args.workerId);
     if (!lock.ok) {
       throw new CommandError("lock_held", `worker ${args.workerId} is locked by pid ${lock.pid}`, true);
     }
     this.launching.add(args.workerId);
+    const initialLaunch = !this.store.getWorker(args.workerId)?.sessionId;
 
     // Synchronous slot claim: the row exists (state `starting`) before any await, so a
     // concurrent start_worker / stop_process / pump decision reads this launch, not a void.
@@ -500,6 +537,8 @@ export class WorkerManager {
       threadId: args.threadId,
       repoId: args.repoId,
       agent: args.agent ?? "pi",
+      requestedModel: args.model ?? null,
+      modelSource: args.modelSource ?? (args.model ? 'override' : 'agent-default'),
       mode: args.mode,
       state: "starting",
     });
@@ -575,6 +614,7 @@ export class WorkerManager {
         approveProject: repo.approved === true ? true : undefined,
         images: args.images,
         model: args.model,
+        onModelObserved: observation => this.store.setModelObservation(args.workerId, observation, initialLaunch),
       };
 
       try {
@@ -617,6 +657,7 @@ export class WorkerManager {
       this.watchdog.start();
       // `started` (§11.1): successful start — the run is live, progress follows.
       await this.emitEvent(args.workerId, "started", {
+        ...this.modelEventFields(args.workerId),
         sessionId: handle.sessionId,
         cwd,
         branch,
@@ -1120,7 +1161,7 @@ export class WorkerManager {
       this.armIdleReclaim(workerId);
       throw err;
     }
-    await this.emitEvent(workerId, "started", { sessionId: worker.sessionId ?? workerId, cwd: worker.worktree ?? undefined });
+    await this.emitEvent(workerId, "started", { ...this.modelEventFields(workerId), sessionId: worker.sessionId ?? workerId, cwd: worker.worktree ?? undefined });
     return { delivery: "prompt" };
   }
 
@@ -1159,6 +1200,7 @@ export class WorkerManager {
       mode: worker.mode === "readonly" ? "readonly" : "write",
       prompt: input.text,
       commandId,
+      ...this.workerModelSpec(worker),
       onSession: (sessionFile, lastKnownEntryId) => {
         if (sessionFile) this.store.setSessionObservation(workerId, sessionFile, lastKnownEntryId);
         this.expectCommandMarker(commandId, workerId, sessionFile, lastKnownEntryId);
@@ -1172,7 +1214,9 @@ export class WorkerManager {
       resumeSessionId: worker.sessionId ?? undefined,
     };
     try {
-      const handle = await this.adapterOfWorker(worker).start(spec);
+      const adapter = this.adapterOfWorker(worker);
+      this.validateRequestedModel(adapter, spec.model);
+      const handle = await adapter.start(spec);
       this.store.upsertWorker({
         workerId,
         threadId: worker.threadId,
@@ -1187,6 +1231,7 @@ export class WorkerManager {
       });
       this.startSnapshotLoop();
       await this.emitEvent(workerId, "started", {
+        ...this.modelEventFields(workerId),
         sessionId: handle.sessionId,
         cwd,
         branch: worker.branch ?? undefined,
@@ -1705,7 +1750,7 @@ export class WorkerManager {
       await adapter.resume(workerId, reason, commandId ? { commandId } : undefined);
       this.recordSessionTail(workerId);
       this.store.setWorkerState(workerId, "running");
-      await this.emitEvent(workerId, "resumed", { reason, count });
+      await this.emitEvent(workerId, "resumed", { ...this.modelEventFields(workerId), reason, count });
       return;
     }
     const repo = this.store.getRepo(worker.repoId);
@@ -1751,6 +1796,7 @@ export class WorkerManager {
       mode: worker.mode === "readonly" ? "readonly" : "write",
       prompt: RESUME_PROMPT,
       commandId: options.commandId ?? `resume-${count}-${this.now()}`,
+      ...this.workerModelSpec(worker),
       onSession: (sessionFile, lastKnownEntryId) => {
         if (sessionFile) this.store.setSessionObservation(workerId, sessionFile, lastKnownEntryId);
         this.expectCommandMarker(options.commandId, workerId, sessionFile, lastKnownEntryId);
@@ -1770,6 +1816,7 @@ export class WorkerManager {
     try {
       let handle: WorkerHandle;
       try {
+        this.validateRequestedModel(adapter, spec.model);
         handle = await adapter.start(spec);
       } catch (err) {
         if (this.stopRequested.has(workerId)) throw new CommandError("aborted", "worker was stopped during resume");
@@ -1794,7 +1841,7 @@ export class WorkerManager {
       });
       this.startSnapshotLoop();
       this.watchdog.start();
-      await this.emitEvent(workerId, "resumed", { reason, count });
+      await this.emitEvent(workerId, "resumed", { ...this.modelEventFields(workerId), reason, count });
     } catch (err) {
       releaseLock(this.stateDir, workerId);
       this.active.delete(workerId);
@@ -1935,6 +1982,7 @@ export class WorkerManager {
       mode: worker.mode === "readonly" ? "readonly" : "write",
       prompt: `${original}\n\n${stallContinueNote(why)}`,
       commandId: `stall-respawn-${this.now()}`,
+      ...this.workerModelSpec(worker),
       // §13: reproduce the original launch's trust mode — the respawn is the same run.
       approveProject: repo?.approved === true ? true : undefined,
       // Same session as the stalled run (issue #17: Claude Code resumes its UUID).
@@ -1947,7 +1995,9 @@ export class WorkerManager {
       base: worker.base ?? undefined,
     });
     try {
-      const handle = await this.adapterOfWorker(worker).start(spec);
+      const adapter = this.adapterOfWorker(worker);
+      this.validateRequestedModel(adapter, spec.model);
+      const handle = await adapter.start(spec);
       // A stop is not a transition and can land while adapter.start is in flight: it settles
       // the worker (idle + settled:aborted) and its verdict must survive (the resume path
       // applies the same check). If this strike's `recovering` is gone the stop won the race
@@ -1972,7 +2022,7 @@ export class WorkerManager {
       });
       this.startSnapshotLoop();
       this.watchdog.start();
-      await this.emitEvent(workerId, "resumed", { reason: "stall", count: 1 });
+      await this.emitEvent(workerId, "resumed", { ...this.modelEventFields(workerId), reason: "stall", count: 1 });
     } catch (err) {
       releaseLock(this.stateDir, workerId);
       this.active.delete(workerId);
@@ -2030,6 +2080,7 @@ export class WorkerManager {
    * never spawn work after the caller closed the store). Worker processes are left to the
    * OS — on connector exit stdin closes and pi disposes of its tool tree itself (§9.1). */
   stop(): void {
+    for (const adapter of this.adapters.values()) adapter.stopDiscovery?.();
     this.crashed = true;
     this.stopSnapshotLoop();
     this.watchdog.stop();
@@ -2051,7 +2102,7 @@ export class WorkerManager {
     this.resumeTimers.clear();
     for (const timer of this.idleTimers.values()) clearTimeout(timer);
     this.idleTimers.clear();
-    for (const adapter of this.adapters.values()) adapter.simulateCrash?.();
+    for (const adapter of this.adapters.values()) { adapter.stopDiscovery?.(); adapter.simulateCrash?.(); }
     markLocksHeldByDeadProcess(this.stateDir);
   }
 
@@ -2326,6 +2377,14 @@ function parseStartWorkerArgs(args: Record<string, unknown>): StartWorkerArgs {
   };
   if (typeof args.agent === "string" && args.agent.length > 0) parsed.agent = args.agent;
   if (typeof args.base === "string" && args.base.length > 0) parsed.base = args.base;
-  if (typeof args.model === "string" && args.model.length > 0) parsed.model = args.model;
+  if (args.model !== undefined) {
+    const model = AgentModelIdSchema.safeParse(args.model);
+    if (!model.success) throw new CommandError('invalid_model', 'Model must be a bounded, exact model identifier');
+    parsed.model = model.data;
+  }
+  if (args.modelSource !== undefined) {
+    if (!['agent-default', 'task-default', 'override'].includes(String(args.modelSource))) throw new CommandError('invalid_model', 'Invalid model source');
+    parsed.modelSource = args.modelSource as StartWorkerArgs['modelSource'];
+  }
   return parsed;
 }

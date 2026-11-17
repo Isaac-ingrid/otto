@@ -344,6 +344,10 @@ export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; 
         return {
           id: worker.workerId,
           agent: worker.agent,
+          requestedModel: worker.requestedModel ?? null,
+          modelSource: worker.modelSource ?? 'agent-default',
+          launchObservedModel: worker.launchObservedModel ?? null,
+          lastObservedModel: worker.lastObservedModel ?? null,
           mode: worker.mode,
           state: worker.state,
           unreachable: worker.unreachable === true,

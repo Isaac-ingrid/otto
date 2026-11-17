@@ -5,7 +5,7 @@
 // knowledge half, issue #18) live in notes.ts behind the `notes` handle below — same rule:
 // sh_note* is reached only through the memory module. The situation brief's character
 // budget is brief.ts's.
-import { ulid } from "@isaac2ingrid/protocol";
+import { ulid, AgentModelObservationSchema, type AgentModelCatalog, type AgentModelObservation } from "@isaac2ingrid/protocol";
 import type { GitFacts, HelloMessage } from "@isaac2ingrid/protocol";
 import { createBudget } from "./budget.ts";
 import { createNotes, type NoteRow } from "./notes.ts";
@@ -97,6 +97,10 @@ export interface WorkerRow {
   agent: string;
   mode: string;
   state: string;
+  requestedModel?: string | null;
+  modelSource?: 'agent-default' | 'task-default' | 'override';
+  launchObservedModel?: AgentModelObservation | null;
+  lastObservedModel?: AgentModelObservation | null;
   /** A disconnected machine does not imply the session failed. */
   unreachable?: boolean;
   sessionId: string | null;
@@ -168,6 +172,7 @@ export interface MachineRow {
   online: boolean;
   lastSeen: number | null;
   agents: string[];
+  modelCatalogs?: Record<string, AgentModelCatalog>;
   maxWorkers: number;
   /** The connector process generation (protocol §6.1): changes on every connector restart. */
   bootId: string | null;
@@ -449,6 +454,8 @@ export interface NewWorkerInput {
   agent: string;
   mode: string;
   cmdId?: string;
+  requestedModel?: string | null;
+  modelSource?: 'agent-default' | 'task-default' | 'override';
   /** Relay (issue #8): the worker this session continues from. */
   parentWorker?: string;
 }
@@ -488,6 +495,7 @@ const viewMachine = (r: Record<string, unknown>): MachineRow => ({
   online: !!r.online,
   lastSeen: (r.lastSeen as number | null) ?? null,
   agents: jsonOrNull<string[]>(r.agents as string | null) ?? [],
+  modelCatalogs: jsonOrNull<Record<string, AgentModelCatalog>>(r.modelCatalogs as string | null) ?? {},
   maxWorkers: (r.maxWorkers as number | null) ?? 1,
   bootId: (r.bootId as string | null) ?? null,
   reliability: jsonOrNull<MachineReliability>(r.reliability as string | null),
@@ -499,6 +507,10 @@ const viewWorker = (r: Record<string, unknown>): WorkerRow => ({
   deviceId: r.deviceId as string,
   repoId: (r.repoId as string | null) ?? null,
   agent: r.agent as string,
+  requestedModel: (r.requestedModel as string | null) ?? null,
+  modelSource: (r.modelSource as WorkerRow['modelSource']) ?? 'agent-default',
+  launchObservedModel: jsonOrNull<AgentModelObservation>(r.launchObservedModel as string | null),
+  lastObservedModel: jsonOrNull<AgentModelObservation>(r.lastObservedModel as string | null),
   mode: r.mode as string,
   state: r.state as string,
   unreachable: !!r.unreachable,
@@ -664,18 +676,32 @@ export function createLedger(deps: LedgerDeps) {
     `;
   }
 
+  function recordModelObservations(workerId: string, values: { launchObservedModel?: unknown; lastObservedModel?: unknown }): void {
+    const launch = AgentModelObservationSchema.safeParse(values.launchObservedModel);
+    const latest = AgentModelObservationSchema.safeParse(values.lastObservedModel);
+    const previous = workers.get(workerId)?.lastObservedModel;
+    const updateLatest = latest.success && (!previous || latest.data.observedAt >= previous.observedAt);
+    if (launch.success || updateLatest) sql`UPDATE sh_worker
+      SET launchObservedModel = COALESCE(launchObservedModel, ${launch.success ? JSON.stringify(launch.data) : null}),
+          lastObservedModel = COALESCE(${updateLatest ? JSON.stringify(latest.data) : null}, lastObservedModel)
+      WHERE workerId = ${workerId}`;
+  }
+
   const machines = {
     /** Upserts machine facts + the full repo snapshot from a hello, and marks it online. */
     upsertFromHello(hello: HelloMessage): void {
       const ts = now();
       machineStatus.setOnline(hello.deviceId, true, hello.machine.name);
       sql`
-        INSERT INTO sh_machine (deviceId, name, online, lastSeen, agents, maxWorkers, bootId)
-        VALUES (${hello.deviceId}, ${hello.machine.name}, 1, ${ts}, ${JSON.stringify(hello.agents.map((a) => a.kind))}, ${hello.limits.maxWorkers}, ${hello.bootId})
+        INSERT INTO sh_machine (deviceId, name, online, lastSeen, agents, maxWorkers, bootId, modelCatalogs)
+        VALUES (${hello.deviceId}, ${hello.machine.name}, 1, ${ts}, ${JSON.stringify(hello.agents.map((a) => a.kind))}, ${hello.limits.maxWorkers}, ${hello.bootId}, ${JSON.stringify(Object.fromEntries(hello.agents.filter(a => a.modelCatalog).map(a => [a.kind, a.modelCatalog])))})
         ON CONFLICT (deviceId) DO UPDATE SET
           name = excluded.name, online = 1, lastSeen = excluded.lastSeen,
-          agents = excluded.agents, maxWorkers = excluded.maxWorkers, bootId = excluded.bootId
+          agents = excluded.agents, maxWorkers = excluded.maxWorkers, bootId = excluded.bootId, modelCatalogs = excluded.modelCatalogs
       `;
+      for (const snapshot of hello.workers) {
+        if (workers.get(snapshot.workerId)?.deviceId === hello.deviceId) recordModelObservations(snapshot.workerId, snapshot);
+      }
       // Slots occupied by sessions outside this ledger also count; tracked sessions are
       // counted live so a subsequent dispatch/settle immediately changes the free slots.
       const trackedRunning = hello.workers.filter((w) =>
@@ -684,6 +710,12 @@ export function createLedger(deps: LedgerDeps) {
       // hello.repos is a full snapshot: replace this machine's rows so removals stick.
       sql`DELETE FROM sh_repo WHERE deviceId = ${hello.deviceId}`;
       for (const repo of hello.repos) recordRepository(hello.deviceId, repo);
+    },
+    setModelCatalog(deviceId: string, agent: string, catalog: AgentModelCatalog): boolean {
+      const machine = machines.get(deviceId);
+      if (!machine || !machine.agents.includes(agent)) return false;
+      sql`UPDATE sh_machine SET modelCatalogs = ${JSON.stringify({ ...machine.modelCatalogs, [agent]: catalog })} WHERE deviceId = ${deviceId}`;
+      return true;
     },
     /** Online derives from live connections only (issue #5): onConnect marks, onClose clears. */
     setOnline(deviceId: string, online: boolean, fallbackName?: string): void {
@@ -948,9 +980,9 @@ export function createLedger(deps: LedgerDeps) {
     register(input: NewWorkerInput): WorkerRow {
       const ts = now();
       sql`
-        INSERT INTO sh_worker (workerId, threadId, deviceId, repoId, agent, mode, state, cmdId, parentWorker, createdAt, updatedAt)
+        INSERT INTO sh_worker (workerId, threadId, deviceId, repoId, agent, mode, state, cmdId, parentWorker, createdAt, updatedAt, requestedModel, modelSource)
         VALUES (${input.workerId}, ${input.threadId}, ${input.deviceId}, ${input.repoId ?? null},
-                ${input.agent}, ${input.mode}, 'starting', ${input.cmdId ?? null}, ${input.parentWorker ?? null}, ${ts}, ${ts})
+                ${input.agent}, ${input.mode}, 'starting', ${input.cmdId ?? null}, ${input.parentWorker ?? null}, ${ts}, ${ts}, ${input.requestedModel ?? null}, ${input.modelSource ?? 'agent-default'})
       `;
       // A fresh run of this id: any deferred reap-reconcile verdict is void.
       sql`DELETE FROM sh_reap_pending WHERE workerId = ${input.workerId}`;
@@ -2225,6 +2257,9 @@ export function createLedger(deps: LedgerDeps) {
     // Issue #14: an event from the machine is contact, whatever the DO believed during the
     // drop — the unreachable mark dies with the first real news.
     sql`UPDATE sh_worker SET unreachable = 0 WHERE workerId = ${workerId}`;
+    if (type === 'started' || type === 'resumed') {
+      recordModelObservations(workerId, event);
+    }
     switch (type) {
       case "queued": {
         // §8.2 serial repos (issue #16): the connector parked this write worker behind the

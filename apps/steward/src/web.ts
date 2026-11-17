@@ -269,6 +269,8 @@ export interface WebDeps {
     | "settings"
     | "saveModel"
     | "modelDraftAction"
+    | "saveAgentModel"
+    | "refreshAgentModels"
     | "selectModel"
     | "testModel"
     | "importModels"

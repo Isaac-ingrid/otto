@@ -2,6 +2,7 @@
 // is needed for this slice; commands/events arrive with the outbox/event-stream tickets.
 import { z } from "zod";
 import { type RepoCapability } from "./git.ts";
+import { AgentModelCatalogSchema, AgentModelIdSchema, AgentModelObservationSchema } from './agent-models.ts';
 
 export const PROTOCOL_VERSION = { min: 1, max: 1 } as const;
 
@@ -11,6 +12,7 @@ const AgentCapabilitySchema = z.object({
   kind: z.string(),
   version: z.string(),
   capabilities: z.record(z.string(), z.boolean()),
+  modelCatalog: AgentModelCatalogSchema.optional(),
 });
 
 const RepoCapabilitySchema = z.discriminatedUnion("kind", [
@@ -44,6 +46,9 @@ const WorkerSnapshotSchema = z.object({
   lastSeq: z.number().int(),
   sessionId: z.string(),
   lastOutcome: z.string(),
+  requestedModel: AgentModelIdSchema.nullable().optional(),
+  launchObservedModel: AgentModelObservationSchema.nullable().optional(),
+  lastObservedModel: AgentModelObservationSchema.nullable().optional(),
 });
 
 // `state` may be any command state; `code` rides a recovered `failed` (e.g.

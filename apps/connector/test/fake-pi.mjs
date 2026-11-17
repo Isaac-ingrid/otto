@@ -185,6 +185,7 @@ process.stdin.on("end", () => {
 });
 
 async function handle(command) {
+  if (process.env.FAKE_PI_RPC_LOG) appendFileSync(process.env.FAKE_PI_RPC_LOG, JSON.stringify({ type: command.type, cwd: process.cwd() }) + '\n');
   const id = command.id;
   const messageText = () => (typeof command.message === "string" ? command.message : "");
   switch (command.type) {
@@ -195,7 +196,14 @@ async function handle(command) {
         sessionId,
         sessionFile,
         isStreaming: false,
+        ...(scenario.model ? { model: scenario.model } : {}),
       });
+      return;
+    }
+    case 'get_available_models': {
+      if (scenario.discoveryDelayMs) await sleep(scenario.discoveryDelayMs);
+      if (scenario.discoveryError) respondError(id, 'get_available_models', 'discovery_failed');
+      else respond(id, 'get_available_models', { models: scenario.models ?? [] });
       return;
     }
     case "prompt": {

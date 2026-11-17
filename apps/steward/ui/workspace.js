@@ -53,6 +53,9 @@ const state = {
   pushNotice: null, // i18n key of the last push result, shown inside the dialog the toast cannot reach
   pushQuiet: true,
   changingModel: false,
+  savingAgentModel: false,
+  agentModelNotice: null,
+  refreshingAgentModels: false,
   modelDraftNotice: null, // lifecycle feedback belongs inside the settings modal, not behind it
   stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
@@ -535,6 +538,10 @@ function workerNode(thread, worker) {
       h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
       h('span', { class: 'worker-state' }, h('span', { class: `status-dot ${active ? 'green' : 'gray'}` }), tOr(`worker${cap(worker.state)}`, worker.state))),
     h('div', { class: 'worker-meta' }, [worker.machine, worker.unreachable ? t('unreachable') : null].filter(Boolean).join(' · ')),
+    h('div', { class: 'worker-facts' }, t('agentModelRequested', { model: worker.requestedModel ?? t('agentModelFollow') })),
+    h('div', { class: 'worker-facts' }, t('agentModelObserved', { model: worker.lastObservedModel?.id ?? t('agentModelUnknown') }),
+      worker.lastObservedModel ? h('small', { title: new Date(worker.lastObservedModel.observedAt).toISOString() }, ` · ${worker.lastObservedModel.source} · ${ago(worker.lastObservedModel.observedAt)}`) : null),
+    worker.launchObservedModel && worker.launchObservedModel.id !== worker.lastObservedModel?.id ? h('div', { class: 'worker-facts' }, t('agentModelLaunch', { model: worker.launchObservedModel.id })) : null,
     worker.branch ? h('code', null, worker.branch) : null,
     progress ? h('div', { class: 'worker-facts' }, t('progress', { what: progress })) : null,
     outcome ? h('div', { class: 'worker-facts' }, outcome) : null,
@@ -773,6 +780,7 @@ function machineCard(machine) {
       h('div', null, h('dt', null, t('agents')), h('dd', null, machine.agents.join(', ') || t('noneListed'))),
       h('div', null, h('dt', null, t('repositories')), h('dd', null, machine.repos.join(', ') || t('noneListed'))),
       work.length ? h('div', null, h('dt', null, t('running')), h('dd', null, work.map((entry) => entry.title).join(' · '))) : null),
+    machine.revoked ? null : agentModelSection(machine.id),
     machine.revoked ? null : directoryForm(machine),
     machine.revoked ? null : confirming
       ? h('div', { class: 'revoke-confirm' },
@@ -922,10 +930,85 @@ function pushSection() {
       ]);
 }
 
+function agentModelSection(deviceId = null) {
+  const entries = (state.settings?.localAgentModels ?? []).filter(entry => deviceId === null || entry.deviceId === deviceId);
+  if (!entries.length) return null;
+  return h('section', { class: 'settings-section agent-model-settings' },
+    h('h3', null, t('agentModelsTitle')),
+    h('p', { class: 'dialog-hint' }, t('agentModelsHelp')),
+    state.agentModelNotice ? h('p', { class: 'dialog-hint', role: 'status' }, t(state.agentModelNotice)) : null,
+    entries.map(entry => {
+      const selectable = entry.catalog?.capabilities?.selection && entry.catalog.capabilities.selection !== 'none';
+      const online = state.snapshot?.machines.find(machine => machine.id === entry.deviceId)?.online ?? entry.online;
+      const localPi = entry.agent === 'pi';
+      const freshLocal = online && entry.catalog?.status === 'ready';
+      const enumerated = localPi || entry.catalog?.capabilities?.discovery === 'enumerated';
+      const id = `agent-model-${encodeURIComponent(JSON.stringify([entry.deviceId, entry.agent]))}`;
+      const models = localPi && entry.catalog?.source !== 'local-pi' ? [] : entry.catalog?.models ?? [];
+      const disabled = state.savingAgentModel || state.refreshingAgentModels || !selectable;
+      return h('form', { class: 'model-form', dataset: { agentModel: entry.agent, deviceId: entry.deviceId } },
+        h('label', { for: id }, `${entry.machineName} / ${agentName(entry.agent)}`),
+        h('p', { class: 'dialog-hint' }, t('agentModelCurrent', { model: entry.model ?? t('agentModelFollow') })),
+        !online ? h('p', { class: 'dialog-hint' }, t('agentModelOffline'), entry.lastSeen ? ` · ${ago(entry.lastSeen)}` : '') : null,
+        !selectable ? h('p', { class: 'dialog-hint' }, t('agentModelUpgrade')) : null,
+        entry.catalog?.status === 'unavailable' ? h('p', { class: 'dialog-hint' }, t('agentModelDiscoveryUnavailable')) : null,
+        localPi ? h('p', { class: 'dialog-hint' }, t(entry.catalog?.source === 'local-pi' ? 'agentModelLocalList' : 'agentModelLocalUpgrade')) : null,
+        localPi && entry.catalog?.source === 'local-pi' ? h('p', { class: 'dialog-hint' },
+          t('agentModelPiDefault', { model: entry.catalog.defaultModel ?? t('agentModelUnknown') }),
+          entry.catalog.discoveredAt !== undefined ? ` · ${t(freshLocal ? 'agentModelUpdated' : 'agentModelCached', { time: new Date(entry.catalog.discoveredAt).toLocaleString() })}` : '',
+          entry.catalog.truncated ? ` · ${t('agentModelTruncated')}` : '') : null,
+        localPi ? h('button', { type: 'button', class: 'button', disabled: !online || !entry.catalog?.refreshable || state.refreshingAgentModels || state.savingAgentModel,
+          dataset: { action: 'agent-model-refresh', deviceId: entry.deviceId, agent: entry.agent } }, t(state.refreshingAgentModels ? 'agentModelRefreshing' : 'agentModelRefresh')) : null,
+        enumerated ? h('select', { id, name: 'model', disabled },
+          h('option', { value: '', selected: !entry.model }, t('agentModelFollow')),
+          entry.model && !models.some(model => model.id === entry.model) ? h('option', { value: entry.model, selected: true }, `${entry.model} · ${t('agentModelNotListed')}`) : null,
+          models.map(model => h('option', { value: model.id, selected: model.id === entry.model }, localPi ? `${model.name} (${model.id})` : model.name)))
+          : [h('input', { id, name: 'model', value: entry.model ?? '', maxlength: 256, autocomplete: 'off', placeholder: t('agentModelFollow'), list: `${id}-suggestions`, disabled: state.savingAgentModel || !selectable }),
+            h('datalist', { id: `${id}-suggestions` }, models.map(model => h('option', { value: model.id }, model.name))),
+            selectable ? h('p', { class: 'dialog-hint' }, t('agentModelSuggestions')) : null],
+        localPi && selectable && entry.catalog?.capabilities.customModelInput ? h('details', { class: 'agent-model-advanced' },
+          h('summary', null, t('agentModelAdvanced')),
+          h('label', null, h('input', { type: 'checkbox', name: 'useCustomModel', disabled }), t('agentModelCustom')),
+          h('input', { name: 'customModel', value: entry.model && !models.some(model => model.id === entry.model) ? entry.model : '', maxlength: 256, autocomplete: 'off', placeholder: 'provider/id', disabled }),
+          h('p', { class: 'dialog-hint' }, t('agentModelSuggestions'))) : null,
+        h('button', { type: 'submit', class: 'button', disabled: state.savingAgentModel || state.refreshingAgentModels }, t(selectable ? 'agentModelSave' : 'agentModelReset')));
+    }));
+}
+
+async function refreshAgentModels(button) {
+  if (state.refreshingAgentModels || state.savingAgentModel) return;
+  state.refreshingAgentModels = true;
+  state.agentModelNotice = null;
+  bumpDialog();
+  try {
+    const { status, data } = await request('/app/api/settings/agent-model/refresh', { deviceId: button.dataset.deviceId, agent: button.dataset.agent });
+    state.agentModelNotice = status === 200 && data?.ok ? 'agentModelRefreshed' : 'agentModelRefreshFailed';
+    await loadSettings();
+  } catch { state.agentModelNotice = 'agentModelRefreshFailed'; }
+  finally { state.refreshingAgentModels = false; bumpDialog(); }
+}
+
+async function saveAgentModel(form) {
+  if (state.savingAgentModel || state.refreshingAgentModels) return;
+  const input = form.elements.namedItem('model');
+  const custom = form.elements.namedItem('useCustomModel');
+  const value = custom?.checked ? form.elements.namedItem('customModel').value : input.value;
+  const body = { deviceId: form.dataset.deviceId, agent: form.dataset.agentModel, model: input.disabled ? null : value.trim() || null };
+  state.savingAgentModel = true;
+  state.agentModelNotice = null;
+  bumpDialog();
+  try {
+    const { status } = await request('/app/api/settings/agent-model', body);
+    state.agentModelNotice = status === 200 ? 'agentModelSaved' : 'agentModelSaveFailed';
+    if (status === 200) await loadSettings();
+  } catch { state.agentModelNotice = 'agentModelSaveFailed'; }
+  finally { state.savingAgentModel = false; bumpDialog(); }
+}
+
 function accountSection() {
   if (!state.settings) return [h('p', { class: 'dialog-copy' }, t(state.settingsError ? 'settingsLoadFailed' : 'settingsLoading')),
     state.settingsError ? h('button', { class: 'button', dataset: { action: 'retry-settings' } }, t('settingsRetry')) : null];
-  return [modelSection(), securitySection(), pushSection(),
+  return [modelSection(), agentModelSection(), securitySection(), pushSection(),
     h('div', { class: 'settings-footer' }, h('p', { class: 'dialog-hint' }, t('accountBody')),
       h('button', { type: 'button', class: 'button quiet', dataset: { action: 'sign-out' } }, t('signOut')))];
 }
@@ -1210,10 +1293,10 @@ function renderDialog() {
   const { type, rev = 0, pairing = null, confirm = null } = state.dialog;
   const snapshot = state.snapshot;
   const signature = [type, rev, getLocale(), pairing, confirm,
-    type === 'machines' ? [snapshot.machines, snapshot.threads.map((entry) => [entry.id, entry.state, entry.workers.map((worker) => [worker.state, worker.machine])]), minuteBucket()] : null,
+    type === 'machines' ? [state.settings, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, snapshot.machines, snapshot.threads.map((entry) => [entry.id, entry.state, entry.workers.map((worker) => [worker.state, worker.machine])]), minuteBucket()] : null,
     type === 'directory' ? snapshot.machines : null,
     type === 'scope' ? [state.selected, snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.repos])] : null,
-    type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice] : null];
+    type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
     const { title, body } = dialogContent();
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
@@ -1237,7 +1320,7 @@ function openDialog(type) {
   state.modelDraftNotice = null;
   state.pushNotice = null; // a fresh visit shows the current state, not the last attempt's result
   drawn.delete('dialog');
-  if (type === 'account') void loadSettings();
+  if (type === 'account' || type === 'machines') void loadSettings();
   renderDialog();
   if (type === 'machines') for (const [deviceId, form] of state.directoryForms) {
     if (form.state === 'pending') void runDirectoryRegistration(deviceId, form);
@@ -1826,10 +1909,8 @@ async function loadSettings(initial = false) {
       }
     }
     renderSetup();
-    if (state.dialog?.type === 'account') {
-      bumpDialog();
-      void refreshPushSubscription();
-    }
+    if (state.dialog?.type === 'account' || state.dialog?.type === 'machines') bumpDialog();
+    if (state.dialog?.type === 'account') void refreshPushSubscription();
     return true;
   } catch {
     state.settingsError = true;
@@ -2402,6 +2483,7 @@ document.addEventListener('click', (event) => {
     case 'push-quiet': return void setPushQuiet(!state.pushQuiet);
     case 'create-pairing': return void createPairing();
     case 'copy-pairing': return void copyPairing();
+    case 'agent-model-refresh': return void refreshAgentModels(button);
     case 'directory-open': return openDirectoryPicker(dataset.machine);
     case 'directory-navigate': return void browseDirectory(dataset.path);
     case 'directory-manual': {
@@ -2534,6 +2616,10 @@ document.addEventListener('change', (event) => {
   bumpDialog();
 });
 document.addEventListener('submit', (event) => {
+  if (event.target.dataset.agentModel) {
+    event.preventDefault();
+    return void saveAgentModel(event.target);
+  }
   if (event.target.id === 'directory-browse-form') {
     event.preventDefault();
     return void browseDirectory(state.dialog.pathDraft.trim());

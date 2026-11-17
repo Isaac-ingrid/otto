@@ -6,7 +6,7 @@
 // links — security-sensitive, and they must work without the model. Card button callbacks
 // stay deterministic too (steward.md §3.1 signal 1): the Thread is resolved from the card's
 // providerMsgId, never from data stuffed into the button.
-import { ulid } from "@isaac2ingrid/protocol";
+import { ulid, acceptsAgentModel, agentModelCatalogFor } from "@isaac2ingrid/protocol";
 import { isSpendQuery } from "./budget.ts";
 import { decideContinuation, renderHandoffBrief, type NewSessionReason } from "./handoff.ts";
 import type { Ledger, OfflineDispatchRow, ThreadRow, WorkerRow } from "./ledger.ts";
@@ -112,6 +112,10 @@ export interface StartWorkerInput {
   /** Issue #17: which agent runs the task (hello.agents is the menu — e.g. 'claude-code').
    *  Default 'pi'; a machine without the agent never sees the command. */
   agent?: string;
+  /** Exact owner-supplied override; not exposed as an autonomous LLM tool option. */
+  model?: string;
+  /** Frozen offline/replay selection. Omitted only before initial resolution. */
+  modelSource?: 'agent-default' | 'task-default' | 'override';
   /** The authorizing run: `user:<msgId>` / `evt:…` / `routine:…` (steward.md §7.1). */
   provenance: string;
   /** `tool:<taskId>` — the idempotency key for replays (protocol §7.1). */
@@ -186,6 +190,7 @@ export type InterruptWorkerOutcome =
 
 export interface DispatcherDeps {
   ledger: Ledger;
+  agentModelDefault?: (deviceId: string, agent: string) => string | null;
   /** Enqueues a connector command (steward.enqueue); `notAfter: null` = wait until online. */
   enqueueCommand: (
     deviceId: string,
@@ -328,6 +333,13 @@ export class Dispatcher {
       case "machine": {
         const machine = this.ledger.machines.get(choice.deviceId)!;
         const repoId = repoRows.find((r) => r.deviceId === choice.deviceId)!.repoId;
+        const previous = attach ? this.ledger.workers.latestOnThread(attach.threadId) : null;
+        const explicitModel = input.modelSource === 'override' || (input.model && !input.modelSource) ? input.model : undefined;
+        const reuses = attach && decideContinuation({ previous, next: { agent, deviceId: choice.deviceId, repoId, mode: input.mode ?? 'write', model: explicitModel }, freshReview: input.freshReview ?? false }).action === 'resume';
+        const model = reuses ? previous?.requestedModel ?? null : input.modelSource !== undefined ? input.model ?? null : input.model ?? this.#deps.agentModelDefault?.(choice.deviceId, agent) ?? null;
+        const modelSource = reuses ? previous?.modelSource ?? 'agent-default' : input.modelSource ?? (input.model ? 'override' : model ? 'task-default' : 'agent-default');
+        if (!acceptsAgentModel(agentModelCatalogFor(machine.modelCatalogs, agent), model)) return { kind: 'refused', reason: '目标机器/agent 不支持所选模型；请升级 connector 或恢复跟随 agent 默认。' };
+        const selection = { model: model ?? undefined, modelSource };
         let thread = attach;
         let created = false;
         if (!thread) {
@@ -341,7 +353,7 @@ export class Dispatcher {
           created = true;
         }
         const offline = choice.kind === "ask_offline";
-        if (offline) this.ledger.offlineDispatches.create(input, thread.threadId, choice.deviceId);
+        if (offline) this.ledger.offlineDispatches.create({ ...input, ...selection }, thread.threadId, choice.deviceId);
         // `queued` here is the offline ask: continueThread parks the command HELD (issue #14,
         // protocol §7.3) instead of main's silent notAfter-null queue.
         const continuation = await this.continueThread(
@@ -355,6 +367,7 @@ export class Dispatcher {
           input.mode ?? "write",
           input.freshReview === true,
           agent,
+          selection,
         );
         if (offline) {
           this.ledger.questions.insert({
@@ -698,6 +711,7 @@ export class Dispatcher {
     mode: "write" | "readonly",
     freshReview: boolean,
     agent: string = DEFAULT_AGENT,
+    selection: Pick<StartWorkerInput, 'model' | 'modelSource'> = {},
   ): Promise<StartWorkerContinuation | undefined> {
     // Review (other findings): a replayed call carrying a cmdId that already exists must not
     // re-register a second worker row (the outbox dedupes the command, but the ghost `starting`
@@ -705,13 +719,13 @@ export class Dispatcher {
     if (this.#deps.commandExists(cmdId)) return undefined;
     const decision = decideContinuation({
       previous: this.ledger.workers.latestOnThread(thread.threadId),
-      next: { agent, deviceId, repoId, mode },
+      next: { agent, deviceId, repoId, mode, ...(selection.modelSource === 'override' ? { model: selection.model } : {}) },
       freshReview,
     });
     if (decision.action === "resume") {
       return this.resumeSession(thread, decision.worker.workerId, prompt, queued, provenance, cmdId);
     }
-    return this.startNewSession(thread, deviceId, repoId, prompt, queued, provenance, cmdId, mode, decision, agent);
+    return this.startNewSession(thread, deviceId, repoId, prompt, queued, provenance, cmdId, mode, decision, agent, selection);
   }
 
   /** The resume half: deliver the task into the existing session. `intent: "after"` when the
@@ -769,6 +783,7 @@ export class Dispatcher {
     mode: "write" | "readonly",
     decision: { from: WorkerRow | null; reason?: NewSessionReason },
     agent: string = DEFAULT_AGENT,
+    selection: Pick<StartWorkerInput, 'model' | 'modelSource'> = {},
   ): Promise<StartWorkerContinuation> {
     const workerId = `w_${ulid()}`;
     // Relay (spec §5.3): base = the Thread's latest worker branch — skipping legs that never
@@ -793,6 +808,8 @@ export class Dispatcher {
       repoId,
       agent,
       mode,
+      requestedModel: selection.model ?? null,
+      modelSource: selection.modelSource ?? 'agent-default',
       parentWorker: previous?.workerId,
     });
     // A machine switch lands the same repo under a different repoId (one row per machine):
@@ -815,6 +832,7 @@ export class Dispatcher {
         mode,
         prompt: fullPrompt,
         ...(agent !== DEFAULT_AGENT ? { agent } : {}),
+        ...(selection.model ? { model: selection.model, modelSource: selection.modelSource } : {}),
         ...(baseWorker ? { base: baseWorker.branch! } : {}),
       },
       // A held offline command cannot run on reconnect before the owner answers. Only the

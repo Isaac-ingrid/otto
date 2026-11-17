@@ -22,7 +22,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PiProcess } from "./pi-process.ts";
 import { piCommandFromEnv, resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
-import type { HistoryPage } from "@isaac2ingrid/protocol";
+import { AgentModelObservationSchema, type AgentModelCatalog, type HistoryPage } from "@isaac2ingrid/protocol";
+import { PiModelDiscovery } from './pi-model-discovery.ts';
 
 /** Must match COMMAND_NAME in ./ext/otto-pi.ts (locked together by a test). */
 const OTTO_COMMAND = "otto";
@@ -96,6 +97,11 @@ interface WorkerRuntime {
 export class PiAdapter implements AgentAdapter {
   readonly kind = "pi" as const;
   readonly capabilities = PI_CAPABILITIES;
+  private readonly modelDiscovery: PiModelDiscovery;
+  get modelCatalog(): AgentModelCatalog { return this.modelDiscovery.catalog; }
+  refreshModels(): Promise<AgentModelCatalog> { return this.modelDiscovery.refresh(); }
+  stopDiscovery(): void { this.modelDiscovery.stop(); }
+  validateModel(model: string): boolean { return model.includes('/') && !model.endsWith('/'); }
 
   private readonly options: PiAdapterOptions;
   private readonly workerLogsDir: string | null;
@@ -106,6 +112,8 @@ export class PiAdapter implements AgentAdapter {
 
   constructor(options: PiAdapterOptions) {
     this.options = options;
+    this.modelDiscovery = new PiModelDiscovery({ stateDir: options.stateDir, launch: () => this.launchResolution,
+      env: () => childEnv(process.env, options.env), timeoutMs: options.getStateTimeoutMs });
     this.workerLogsDir = options.workerLogsDir === null ? null : (options.workerLogsDir ?? join(options.stateDir, "logs"));
   }
 
@@ -204,6 +212,14 @@ export class PiAdapter implements AgentAdapter {
           "startup_failed",
           `sessionId mismatch: expected ${spec.workerId}, got ${String(state.sessionId)}`,
         );
+      }
+      const observed = state.model && typeof state.model === 'object' ? state.model as Record<string, unknown> : null;
+      if (observed && typeof observed.provider === 'string' && typeof observed.id === 'string') {
+        const observation = AgentModelObservationSchema.safeParse({ id: `${observed.provider}/${observed.id}`, source: 'state', observedAt: Date.now() });
+        if (observation.success) {
+          if (spec.model && observation.data.id !== spec.model) throw new AdapterError('model_mismatch', 'pi did not select the requested provider/model');
+          spec.onModelObserved?.(observation.data);
+        }
       }
       const sessionFile = typeof state.sessionFile === "string" ? state.sessionFile : null;
       // §6.3/§10: the session file and its current tail are on record BEFORE the prompt is
