@@ -220,3 +220,39 @@ export function antigravitySessionPath(
   }
   return null;
 }
+
+/**
+ * Codex CLI stores session rollouts under `<codexHome>/sessions/<yyyy>/<mm>/<dd>/rollout-*-<sessionId>.jsonl`
+ * (or `<codexHome>/sessions/<sessionId>.jsonl`). Searches recursively by sessionId.
+ */
+export function codexSessionPath(
+  sessionId: string,
+  codexHome: string = process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+): string | null {
+  if (!SAFE_SESSION_ID.test(sessionId) || sessionId.includes("..")) {
+    throw failure("no_history", "That is not a valid Codex session id.");
+  }
+  const sessionsDir = join(codexHome, "sessions");
+  if (!existsSync(sessionsDir)) return null;
+  const suffix = `-${sessionId}.jsonl`;
+  const exact = `${sessionId}.jsonl`;
+  const stack: string[] = [sessionsDir];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile() && (entry.name === exact || entry.name.endsWith(suffix))) {
+        return fullPath;
+      }
+    }
+  }
+  return null;
+}

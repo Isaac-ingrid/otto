@@ -40,6 +40,13 @@ export interface ClaudeTranscriptRecord {
   } | null;
 }
 
+export interface CodexTranscriptRecord {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  tools?: NonNullable<HistoryEntry["tools"]>;
+}
+
 export interface NormalizeOptions {
   /** Only entries after this entry id (already applied by `get_entries{since}` on the live path). */
   since?: string;
@@ -169,6 +176,103 @@ export function readClaudeSessionHistory(sessionFile: string, opts: NormalizeOpt
     }
   }
   return normalizeClaudeEntries(records, opts);
+}
+
+/**
+ * Normalizes in-memory or parsed Codex transcript records into a HistoryPage.
+ */
+export function normalizeCodexEntries(records: CodexTranscriptRecord[], opts: NormalizeOptions = {}): HistoryPage {
+  const maxBytes = opts.maxBytes ?? HISTORY_MAX_BYTES;
+  const since = opts.since;
+  const out: HistoryEntry[] = [];
+  let bytes = 0;
+  let cursor: string | null = null;
+  let skippedSince = !since;
+
+  for (const record of records) {
+    if (since && record.id === since) {
+      skippedSince = true;
+      continue;
+    }
+    if (!skippedSince) continue;
+    const normalized: HistoryEntry = {
+      id: record.id,
+      role: record.role,
+      text: record.text.slice(0, HISTORY_ENTRY_TEXT_MAX_CHARS),
+      ...(record.tools && record.tools.length > 0 ? { tools: record.tools.slice(0, HISTORY_TOOLS_MAX) } : {}),
+    };
+    const size = jsonBytes(normalized);
+    if (bytes + size > maxBytes) {
+      return { entries: out, cursor, done: false };
+    }
+    out.push(normalized);
+    cursor = normalized.id;
+    bytes += size;
+  }
+  return { entries: out, cursor, done: true };
+}
+
+/**
+ * Parses a Codex rollout JSONL file (`response_item` / `event_msg` / `agent_message` / `user_message`)
+ * into a normalized HistoryPage.
+ */
+export function readCodexSessionHistory(sessionFile: string, opts: NormalizeOptions = {}): HistoryPage {
+  let text: string;
+  try {
+    text = readFileSync(sessionFile, "utf8");
+  } catch {
+    return { entries: [], cursor: null, done: true };
+  }
+  const rawLines = text.split("\n");
+  const completeLines = text.endsWith("\n") ? rawLines : rawLines.slice(0, -1);
+  const records: CodexTranscriptRecord[] = [];
+  let idx = 0;
+  for (const rawLine of completeLines) {
+    const trimmed = rawLine.endsWith("\r") ? rawLine.slice(0, -1).trim() : rawLine.trim();
+    if (!trimmed) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    idx += 1;
+    const id = typeof parsed.id === "string" && parsed.id.length > 0 ? parsed.id : `codex-line-${idx}`;
+    if (parsed.type === "response_item" && typeof parsed.payload === "object" && parsed.payload !== null) {
+      const payload = parsed.payload as Record<string, unknown>;
+      if (payload.type === "message" && (payload.role === "user" || payload.role === "assistant")) {
+        const content = Array.isArray(payload.content) ? (payload.content as Array<Record<string, unknown>>) : [];
+        const textPart = content
+          .map((c) => (typeof c.text === "string" ? c.text : ""))
+          .filter(Boolean)
+          .join("");
+        if (textPart) records.push({ id, role: payload.role, text: textPart });
+      } else if (payload.type === "function_call" && typeof payload.name === "string") {
+        let argSummary: string | undefined;
+        if (typeof payload.arguments === "string") {
+          try {
+            argSummary = summarizeArgs(JSON.parse(payload.arguments));
+          } catch {
+            argSummary = payload.arguments.slice(0, HISTORY_TOOL_ARGS_MAX_CHARS);
+          }
+        }
+        records.push({
+          id,
+          role: "assistant",
+          text: "",
+          tools: [{ name: payload.name, ...(argSummary ? { args: argSummary } : {}) }],
+        });
+      }
+    } else if (parsed.type === "event_msg" && typeof parsed.payload === "object" && parsed.payload !== null) {
+      const payload = parsed.payload as Record<string, unknown>;
+      if (payload.type === "user_message" && typeof payload.message === "string") {
+        records.push({ id, role: "user", text: payload.message });
+      } else if (payload.type === "agent_message" && typeof payload.message === "string") {
+        records.push({ id, role: "assistant", text: payload.message });
+      }
+    }
+  }
+  return normalizeCodexEntries(records, opts);
 }
 
 /** The branch ending at the file's last tree entry, oldest-first. */

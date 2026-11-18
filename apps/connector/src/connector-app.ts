@@ -18,6 +18,7 @@ import { CommandError, WorkerManager, type RecoveryOptions } from "./worker-mana
 import type { AgentAdapter } from "./agent.ts";
 import { PiAdapter } from "./pi-adapter.ts";
 import { ClaudeAdapter, detectClaude } from "./claude-adapter.ts";
+import { CodexAdapter, detectCodex } from "./codex-adapter.ts";
 import { AntigravityAdapter, agyCommandFromEnv, detectAntigravity } from "./antigravity-adapter.ts";
 import { VERSION } from "./version.ts";
 import type { PrExec } from "./pr.ts";
@@ -37,6 +38,8 @@ export interface ConnectorAppOptions {
   /** The claude argv prefix for the default adapter set (issue #17); tests point it at
    *  fake-claude. Ignored when `adapters`/`adapter` is given. */
   claudeCommand?: string[];
+  /** The codex argv prefix for the default adapter set; tests point it at fake-codex. */
+  codexCommand?: string[];
   /** The agy argv prefix for the default adapter set; tests point it at fake-agy. */
   agyCommand?: string[];
   /** Optional isolated Antigravity Gemini API key profile (`otto agy-key`). */
@@ -59,18 +62,23 @@ export function maxWorkersFromMemory(): number {
   return Math.min(8, Math.max(1, Math.floor(0.5 * (os.totalmem() / 1_000_000) / 250)));
 }
 
-/** Issue #17: the connector's default agent set — pi always, plus Claude Code and
+/** Issue #17: the connector's default agent set — pi always, plus Claude Code, Codex, and
  *  Antigravity CLI when their binaries are installed on the machine. */
 export function defaultAdapters(
   stateDir: string,
   claudeCommand: string[] = ["claude"],
   agyCommand: string[] = agyCommandFromEnv() ?? ["agy"],
   agyApiKeyConfig?: AntigravityApiKeyConfig | null,
+  codexCommand: string[] = ["codex"],
 ): AgentAdapter[] {
   const adapters: AgentAdapter[] = [new PiAdapter({ stateDir })];
   const claude = detectClaude(claudeCommand);
   if (claude.installed) {
     adapters.push(new ClaudeAdapter({ stateDir, command: claudeCommand, version: claude.version }));
+  }
+  const codex = detectCodex(codexCommand);
+  if (codex.installed) {
+    adapters.push(new CodexAdapter({ stateDir, command: codexCommand, version: codex.version }));
   }
   const agy = detectAntigravity(agyCommand);
   if (agy.installed) {
@@ -110,6 +118,7 @@ export class ConnectorApp {
             options.claudeCommand,
             options.agyCommand,
             options.agyApiKeyConfig ?? options.store.getAntigravityApiKeyConfig(),
+            options.codexCommand,
           ));
     this.manager = new WorkerManager({
       store: options.store,
