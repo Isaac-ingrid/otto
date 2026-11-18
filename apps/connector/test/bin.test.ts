@@ -2,7 +2,7 @@
 // builds. This is the `npx @isaac2ingrid/otto` surface: the Node gate, --version, usage, and
 // the read-only subcommands on a clean OTTO_HOME.
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -212,5 +212,77 @@ describe("bin/otto.js (skipped when dist has not been built)", () => {
     const unknown = await run(["repo-config", repo, "--isolationx"]);
     expect(unknown.code).toBe(1);
     expect(unknown.stderr).toContain("unknown option");
+  });
+
+  it("repo-config manages local worktree hooks under OTTO_HOME/hooks with SHA-256 approval binding (ADR-0022 Stage 2)", async () => {
+    const repo = await makeGitRepo(home);
+    seedRegisteredRepo(repo);
+
+    const hooksDir = join(stateDir, "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    const setupPath = join(hooksDir, "setup.sh");
+    const archivePath = join(hooksDir, "archive.sh");
+    writeFileSync(setupPath, "#!/bin/sh\necho v1\n", "utf8");
+    writeFileSync(archivePath, "#!/bin/sh\necho clean\n", "utf8");
+    chmodSync(setupPath, 0o755);
+    chmodSync(archivePath, 0o755);
+
+    // Reject repository-local scripts and symlinks escaping OTTO_HOME/hooks.
+    const repoScript = join(repo, "repo-setup.sh");
+    writeFileSync(repoScript, "#!/bin/sh\nexit 0\n", "utf8");
+    chmodSync(repoScript, 0o755);
+    symlinkSync(repoScript, join(hooksDir, "escape.sh"));
+
+    const rejectRepoPath = await run(["repo-config", repo, "--setup-hook", repoScript]);
+    expect(rejectRepoPath.code).toBe(1);
+    expect(rejectRepoPath.stderr).toContain("must reside inside");
+
+    const rejectSymlink = await run(["repo-config", repo, "--setup-hook", "escape.sh"]);
+    expect(rejectSymlink.code).toBe(1);
+    expect(rejectSymlink.stderr).toMatch(/symlink/i);
+
+    // Plain (non-Git) workspace rejects worktree hooks.
+    const plainDir = join(home, "plain-ws");
+    mkdirSync(plainDir, { recursive: true });
+    const plainReal = realpathSync(plainDir);
+    const store = new LocalStore(join(stateDir, "connector.sqlite"));
+    try {
+      store.addRepo({ repoId: plainReal, name: "plain-ws", path: plainReal, capability: { kind: "plain" } });
+    } finally {
+      store.close();
+    }
+    const rejectPlain = await run(["repo-config", plainReal, "--setup-hook", "setup.sh"]);
+    expect(rejectPlain.code).toBe(1);
+    expect(rejectPlain.stderr).toContain("plain workspace");
+
+    // Configure hooks (initially unapproved), then bind SHA-256 with --approve-hooks.
+    const setUnapproved = await run(["repo-config", repo, "--setup-hook=setup.sh", "--archive-hook", "archive.sh"]);
+    expect(setUnapproved.code).toBe(0);
+    expect(setUnapproved.stdout).toContain("hooks=setup.sh/archive.sh(unapproved)");
+
+    const showUnapproved = await run(["repo-config", repo]);
+    expect(showUnapproved.code).toBe(0);
+    expect(showUnapproved.stdout).toContain("NOT approved");
+
+    const approved = await run(["repo-config", repo, "--approve-hooks"]);
+    expect(approved.code).toBe(0);
+    expect(approved.stdout).toContain("hooks=setup.sh/archive.sh(approved)");
+
+    const showApproved = await run(["repo-config", repo]);
+    expect(showApproved.code).toBe(0);
+    expect(showApproved.stdout).toContain("approved sha256:");
+
+    // Modifying script bytes on disk immediately invalidates approval in read-only inspection.
+    writeFileSync(setupPath, "#!/bin/sh\necho v2\n", "utf8");
+    const showTampered = await run(["repo-config", repo]);
+    expect(showTampered.code).toBe(0);
+    expect(showTampered.stdout).toContain("SHA-256 mismatch");
+
+    // --clear-hooks removes both hooks and approval state.
+    const cleared = await run(["repo-config", repo, "--clear-hooks"]);
+    expect(cleared.code).toBe(0);
+    expect(cleared.stdout).toContain("hooks=cleared");
+    const showCleared = await run(["repo-config", repo]);
+    expect(showCleared.stdout).toContain("hooks:       none");
   });
 });

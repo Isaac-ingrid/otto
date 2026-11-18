@@ -2,7 +2,15 @@
 // minimal set every agent implements; the rest is expressed through capability declarations
 // and the WorkerManager degrades (and tells the steward) when a capability is missing.
 
-import type { AgentModelCatalog, AgentModelObservation, HistoryPage } from "@isaac2ingrid/protocol";
+import type {
+  AgentModelCatalog,
+  AgentModelObservation,
+  HistoryPage,
+  ProposalPayload,
+  ReportLabel,
+} from "@isaac2ingrid/protocol";
+
+export type { ProposalPayload };
 
 export type AgentKind = "pi" | "claude-code" | "codex" | "antigravity";
 
@@ -112,6 +120,8 @@ export interface ReportPayload {
   next?: string;
   /** The full answer/finding when this task was informational (no code change) rather than a change. */
   answer?: string;
+  /** Bounded categorical tags (ADR-0022 decision 2; max 3, controlled vocabulary). */
+  labels?: ReportLabel[];
 }
 
 export interface TokenUsage {
@@ -141,6 +151,11 @@ export type RawAdapterEvent =
       /** First 80 chars of a path or command — never file contents or command output. */
       target?: string;
       turn: number;
+    }
+  | {
+      type: "proposal";
+      workerId: string;
+      proposal: ProposalPayload;
     }
   | {
       type: "settled";

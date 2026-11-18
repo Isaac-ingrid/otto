@@ -370,4 +370,71 @@ describe("WorkerManager over fake-pi (connector-pi.md §4–§8, §11)", () => {
     expect(readFileSync(prompt, "utf8")).toContain("report");
   }, 30_000);
 
+  it("persists validated propose tool calls as monotonic proposal events before report and settled (ADR-0022 Stage 3)", async () => {
+    setup([
+      [
+        { emit: { type: "agent_start" } },
+        { emit: { type: "turn_start" } },
+        {
+          emit: {
+            type: "tool_execution_start",
+            toolCallId: "prop-1",
+            toolName: "propose",
+            args: {
+              kind: "readonly_probe",
+              targetRepoRef: "shared-contracts",
+              prompt: "Inspect OrderDTO in shared-contracts",
+              reason: "Verify field names before editing DTO consumer",
+              proposalKey: "probe-order-dto",
+            },
+          },
+        },
+        { emit: { type: "tool_execution_end", toolCallId: "prop-1", toolName: "propose", result: {}, isError: false } },
+        // Invalid extra field (`mode: "write"`) must be dropped at the adapter boundary.
+        {
+          emit: {
+            type: "tool_execution_start",
+            toolCallId: "prop-bad",
+            toolName: "propose",
+            args: {
+              kind: "readonly_probe",
+              mode: "write",
+              targetRepoRef: "shared-contracts",
+              prompt: "Attempt write",
+              reason: "Should be rejected by strictObject",
+              proposalKey: "bad-write",
+            },
+          },
+        },
+        { emit: { type: "tool_execution_end", toolCallId: "prop-bad", toolName: "propose", result: {}, isError: false } },
+        { emit: { type: "tool_execution_start", toolCallId: "rep-1", toolName: "report", args: { status: "done", summary: "Completed check" } } },
+        { emit: { type: "tool_execution_end", toolCallId: "rep-1", toolName: "report", result: {}, isError: false } },
+        { emit: { type: "agent_settled", aborted: false } },
+      ],
+    ]);
+    store.addRepo({ repoId: repo, name: "repo-a", path: repo, capability: { kind: "git", gitRoot: repo, defaultBranch: "main", remote: null } });
+
+    await manager.startWorker("cmd-prop-1", args());
+    await waitFor(() => settled(), 15_000, "settled event");
+
+    const proposals = events.filter((e) => e.type === "proposal");
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toMatchObject({
+      workerId: "w-test-worker-1",
+      type: "proposal",
+      kind: "readonly_probe",
+      targetRepoRef: "shared-contracts",
+      prompt: "Inspect OrderDTO in shared-contracts",
+      reason: "Verify field names before editing DTO consumer",
+      proposalKey: "probe-order-dto",
+    });
+    expect(eventTypes().indexOf("proposal")).toBeGreaterThan(eventTypes().indexOf("started"));
+    expect(eventTypes().indexOf("proposal")).toBeLessThan(eventTypes().indexOf("report"));
+    expect(eventTypes().indexOf("report")).toBeLessThan(eventTypes().indexOf("settled"));
+
+    const stored = eventLog.pending("w-test-worker-1").map((e) => JSON.parse(e.payload) as { seq: number; type: string });
+    expect(stored.map((e) => e.seq)).toEqual(stored.map((_, i) => i + 1));
+    expect(stored.filter((e) => e.type === "proposal")).toHaveLength(1);
+  }, 30_000);
+
 });

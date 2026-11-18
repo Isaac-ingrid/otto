@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ClaudeAdapter, claudeSessionId, isReportTool, mapStopReason } from "../src/claude-adapter.ts";
+import { ClaudeAdapter, claudeSessionId, isProposalTool, isReportTool, mapStopReason } from "../src/claude-adapter.ts";
 import type { RawAdapterEvent, StartSpec } from "../src/agent.ts";
 import {
   claudeAssistantText,
@@ -150,11 +150,18 @@ describe("invocation contract (spike-conclusions §2)", () => {
 
 describe("stream mapping and shared adjudication (§5.2 via the pi path)", () => {
   it(
-    "matches the namespaced MCP report tool by __report suffix and settles reported",
+    "matches the namespaced MCP report tool by __report suffix, strips unknown/excess labels, and settles reported",
     async () => {
       setup([
         [
-          { emit: claudeToolUse("mcp__otto__report", { status: "done", summary: "all good", decisions: ["used sqlite"] }) },
+          {
+            emit: claudeToolUse("mcp__otto__report", {
+              status: "done",
+              summary: "all good",
+              decisions: ["used sqlite"],
+              labels: ["blocked-by-env", "not-in-vocab", "blocked-by-env", "flaky-test", "needs-migration", "scope-creep"],
+            }),
+          },
           { emit: claudeAssistantText("Reported.", "end_turn") },
         ],
       ]);
@@ -162,7 +169,12 @@ describe("stream mapping and shared adjudication (§5.2 via the pi path)", () =>
       await waitFor(() => settledOf()[0], 10_000, "settle");
       const settled = settledOf()[0]!;
       expect(settled.outcome).toBe("reported");
-      expect(settled.report).toMatchObject({ status: "done", summary: "all good", decisions: ["used sqlite"] });
+      expect(settled.report).toMatchObject({
+        status: "done",
+        summary: "all good",
+        decisions: ["used sqlite"],
+        labels: ["blocked-by-env", "flaky-test", "needs-migration"],
+      });
       // Progress saw the tool (normalized to the bare display name).
       const tool = events.find((e) => e.type === "progress" && e.tool === "report");
       expect(tool).toBeDefined();
@@ -183,6 +195,63 @@ describe("stream mapping and shared adjudication (§5.2 via the pi path)", () =>
       await waitFor(() => settledOf()[0], 10_000, "settle");
       expect(settledOf()[0]!.outcome).toBe("unreported");
       expect(settledOf()[0]!.lastText).toBe("Plain turn.");
+    },
+    30_000,
+  );
+
+  it(
+    "matches namespaced MCP __propose tool, injects argv[3] proposals JSONL path, and emits proposal events before settled",
+    async () => {
+      setup([
+        [
+          {
+            emit: claudeToolUse("mcp__otto__propose", {
+              kind: "readonly_probe",
+              targetRepoRef: "shared-lib",
+              prompt: "Inspect exported schema",
+              reason: "Verify compatibility",
+              proposalKey: "claude-probe-1",
+            }),
+          },
+          {
+            emit: claudeToolUse("mcp__otto__report", {
+              status: "done",
+              summary: "Proposed probe and finished draft",
+            }),
+          },
+        ],
+      ]);
+      await adapter.start(spec());
+      await waitFor(() => settledOf()[0], 10_000, "settle");
+
+      const argv = readLog(ARGV_LOG()).map((l) => l as unknown as string[])[0]!;
+      const cfgPath = argv[argv.indexOf("--mcp-config") + 1]!;
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as {
+        mcpServers: { otto: { args: string[] } };
+      };
+      expect(cfg.mcpServers.otto.args).toHaveLength(3);
+      expect(cfg.mcpServers.otto.args[1]).toContain("w-claude-1.json");
+      expect(cfg.mcpServers.otto.args[2]).toContain("proposals-w-claude-1.jsonl");
+
+      const proposalEvents = events.filter((e) => e.type === "proposal");
+      expect(proposalEvents).toEqual([
+        {
+          type: "proposal",
+          workerId: "w-claude-1",
+          proposal: {
+            kind: "readonly_probe",
+            targetRepoRef: "shared-lib",
+            prompt: "Inspect exported schema",
+            reason: "Verify compatibility",
+            proposalKey: "claude-probe-1",
+          },
+        },
+      ]);
+      expect(events.findIndex((e) => e.type === "proposal")).toBeLessThan(
+        events.findIndex((e) => e.type === "settled"),
+      );
+      expect(isProposalTool("mcp__otto__propose")).toBe(true);
+      expect(isProposalTool("propose")).toBe(false);
     },
     30_000,
   );

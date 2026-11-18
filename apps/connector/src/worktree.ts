@@ -161,8 +161,14 @@ export class WorktreeManager {
     return { path: dir, branch, base };
   }
 
-  /** cleanup_worktree (§6.1): refuses dirty or unpushed worktrees unless force. */
-  async cleanup(repoPath: string, worktreePath: string, opts: { force?: boolean } = {}): Promise<void> {
+  /** cleanup_worktree (§6.1): refuses dirty or unpushed worktrees unless force.
+   *  `beforeRemove` (Stage 2 archive hook) runs only after clean/pushed checks pass and
+   *  before `git worktree remove`, so a failing archive hook preserves the worktree. */
+  async cleanup(
+    repoPath: string,
+    worktreePath: string,
+    opts: { force?: boolean; beforeRemove?: () => Promise<void> } = {},
+  ): Promise<void> {
     if (!opts.force) {
       const dirty = (await git(worktreePath, ["status", "--porcelain"])).trim().length > 0;
       // Unpushed = HEAD is contained by no remote-tracking branch.
@@ -170,6 +176,9 @@ export class WorktreeManager {
       if (dirty || remoteRefs.length === 0) {
         throw new GitError("worktree has uncommitted changes or unpushed commits; pass force");
       }
+    }
+    if (opts.beforeRemove) {
+      await opts.beforeRemove();
     }
     await git(repoPath, ["worktree", "remove", "--force", worktreePath]);
   }

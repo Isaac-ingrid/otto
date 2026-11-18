@@ -11,6 +11,7 @@ import { CommandLog, type CommandResult } from "./commands.ts";
 import { RegisterRepoArgsSchema, type CmdMessage } from "@isaac2ingrid/protocol";
 import { registerRepository } from "./repository.ts";
 import { EventLog } from "./events.ts";
+import { repoHookCapabilitySummary } from "./hooks.ts";
 import type { LocalStore, AntigravityApiKeyConfig } from "./store.ts";
 import type { StallWatchdogOptions } from "./watchdog.ts";
 import { CommandError, WorkerManager, type RecoveryOptions } from "./worker-manager.ts";
@@ -87,6 +88,7 @@ export function defaultAdapters(
 
 export class ConnectorApp {
   private readonly store: LocalStore;
+  private readonly stateDir: string;
   private readonly log?: (event: string, fields?: Record<string, unknown>) => void;
   readonly manager: WorkerManager;
   readonly client: ConnectorClient;
@@ -95,6 +97,7 @@ export class ConnectorApp {
 
   constructor(options: ConnectorAppOptions) {
     this.store = options.store;
+    this.stateDir = options.stateDir;
     this.log = options.log;
     const events = new EventLog(options.store.database);
     this.commandLog = new CommandLog(options.store.database);
@@ -196,7 +199,7 @@ export class ConnectorApp {
         const requested = parsed.data.path;
         const path = requested === "~" ? os.homedir() : requested.startsWith("~/") ? join(os.homedir(), requested.slice(2)) : requested;
         if (!isAbsolute(path)) throw new CommandError("invalid_directory", "Use an absolute path or ~/path on this machine.");
-        data = { repo: await registerRepository({ store: this.store, path }) };
+        data = { repo: await registerRepository({ store: this.store, path, stateDir: this.stateDir }) };
       } else {
         data = await this.manager.handleCommand(cmd.id, cmd.kind, cmd.args ?? {}, cmd.workerId);
       }
@@ -242,14 +245,21 @@ export class ConnectorApp {
         capabilities: a.capabilities,
         ...(a.modelCatalog ? { modelCatalog: a.modelCatalog } : {}),
       })),
-      repos: this.store.listRepos().map((r) => ({
-        repoId: r.repoId,
-        name: r.name,
-        path: r.path,
-        defaultBranch: r.capability.kind === "git" ? r.capability.defaultBranch ?? "" : "",
-        remote: r.capability.kind === "git" ? r.capability.remote ?? "" : "",
-        capability: r.capability,
-      })),
+      repos: this.store.listRepos().map((r) => {
+        const hookSummary = repoHookCapabilitySummary(r, this.stateDir);
+        return {
+          repoId: r.repoId,
+          name: r.name,
+          path: r.path,
+          defaultBranch: r.capability.kind === "git" ? r.capability.defaultBranch ?? "" : "",
+          remote: r.capability.kind === "git" ? r.capability.remote ?? "" : "",
+          capability: r.capability,
+          capabilityKind: hookSummary.capabilityKind,
+          hasSetupHook: hookSummary.hasSetupHook,
+          hasArchiveHook: hookSummary.hasArchiveHook,
+          approved: hookSummary.approved,
+        };
+      }),
       limits: {
         maxWorkers: maxWorkersFromMemory(),
         running: workers.filter((w) => w.state === "running" || w.state === "starting").length,

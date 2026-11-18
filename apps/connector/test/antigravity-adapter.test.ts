@@ -11,6 +11,7 @@ import {
   AntigravityAdapter,
   type AntigravityAdapterOptions,
   detectAntigravity,
+  isAcpProposalTool,
   isAcpReportTool,
   isolatedAgyGeminiDir,
   mapAcpStopReason,
@@ -101,7 +102,14 @@ describe("ACP handshake, systemPrompt negotiation, and MCP report server", () =>
       setup([
         [
           { thought: "Inspecting repository" },
-          { callMcpReport: { status: "done", summary: "Implemented via real MCP server", changes: ["src/x.ts"] } },
+          {
+            callMcpReport: {
+              status: "done",
+              summary: "Implemented via real MCP server",
+              changes: ["src/x.ts"],
+              labels: ["needs-human-verify", "unknown-label", "needs-human-verify", "flaky-test", "needs-migration", "scope-creep"],
+            },
+          },
           { text: "All done." },
         ],
       ]);
@@ -131,6 +139,7 @@ describe("ACP handshake, systemPrompt negotiation, and MCP report server", () =>
         status: "done",
         summary: "Implemented via real MCP server",
         changes: ["src/x.ts"],
+        labels: ["needs-human-verify", "flaky-test", "needs-migration"],
       });
       // Resident ACP process stays hot after turn settlement!
       expect(adapter.isRunning("w-agy-1")).toBe(true);
@@ -203,9 +212,80 @@ describe("ACP handshake, systemPrompt negotiation, and MCP report server", () =>
     expect(isAcpReportTool("otto/report")).toBe(true);
     expect(isAcpReportTool("report")).toBe(false);
     expect(isAcpReportTool("report", "otto report tool")).toBe(true);
+    expect(isAcpProposalTool("mcp__otto__propose")).toBe(true);
+    expect(isAcpProposalTool("otto/propose")).toBe(true);
+    expect(isAcpProposalTool("propose")).toBe(false);
+    expect(isAcpProposalTool("propose", "otto propose tool")).toBe(true);
     expect(mapAcpStopReason("end_turn")).toBe("stop");
     expect(mapAcpStopReason("max_tokens")).toBe("length");
     expect(mapAcpStopReason("cancelled")).toBe("aborted");
+  });
+
+  it("recovers multiple out-of-band MCP propose calls from argv[3] JSONL before settled while preserving argv[2] report JSON", async () => {
+    setup([
+      [
+        {
+          callMcpPropose: {
+            kind: "readonly_probe",
+            targetRepoRef: "shared-contracts",
+            prompt: "Check v2 User schema",
+            reason: "Need exact field optionality",
+            proposalKey: "agy-probe-1",
+          },
+        },
+        {
+          callMcpPropose: {
+            kind: "readonly_probe",
+            targetRepoRef: "auth-service",
+            prompt: "Check JWT claims",
+            reason: "Need audience claim name",
+            proposalKey: "agy-probe-2",
+          },
+        },
+        {
+          callMcpReport: {
+            status: "done",
+            summary: "Finished local changes alongside two readonly probes",
+          },
+        },
+      ],
+    ]);
+    await adapter.start(spec());
+    await waitFor(() => settledOf()[0], 10_000, "settle");
+
+    const proposals = events.filter((e) => e.type === "proposal");
+    expect(proposals).toEqual([
+      {
+        type: "proposal",
+        workerId: "w-agy-1",
+        proposal: {
+          kind: "readonly_probe",
+          targetRepoRef: "shared-contracts",
+          prompt: "Check v2 User schema",
+          reason: "Need exact field optionality",
+          proposalKey: "agy-probe-1",
+        },
+      },
+      {
+        type: "proposal",
+        workerId: "w-agy-1",
+        proposal: {
+          kind: "readonly_probe",
+          targetRepoRef: "auth-service",
+          prompt: "Check JWT claims",
+          reason: "Need audience claim name",
+          proposalKey: "agy-probe-2",
+        },
+      },
+    ]);
+    const settledIdx = events.findIndex((e) => e.type === "settled");
+    const lastProposalIdx = events.map((e, i) => (e.type === "proposal" ? i : -1)).filter((i) => i >= 0).at(-1)!;
+    expect(lastProposalIdx).toBeLessThan(settledIdx);
+    expect(settledOf()[0]!.outcome).toBe("reported");
+    expect(settledOf()[0]!.report).toMatchObject({
+      status: "done",
+      summary: "Finished local changes alongside two readonly probes",
+    });
   });
 });
 

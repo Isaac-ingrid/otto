@@ -74,6 +74,13 @@ import {
   normalizeAgySettingsModel,
   writeIsolatedAgySettings,
 } from "./antigravity-adapter.ts";
+import {
+  computeHooksApprovalDigest,
+  HookConfigError,
+  hooksRootDir,
+  normalizeHookScriptInput,
+  verifyRepoHooks,
+} from "./hooks.ts";
 import { launchCheck, PI_COMMAND_ENV, piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
 import { LocalStore, type Credentials } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
@@ -123,8 +130,8 @@ usage:
   otto uninstall                              remove the service (keeps ~/.otto data)
   otto upgrade [--version <version>]          replace the package and restart the service
   otto repo-config <path> [options]           per-repo local settings (write isolation,
-                                                  concurrency, project trust); never settable
-                                                  remotely
+                                                  concurrency, project trust, worktree hooks);
+                                                  never settable remotely
   otto daemon [--supervise]                   internal: run the connector daemon; --supervise
                                                   keeps a crashed daemon coming back (backoff,
                                                   output appended to logs/supervisor.log)
@@ -1067,49 +1074,96 @@ function describeCapability(capability: RepoCapability): string {
   return "plain (no Git)";
 }
 
+interface RepoConfigFlags {
+  path?: string;
+  isolation?: string;
+  concurrency?: string;
+  approve?: boolean;
+  setupHook?: string | null;
+  archiveHook?: string | null;
+  approveHooks?: boolean;
+  clearHooks?: boolean;
+}
+
 /** Parses repo-config argv: positional path + `--isolation worktree|in-place` +
- * `--concurrency parallel|serial` (also the `--flag=value` form for either) +
- * `--approve|--no-approve`. Unknown flags fail loudly instead of silently degrading into a
- * read-only invocation (review finding 4). */
-function parseRepoConfigArgv(
-  argv: string[],
-): { path?: string; isolation?: string; concurrency?: string; approve?: boolean } {
-  // Expand `--flag=value` into `--flag value` so both spellings share one path.
+ * `--concurrency parallel|serial` + `--approve|--no-approve` + Stage 2 hook flags
+ * (`--setup-hook <script>|--no-setup-hook`, `--archive-hook <script>|--no-archive-hook`,
+ * `--approve-hooks`, `--clear-hooks`). Unknown flags fail loudly. */
+function parseRepoConfigArgv(argv: string[]): RepoConfigFlags {
   const expanded: string[] = [];
   for (const token of argv) {
     const eq = token.indexOf("=");
     if (token.startsWith("--") && eq !== -1) expanded.push(token.slice(0, eq), token.slice(eq + 1));
     else expanded.push(token);
   }
-  const { value: isolation, rest: afterIsolation } = takeFlag(expanded, "--isolation");
-  if (expanded.includes("--isolation") && isolation === undefined) {
+  const { present: isoPresent, value: isolation, rest: r1 } = takeFlag(expanded, "--isolation");
+  if (isoPresent && (isolation === undefined || isolation.startsWith("--"))) {
     fail("--isolation requires a value: worktree | in-place");
   }
-  const { value: concurrency, rest } = takeFlag(afterIsolation, "--concurrency");
-  if (afterIsolation.includes("--concurrency") && concurrency === undefined) {
+  const { present: concPresent, value: concurrency, rest: r2 } = takeFlag(r1, "--concurrency");
+  if (concPresent && (concurrency === undefined || concurrency.startsWith("--"))) {
     fail("--concurrency requires a value: parallel | serial");
   }
+  const { present: setupPresent, value: setupVal, rest: r3 } = takeFlag(r2, "--setup-hook");
+  if (setupPresent && (setupVal === undefined || setupVal.startsWith("--"))) {
+    fail("--setup-hook requires a script path under ~/.otto/hooks (or use --no-setup-hook / --clear-hooks)");
+  }
+  const { present: archivePresent, value: archiveVal, rest } = takeFlag(r3, "--archive-hook");
+  if (archivePresent && (archiveVal === undefined || archiveVal.startsWith("--"))) {
+    fail("--archive-hook requires a script path under ~/.otto/hooks (or use --no-archive-hook / --clear-hooks)");
+  }
+
   if (rest.includes("--approve") && rest.includes("--no-approve")) {
     fail("--approve and --no-approve are mutually exclusive");
   }
+  if (setupPresent && rest.includes("--no-setup-hook")) {
+    fail("--setup-hook and --no-setup-hook are mutually exclusive");
+  }
+  if (archivePresent && rest.includes("--no-archive-hook")) {
+    fail("--archive-hook and --no-archive-hook are mutually exclusive");
+  }
+  const clearHooks = rest.includes("--clear-hooks") ? true : undefined;
+  const approveHooks = rest.includes("--approve-hooks") ? true : undefined;
+  if (clearHooks && (setupPresent || archivePresent || rest.includes("--no-setup-hook") || rest.includes("--no-archive-hook") || approveHooks)) {
+    fail("--clear-hooks cannot be combined with --setup-hook, --archive-hook, or --approve-hooks");
+  }
+
   const approve = rest.includes("--approve") ? true : rest.includes("--no-approve") ? false : undefined;
+  const setupHook = setupPresent ? setupVal! : rest.includes("--no-setup-hook") ? null : undefined;
+  const archiveHook = archivePresent ? archiveVal! : rest.includes("--no-archive-hook") ? null : undefined;
   const positional = rest.filter((token) => !token.startsWith("--"));
-  const knownBooleans = new Set(["--approve", "--no-approve"]);
+  const knownBooleans = new Set([
+    "--approve",
+    "--no-approve",
+    "--no-setup-hook",
+    "--no-archive-hook",
+    "--approve-hooks",
+    "--clear-hooks",
+  ]);
   const unknown = rest.filter((token) => token.startsWith("--") && !knownBooleans.has(token));
   if (unknown.length > 0) {
-    fail(`unknown option(s): ${unknown.join(" ")} (expected --isolation, --concurrency, --approve, or --no-approve)`);
+    fail(
+      `unknown option(s): ${unknown.join(" ")} (expected --isolation, --concurrency, --approve, --no-approve, --setup-hook, --archive-hook, --approve-hooks, or --clear-hooks)`,
+    );
   }
-  return { path: positional[0], isolation, concurrency, approve };
+  return { path: positional[0], isolation, concurrency, approve, setupHook, archiveHook, approveHooks, clearHooks };
+}
+
+function describeRepoHooks(dir: string, hooks: import("./hooks.ts").RepoHooksConfig): string {
+  const check = verifyRepoHooks(dir, hooks);
+  if (!check.configured) return `none (scripts live in ${hooksRootDir(dir)})`;
+  const spec = `setup=${hooks.setupHook ?? "none"}, archive=${hooks.archiveHook ?? "none"}`;
+  if (check.approved) return `${spec} (approved sha256:${check.sha256?.slice(0, 12)})`;
+  return `${spec} (NOT approved: ${check.reason ?? "unapproved"} — run --approve-hooks)`;
 }
 
 /** `otto repo-config <path> [--isolation worktree|in-place] [--concurrency parallel|serial]
- * [--approve|--no-approve]` (§8.2/§13, issue #16): the per-repo settings that live only in the
- * connector's local store. A command from the steward carrying them is rejected; this is the
- * only writer. With no settings flags it just prints the current configuration. Works on a
- * plain (non-Git) workspace too (issue #88) — identity resolves via `identifyWorkspace`, not
- * a Git-or-throw lookup. */
+ * [--approve|--no-approve] [--setup-hook <script>] [--archive-hook <script>]
+ * [--approve-hooks | --clear-hooks]` (§8.2/§13, ADR-0022 Stage 2): local-only per-repo
+ * settings stored in `connector.sqlite`. */
 async function repoConfig(argv: string[]): Promise<void> {
-  const { path, isolation, concurrency, approve } = parseRepoConfigArgv(argv);
+  const { path, isolation, concurrency, approve, setupHook, archiveHook, approveHooks, clearHooks } =
+    parseRepoConfigArgv(argv);
   if (!path) usage();
   if (isolation !== undefined && !isIsolation(isolation)) {
     fail(`unknown isolation '${isolation}' (expected one of: worktree | in-place)`);
@@ -1118,37 +1172,72 @@ async function repoConfig(argv: string[]): Promise<void> {
     fail(`unknown concurrency '${concurrency}' (expected one of: parallel | serial)`);
   }
 
+  const dir = stateDir();
   const identity = await identifyWorkspace(path);
-  const store = new LocalStore(join(stateDir(), "connector.sqlite"));
+  const isReadOnly =
+    isolation === undefined &&
+    concurrency === undefined &&
+    approve === undefined &&
+    setupHook === undefined &&
+    archiveHook === undefined &&
+    approveHooks === undefined &&
+    clearHooks === undefined;
+
+  const store = new LocalStore(join(dir, "connector.sqlite"));
   try {
     const repo = store.getRepo(identity.repoId);
     if (!repo) {
       fail(`${identity.repoId} is not registered; open the web workspace and use Machines > Add directory first`);
     }
-    if (isolation === undefined && concurrency === undefined && approve === undefined) {
-      // Read-only invocation: show the current settings.
+    if (isReadOnly) {
       console.log(`${repo.name} (${repo.repoId})`);
       console.log(`capability:  ${describeCapability(repo.capability)}`);
       console.log(`isolation:   ${repo.writePolicy.isolation}`);
       console.log(`concurrency: ${repo.writePolicy.concurrency}`);
       console.log(`approved:    ${repo.approved ? "yes (pi runs with --approve)" : "no (pi runs with --no-approve)"}`);
+      console.log(`hooks:       ${describeRepoHooks(dir, repo.hooks)}`);
       return;
     }
-    if (isolation !== undefined || concurrency !== undefined) {
-      try {
+    try {
+      if (isolation !== undefined || concurrency !== undefined) {
         store.setWritePolicy(identity.repoId, { isolation, concurrency });
-      } catch (err) {
-        fail(err instanceof Error ? err.message : String(err));
       }
+      if (approve !== undefined) store.setApproved(identity.repoId, approve);
+      if (clearHooks) {
+        store.clearRepoHooks(identity.repoId);
+      } else {
+        if (setupHook !== undefined || archiveHook !== undefined) {
+          const canonicalSetup =
+            setupHook === undefined ? undefined : setupHook === null ? null : normalizeHookScriptInput(dir, setupHook).canonicalName;
+          const canonicalArchive =
+            archiveHook === undefined ? undefined : archiveHook === null ? null : normalizeHookScriptInput(dir, archiveHook).canonicalName;
+          store.setRepoHooks(identity.repoId, { setupHook: canonicalSetup, archiveHook: canonicalArchive });
+        }
+        if (approveHooks) {
+          const current = store.getRepo(identity.repoId)!;
+          const digest = computeHooksApprovalDigest(dir, current.hooks);
+          if (!digest.ok) fail(`cannot approve hooks: ${digest.reason}`);
+          store.approveRepoHooks(identity.repoId, digest.sha256);
+        }
+      }
+    } catch (err) {
+      if (err instanceof HookConfigError) fail(err.message);
+      fail(err instanceof Error ? err.message : String(err));
     }
-    if (approve !== undefined) store.setApproved(identity.repoId, approve);
     const updated = store.getRepo(identity.repoId)!;
+    const hookCheck = verifyRepoHooks(dir, updated.hooks);
+    const hookNote = hookCheck.configured
+      ? `, hooks=${updated.hooks.setupHook ?? "none"}/${updated.hooks.archiveHook ?? "none"}(${hookCheck.approved ? "approved" : "unapproved"})`
+      : clearHooks
+        ? ", hooks=cleared"
+        : "";
     console.log(
-      `${updated.name}: isolation=${updated.writePolicy.isolation}, concurrency=${updated.writePolicy.concurrency}, approved=${updated.approved ? "yes" : "no"}`,
+      `${updated.name}: isolation=${updated.writePolicy.isolation}, concurrency=${updated.writePolicy.concurrency}, approved=${updated.approved ? "yes" : "no"}${hookNote}`,
     );
   } finally {
     store.close();
   }
+  await noteServiceRestart();
 }
 
 main(process.argv.slice(2)).catch((err) => {

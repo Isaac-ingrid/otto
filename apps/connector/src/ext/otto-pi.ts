@@ -65,6 +65,32 @@ const reportParameters = Type.Object({
         "The full answer or finding, when this task was informational (a question, an explanation, an investigation) rather than a code change. Use this instead of `changes` when nothing was modified.",
     }),
   ),
+  labels: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Optional bounded outcome tags (max 3; allowed: blocked-by-env | needs-human-verify | flaky-test | needs-migration | scope-creep).",
+    }),
+  ),
+});
+
+const PROPOSAL_KEY_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/;
+
+const proposeParameters = Type.Object({
+  kind: Type.Literal("readonly_probe", {
+    description: "Only 'readonly_probe' is allowed; write tasks cannot be proposed by workers.",
+  }),
+  targetRepoRef: Type.String({
+    description: "Registered repository name, repoId, or path on this machine to inspect read-only.",
+  }),
+  prompt: Type.String({
+    description: "Self-contained read-only investigation instructions for the sibling probe.",
+  }),
+  reason: Type.String({
+    description: "Concise reason why an isolated read-only probe is needed.",
+  }),
+  proposalKey: Type.String({
+    description: "Idempotency key matching ^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$ (max 2 proposals per worker).",
+  }),
 });
 
 interface WindowState {
@@ -99,6 +125,46 @@ export default function ottoExtension(pi: ExtensionAPI): void {
       return {
         content: [{ type: "text", text: `Report received (status: ${params.status}). You can end your turn now.` }],
         details: { status: params.status },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "propose",
+    label: "Propose Read-Only Probe",
+    description:
+      "Submit a bounded read-only probe proposal (`readonly_probe`) to Otto Steward (for example, to inspect another registered repository without polluting this session). Asynchronous and non-blocking: Steward adjudicates later; never wait for or fabricate probe results.",
+    parameters: proposeParameters,
+    async execute(_toolCallId, params) {
+      if (params.kind !== "readonly_probe") {
+        throw new Error("`kind` must be 'readonly_probe'");
+      }
+      const targetRepoRef = typeof params.targetRepoRef === "string" ? params.targetRepoRef.trim() : "";
+      const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+      const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+      const proposalKey = typeof params.proposalKey === "string" ? params.proposalKey.trim() : "";
+      if (!targetRepoRef || targetRepoRef.length > 256) {
+        throw new Error("`targetRepoRef` must be 1..256 characters");
+      }
+      if (!prompt || prompt.length > 4000) {
+        throw new Error("`prompt` must be 1..4000 characters");
+      }
+      if (!reason || reason.length > 500) {
+        throw new Error("`reason` must be 1..500 characters");
+      }
+      if (!PROPOSAL_KEY_PATTERN.test(proposalKey)) {
+        throw new Error("`proposalKey` must match ^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `queued_for_steward_decision (proposalKey: ${proposalKey}). ` +
+              "Steward has NOT adjudicated or run this probe yet; do NOT wait for or fabricate probe results. Continue your task and call `report` when done.",
+          },
+        ],
+        details: { status: "queued_for_steward_decision", proposalKey },
       };
     },
   });

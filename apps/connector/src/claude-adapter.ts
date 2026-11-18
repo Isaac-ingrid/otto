@@ -14,6 +14,7 @@ import type {
   AgentCapabilities,
   Delivery,
   InterruptResult,
+  ProposalPayload,
   RawAdapterEvent,
   SessionUsage,
   StartSpec,
@@ -21,12 +22,12 @@ import type {
 } from "./agent.ts";
 import { AdapterError } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
-import { childEnv, extractTarget, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
+import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, WORKER_SYSTEM_PROMPT } from "./install.ts";
 import { resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { appendCapped } from "./logger.ts";
@@ -78,6 +79,11 @@ export function isReportTool(name: string): boolean {
   return name.endsWith("__report");
 }
 
+/** MCP `propose` tool calls arrive namespaced (`mcp__otto__propose`): suffix-match. */
+export function isProposalTool(name: string): boolean {
+  return name.endsWith("__propose");
+}
+
 /** Honest capability set (connector-pi.md §3): what headless Claude Code can and cannot do. */
 const CLAUDE_CAPABILITIES: AgentCapabilities = {
   // No control channel after stdin EOF: a mid-run steer or queued follow-up is impossible.
@@ -121,6 +127,8 @@ interface WorkerRuntime {
   process: ClaudeProcess;
   cwd: string;
   sessionId: string;
+  proposalsFile: string;
+  emittedProposalKeys: Set<string>;
   /** Set when the connector itself ends this process; makes exits "expected". */
   stopping: boolean;
   /** An interrupt killed this run before its `result`; the exit settles it as aborted. */
@@ -216,21 +224,23 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   /** The per-worker mcp-config: Claude Code spawns our report server as an MCP child. */
-  private writeMcpConfig(workerId: string, serverPath: string): string {
+  private writeMcpConfig(workerId: string, serverPath: string): { configPath: string; proposalsFile: string } {
     const mcpDir = join(this.options.stateDir, "mcp");
     const configPath = join(mcpDir, `config-${workerId}.json`);
     const reportFile = join(mcpDir, "reports", `${workerId}.json`);
+    const proposalsFile = join(mcpDir, "proposals", `proposals-${workerId}.jsonl`);
+    rmSync(proposalsFile, { force: true });
     // The path rides the config's argv — visible to the model in yolo mode, but it is a
     // scratch channel, not a secret (§7.2: model-reported content is semantics, not fact).
     writeFileSync(
       configPath,
       JSON.stringify({
         mcpServers: {
-          otto: { type: "stdio", command: process.execPath, args: [serverPath, reportFile], env: {} },
+          otto: { type: "stdio", command: process.execPath, args: [serverPath, reportFile, proposalsFile], env: {} },
         },
       }),
     );
-    return configPath;
+    return { configPath, proposalsFile };
   }
 
   async start(spec: StartSpec): Promise<WorkerHandle> {
@@ -244,7 +254,7 @@ export class ClaudeAdapter implements AgentAdapter {
     const serverPath = assets.serverPath;
     if (this.workerLogsDir) mkdirSync(this.workerLogsDir, { recursive: true });
     const sessionId = spec.resumeSessionId ?? claudeSessionId(spec.workerId);
-    const configPath = this.writeMcpConfig(spec.workerId, serverPath);
+    const { configPath, proposalsFile } = this.writeMcpConfig(spec.workerId, serverPath);
 
     let runtime!: WorkerRuntime;
     const proc = new ClaudeProcess({
@@ -261,6 +271,8 @@ export class ClaudeAdapter implements AgentAdapter {
       process: proc,
       cwd: spec.cwd,
       sessionId,
+      proposalsFile,
+      emittedProposalKeys: new Set(),
       stopping: false,
       interrupting: false,
       resultSeen: false,
@@ -464,12 +476,15 @@ export class ClaudeAdapter implements AgentAdapter {
               // Suffix match only: the namespace prefix is not ours to predict.
               const report = normalizeReport(input);
               if (report) runtime.window.report = report;
+            } else if (isProposalTool(name)) {
+              const proposal = normalizeProposal(input);
+              if (proposal) this.emitProposalOnce(runtime, proposal);
             }
             this.emit({
               type: "progress",
               workerId: runtime.workerId,
               phase: "tool",
-              tool: isReportTool(name) ? "report" : name,
+              tool: isReportTool(name) ? "report" : isProposalTool(name) ? "propose" : name,
               target: extractTarget(input),
               turn: runtime.turn,
             });
@@ -509,7 +524,20 @@ export class ClaudeAdapter implements AgentAdapter {
     }
   }
 
+  private emitProposalOnce(runtime: WorkerRuntime, proposal: ProposalPayload): void {
+    if (runtime.emittedProposalKeys.has(proposal.proposalKey)) return;
+    runtime.emittedProposalKeys.add(proposal.proposalKey);
+    this.emit({
+      type: "proposal",
+      workerId: runtime.workerId,
+      proposal,
+    });
+  }
+
   private async settle(runtime: WorkerRuntime, result: Record<string, unknown>): Promise<void> {
+    for (const proposal of readProposalsAuditFile(runtime.proposalsFile)) {
+      this.emitProposalOnce(runtime, proposal);
+    }
     const facts = runtime.window;
     const adjudicated = adjudicate(facts);
     runtime.window = { open: false, aborted: false };
@@ -733,6 +761,27 @@ export interface ClaudeProcessOptions {
 
 /** Whether a `claude` binary is on the machine (hello.agents advertises it only when it
  *  is, issue #17 AC): `claude --version` must exit 0. Sync on purpose — a boot-time check. */
+function readProposalsAuditFile(path: string): ProposalPayload[] {
+  if (!existsSync(path)) return [];
+  try {
+    const lines = readFileSync(path, "utf8").split("\n");
+    const out: ProposalPayload[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = normalizeProposal(JSON.parse(trimmed));
+        if (parsed) out.push(parsed);
+      } catch {
+        // skip malformed JSONL line
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export function detectClaude(command: string[] = ["claude"], timeoutMs = 5000): { installed: boolean; version?: string } {
   try {
     // Same Windows shim resolution as a real run: `spawnSync("claude")` cannot start the

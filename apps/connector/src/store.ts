@@ -13,6 +13,7 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentModelObservation, GitCapability, PlainCapability, RepoCapability } from "@isaac2ingrid/protocol";
 import type { ProcRef } from "./descendants.ts";
+import type { RepoHooksConfig } from "./hooks.ts";
 import { normalizeProxyConfig, type ProxyConfig } from "./proxy.ts";
 import {
   DEFAULT_GIT_WRITE_POLICY,
@@ -124,6 +125,11 @@ export class LocalStore {
     this.addColumnIfMissing("repo", "approved", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("repo", "isolation", "TEXT NOT NULL DEFAULT 'worktree'");
     this.addColumnIfMissing("repo", "concurrency", "TEXT NOT NULL DEFAULT 'parallel'");
+    // ADR-0022 Stage 2 (Plan B): locally approved worktree lifecycle hooks (CLI-only).
+    this.addColumnIfMissing("repo", "setupHook", "TEXT");
+    this.addColumnIfMissing("repo", "archiveHook", "TEXT");
+    this.addColumnIfMissing("repo", "hookApprovedSha256", "TEXT");
+    this.addColumnIfMissing("repo", "hookApprovedAt", "INTEGER");
     // Backfill from the legacy `workspace` column, if it still exists on this database, into the
     // new isolation/concurrency pair — exact mapping, not best-effort, since only 3 legacy values
     // ever existed. Then drop the legacy column; nothing reads it after this point (local SQLite
@@ -304,7 +310,13 @@ export class LocalStore {
   }
 
   private toRegisteredRepo(row: RepoRow): RegisteredRepo {
-    const base = { repoId: row.repoId, name: row.name, path: row.path, approved: row.approved === 1 };
+    const hooks: RepoHooksConfig = {
+      setupHook: row.setupHook ?? null,
+      archiveHook: row.archiveHook ?? null,
+      hookApprovedSha256: row.hookApprovedSha256 ?? null,
+      hookApprovedAt: row.hookApprovedAt ?? null,
+    };
+    const base = { repoId: row.repoId, name: row.name, path: row.path, approved: row.approved === 1, hooks };
     const concurrency = row.concurrency as Concurrency; // validated at the one write boundary, setWritePolicy; trusted here
     if (row.kind === "git") {
       return {
@@ -318,7 +330,11 @@ export class LocalStore {
 
   getRepo(repoId: string): RegisteredRepo | null {
     const row = this.db
-      .prepare("SELECT repoId, name, path, kind, defaultBranch, remote, isolation, concurrency, approved FROM repo WHERE repoId = ?")
+      .prepare(
+        `SELECT repoId, name, path, kind, defaultBranch, remote, isolation, concurrency, approved,
+                setupHook, archiveHook, hookApprovedSha256, hookApprovedAt
+         FROM repo WHERE repoId = ?`,
+      )
       .get(repoId) as RepoRow | undefined;
     return row ? this.toRegisteredRepo(row) : null;
   }
@@ -326,7 +342,11 @@ export class LocalStore {
   listRepos(): RegisteredRepo[] {
     return (
       this.db
-        .prepare("SELECT repoId, name, path, kind, defaultBranch, remote, isolation, concurrency, approved FROM repo ORDER BY repoId")
+        .prepare(
+          `SELECT repoId, name, path, kind, defaultBranch, remote, isolation, concurrency, approved,
+                  setupHook, archiveHook, hookApprovedSha256, hookApprovedAt
+           FROM repo ORDER BY repoId`,
+        )
         .all() as unknown as RepoRow[]
     ).map((row) => this.toRegisteredRepo(row));
   }
@@ -350,6 +370,54 @@ export class LocalStore {
   setApproved(repoId: string, approved: boolean): boolean {
     if (!this.getRepo(repoId)) return false;
     this.db.prepare("UPDATE repo SET approved = ? WHERE repoId = ?").run(approved ? 1 : 0, repoId);
+    return true;
+  }
+
+  /** Updates local-only worktree hooks (ADR-0022 Stage 2). Any change to setupHook or
+   *  archiveHook clears hookApprovedSha256/hookApprovedAt until `--approve-hooks` runs. */
+  setRepoHooks(repoId: string, patch: { setupHook?: string | null; archiveHook?: string | null }): boolean {
+    const repo = this.getRepo(repoId);
+    if (!repo) return false;
+    const setupHook = patch.setupHook !== undefined ? patch.setupHook : repo.hooks.setupHook;
+    const archiveHook = patch.archiveHook !== undefined ? patch.archiveHook : repo.hooks.archiveHook;
+    if ((setupHook !== null || archiveHook !== null) && repo.capability.kind !== "git") {
+      throw new WritePolicyError(`'${repo.name}' is a plain workspace (no Git); worktree hooks are not available.`);
+    }
+    const changed = setupHook !== repo.hooks.setupHook || archiveHook !== repo.hooks.archiveHook;
+    if (changed) {
+      this.db
+        .prepare(
+          "UPDATE repo SET setupHook = ?, archiveHook = ?, hookApprovedSha256 = NULL, hookApprovedAt = NULL WHERE repoId = ?",
+        )
+        .run(setupHook, archiveHook, repoId);
+    }
+    return true;
+  }
+
+  /** Binds the computed SHA-256 digest of the configured hooks + script bytes. */
+  approveRepoHooks(repoId: string, sha256: string, approvedAt = Date.now()): boolean {
+    const repo = this.getRepo(repoId);
+    if (!repo) return false;
+    if (repo.capability.kind !== "git") {
+      throw new WritePolicyError(`'${repo.name}' is a plain workspace (no Git); worktree hooks are not available.`);
+    }
+    if (!repo.hooks.setupHook && !repo.hooks.archiveHook) {
+      throw new WritePolicyError(`'${repo.name}' has no worktree hooks configured to approve.`);
+    }
+    this.db
+      .prepare("UPDATE repo SET hookApprovedSha256 = ?, hookApprovedAt = ? WHERE repoId = ?")
+      .run(sha256, approvedAt, repoId);
+    return true;
+  }
+
+  /** Removes all configured worktree hooks and approval state for a repository. */
+  clearRepoHooks(repoId: string): boolean {
+    if (!this.getRepo(repoId)) return false;
+    this.db
+      .prepare(
+        "UPDATE repo SET setupHook = NULL, archiveHook = NULL, hookApprovedSha256 = NULL, hookApprovedAt = NULL WHERE repoId = ?",
+      )
+      .run(repoId);
     return true;
   }
 
@@ -537,6 +605,10 @@ interface RepoRow {
   isolation: string;
   concurrency: string;
   approved: number;
+  setupHook: string | null;
+  archiveHook: string | null;
+  hookApprovedSha256: string | null;
+  hookApprovedAt: number | null;
 }
 
 interface RegisteredRepoBase {
@@ -545,6 +617,8 @@ interface RegisteredRepoBase {
   readonly path: string;
   /** approveProject (§13): run pi with --approve in this repo. Set on the machine only. */
   readonly approved: boolean;
+  /** Worktree lifecycle hooks (ADR-0022 Stage 2): local-only, SHA-256 approved. */
+  readonly hooks: RepoHooksConfig;
 }
 
 /** A registered directory's identity plus its detected Git capability and write policy

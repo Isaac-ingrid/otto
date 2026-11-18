@@ -8,6 +8,7 @@ import type {
   AgentCapabilities,
   Delivery,
   InterruptResult,
+  ProposalPayload,
   RawAdapterEvent,
   ReportPayload,
   SessionUsage,
@@ -17,7 +18,7 @@ import type {
 } from "./agent.ts";
 import { AdapterError } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
-import { childEnv, extractTarget, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
+import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, OTTO_VERSION, WORKER_SYSTEM_PROMPT } from "./install.ts";
 import { resolveExecutableLaunch, splitCommandLine, type LaunchResolution } from "./pi-launch.ts";
 import { AgentModelObservationSchema, type AgentModelCatalog } from "@isaac2ingrid/protocol";
@@ -111,6 +112,15 @@ export function agyCommandFromEnv(env: Record<string, string | undefined> = proc
 export function isAcpReportTool(name: unknown, title?: unknown): boolean {
   if (typeof name === "string" && /(?:^mcp__|__|\/|:|\.)report$/i.test(name)) return true;
   if (name === "report" && typeof title === "string" && /\botto\b/i.test(title)) return true;
+  return false;
+}
+
+/** Matches Otto's MCP `propose` tool across ACP naming conventions (`mcp__otto__propose`,
+ *  `otto__propose`, `otto/propose`, `otto:propose`), never a bare unrelated `propose` tool
+ *  unless its ACP title explicitly identifies the `otto` MCP server. */
+export function isAcpProposalTool(name: unknown, title?: unknown): boolean {
+  if (typeof name === "string" && /(?:^mcp__|__|\/|:|\.)propose$/i.test(name)) return true;
+  if (name === "propose" && typeof title === "string" && /\botto\b/i.test(title)) return true;
   return false;
 }
 
@@ -229,6 +239,7 @@ interface TrackedToolCall {
   rawInput?: unknown;
   target?: string;
   emittedProgress?: boolean;
+  emittedProposal?: boolean;
 }
 
 interface PendingPermission {
@@ -242,6 +253,8 @@ interface WorkerRuntime {
   mode: WorkerMode;
   sessionId: string;
   reportFile: string;
+  proposalsFile: string;
+  emittedProposalKeys: Set<string>;
   agentCapabilities: AcpAgentCapabilities;
   systemPromptSupported: boolean;
   onModelObserved?: StartSpec["onModelObserved"];
@@ -348,12 +361,16 @@ export class AntigravityAdapter implements AgentAdapter {
   }
 
   /** ACP stdio MCP server entry pointing `agy acp` at Otto's `report-server.mjs`. */
-  private buildMcpServers(serverPath: string, reportFile: string): Array<Record<string, unknown>> {
+  private buildMcpServers(
+    serverPath: string,
+    reportFile: string,
+    proposalsFile: string,
+  ): Array<Record<string, unknown>> {
     return [
       {
         name: "otto",
         command: process.execPath,
-        args: [serverPath, reportFile],
+        args: [serverPath, reportFile, proposalsFile],
         env: [],
       },
     ];
@@ -370,7 +387,9 @@ export class AntigravityAdapter implements AgentAdapter {
     if (this.workerLogsDir) mkdirSync(this.workerLogsDir, { recursive: true });
     const acpLogFile = this.workerLogsDir ? join(this.workerLogsDir, `agy-acp-${spec.workerId}.log`) : undefined;
     const reportFile = join(this.options.stateDir, "mcp", "reports", `${spec.workerId}.json`);
+    const proposalsFile = join(this.options.stateDir, "mcp", "proposals", `proposals-${spec.workerId}.jsonl`);
     rmSync(reportFile, { force: true });
+    rmSync(proposalsFile, { force: true });
 
     const apiKeyConfig = this.options.apiKeyConfig;
     const isolatedGeminiDir = apiKeyConfig
@@ -407,6 +426,8 @@ export class AntigravityAdapter implements AgentAdapter {
       mode: spec.mode,
       sessionId: spec.resumeSessionId ?? "",
       reportFile,
+      proposalsFile,
+      emittedProposalKeys: new Set(),
       agentCapabilities: {},
       systemPromptSupported: false,
       onModelObserved: spec.onModelObserved,
@@ -467,7 +488,7 @@ export class AntigravityAdapter implements AgentAdapter {
         await this.authenticate(proc, "gemini-api-key", env, initTimeout);
       }
 
-      const mcpServers = this.buildMcpServers(assets.serverPath, reportFile);
+      const mcpServers = this.buildMcpServers(assets.serverPath, reportFile, proposalsFile);
       const sessionRes = await this.openOrResumeSession(proc, runtime, spec, mcpServers, authMethods, env, initTimeout);
       const sessionId =
         typeof sessionRes.sessionId === "string" && sessionRes.sessionId.length > 0
@@ -860,8 +881,20 @@ export class AntigravityAdapter implements AgentAdapter {
 
   // --- Prompt turn lifecycle & ACP event normalization --------------------------------------
 
+  private emitProposalOnce(runtime: WorkerRuntime, proposal: ProposalPayload): void {
+    if (runtime.emittedProposalKeys.has(proposal.proposalKey)) return;
+    runtime.emittedProposalKeys.add(proposal.proposalKey);
+    this.emit({
+      type: "proposal",
+      workerId: runtime.workerId,
+      proposal,
+    });
+  }
+
   private beginPromptTurn(runtime: WorkerRuntime, promptBlocks: Array<Record<string, unknown>>): void {
     rmSync(runtime.reportFile, { force: true });
+    rmSync(runtime.proposalsFile, { force: true });
+    runtime.emittedProposalKeys.clear();
     runtime.turnSeq += 1;
     const seq = runtime.turnSeq;
     runtime.promptInFlight = true;
@@ -970,9 +1003,16 @@ export class AntigravityAdapter implements AgentAdapter {
         runtime.toolCalls.set(toolCallId, existing);
 
         const isReport = isAcpReportTool(existing.name, existing.title);
+        const isProposal = isAcpProposalTool(existing.name, existing.title);
         if (isReport && existing.rawInput !== undefined) {
           const normalized = normalizeReport(existing.rawInput);
           if (normalized) runtime.window.report = normalized;
+        } else if (isProposal && existing.rawInput !== undefined && !existing.emittedProposal) {
+          const normalized = normalizeProposal(existing.rawInput);
+          if (normalized) {
+            existing.emittedProposal = true;
+            this.emitProposalOnce(runtime, normalized);
+          }
         }
 
         if (!existing.emittedProgress) {
@@ -982,7 +1022,9 @@ export class AntigravityAdapter implements AgentAdapter {
           if (runtime.currentMessageId === null) runtime.currentMessageText = "";
           const label = isReport
             ? "report"
-            : existing.name ?? existing.kind ?? (existing.title ? existing.title.slice(0, 40) : "tool");
+            : isProposal
+              ? "propose"
+              : existing.name ?? existing.kind ?? (existing.title ? existing.title.slice(0, 40) : "tool");
           this.emit({
             type: "progress",
             workerId: runtime.workerId,
@@ -1050,12 +1092,16 @@ export class AntigravityAdapter implements AgentAdapter {
         ? (params.toolCall as Record<string, unknown>)
         : {};
     const isReport = isAcpReportTool(toolCall.name, toolCall.title);
+    const isProposal = isAcpProposalTool(toolCall.name, toolCall.title);
     if (isReport && toolCall.rawInput !== undefined) {
       const normalized = normalizeReport(toolCall.rawInput);
       if (normalized) runtime.window.report = normalized;
+    } else if (isProposal && toolCall.rawInput !== undefined) {
+      const normalized = normalizeProposal(toolCall.rawInput);
+      if (normalized) this.emitProposalOnce(runtime, normalized);
     }
 
-    if (this.options.onPermissionRequest && !isReport) {
+    if (this.options.onPermissionRequest && !isReport && !isProposal) {
       const key = String(id);
       const seq = runtime.turnSeq;
       runtime.pendingPermissions.set(key, { requestId: id });
@@ -1088,6 +1134,7 @@ export class AntigravityAdapter implements AgentAdapter {
     const kind = typeof toolCall.kind === "string" ? toolCall.kind : undefined;
     const allow =
       isReport ||
+      isProposal ||
       runtime.mode === "write" ||
       (kind !== undefined && SAFE_READONLY_TOOL_KINDS.has(kind));
 
@@ -1143,6 +1190,11 @@ export class AntigravityAdapter implements AgentAdapter {
   }
 
   private settleTurn(runtime: WorkerRuntime, promptResult: Record<string, unknown>): void {
+    // Recover any validated MCP `propose` calls whose `rawInput` was omitted by the ACP server
+    // BEFORE emitting `settled`, preserving causal order while keeping `reportFile` separate.
+    for (const proposal of readProposalsAuditFile(runtime.proposalsFile)) {
+      this.emitProposalOnce(runtime, proposal);
+    }
     // Check the out-of-band MCP report file written by `report-server.mjs`: real ACP servers
     // may omit MCP `rawInput` in `session/update`, whereas `report-server.mjs` always persists
     // validated report arguments directly to `runtime.reportFile`.
@@ -1678,6 +1730,27 @@ function readReportAuditFile(path: string): ReportPayload | null {
     return normalizeReport(raw);
   } catch {
     return null;
+  }
+}
+
+function readProposalsAuditFile(path: string): ProposalPayload[] {
+  if (!existsSync(path)) return [];
+  try {
+    const lines = readFileSync(path, "utf8").split("\n");
+    const out: ProposalPayload[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = normalizeProposal(JSON.parse(trimmed));
+        if (parsed) out.push(parsed);
+      } catch {
+        // skip malformed JSONL line
+      }
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 

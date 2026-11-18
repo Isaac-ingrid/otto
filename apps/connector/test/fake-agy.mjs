@@ -103,8 +103,8 @@ function cancellableSleep(ms, cancelState) {
   });
 }
 
-/** Spawns Otto's real `report-server.mjs` from `session/new`'s `mcpServers` and calls `report`. */
-async function invokeRealMcpReport(mcpServer, reportArgs) {
+/** Spawns Otto's real `report-server.mjs` from `session/new`'s `mcpServers` and calls a tool. */
+async function invokeRealMcpTool(mcpServer, toolName, toolArgs) {
   return new Promise((resolve, reject) => {
     const child = spawn(mcpServer.command, mcpServer.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -126,7 +126,7 @@ async function invokeRealMcpReport(mcpServer, reportArgs) {
               jsonrpc: "2.0",
               id: 2,
               method: "tools/call",
-              params: { name: "report", arguments: reportArgs },
+              params: { name: toolName, arguments: toolArgs },
             }) + "\n",
           );
         } else if (msg.id === 2) {
@@ -352,6 +352,23 @@ async function handleRequest(msg) {
           });
           logEvent({ direction: "elicitation_outcome", action: elicRes?.action });
         }
+        if (step.callMcpPropose) {
+          const ottoServer = sessionMcpServers.find((s) => s.name === "otto");
+          if (!ottoServer) {
+            replyError(id, -32603, "otto MCP server was not passed in mcpServers");
+            activeCancelSignal = null;
+            return;
+          }
+          await invokeRealMcpTool(ottoServer, "propose", step.callMcpPropose);
+          // Deliberately omit `rawInput` so `AntigravityAdapter` must recover from `argv[3]` JSONL!
+          notifyUpdate(sessionId, {
+            sessionUpdate: "tool_call",
+            toolCallId: `mcp-propose-${Date.now()}`,
+            title: "Call otto propose",
+            kind: "other",
+            status: "completed",
+          });
+        }
         if (step.callMcpReport) {
           const ottoServer = sessionMcpServers.find((s) => s.name === "otto");
           if (!ottoServer) {
@@ -359,7 +376,7 @@ async function handleRequest(msg) {
             activeCancelSignal = null;
             return;
           }
-          await invokeRealMcpReport(ottoServer, step.callMcpReport);
+          await invokeRealMcpTool(ottoServer, "report", step.callMcpReport);
           // Deliberately emit tool_call WITHOUT rawInput to prove disk audit file pickup works!
           notifyUpdate(sessionId, {
             sessionUpdate: "tool_call",

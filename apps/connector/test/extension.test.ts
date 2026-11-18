@@ -55,7 +55,7 @@ describe("otto pi extension (connector-pi.md §7, ADR-0001)", () => {
     expect(wrapPrompt("cmd-1", "do it")).toBe(`/${COMMAND_NAME} cmd-1\ndo it`);
   });
 
-  it("registers the report tool with the §7.2 fields", () => {
+  it("registers the report tool with the §7.2 fields including bounded labels", () => {
     const pi = fresh();
     const tool = pi.tools.get("report");
     expect(tool).toBeDefined();
@@ -69,7 +69,52 @@ describe("otto pi extension (connector-pi.md §7, ADR-0001)", () => {
       "question",
       "next",
       "answer",
+      "labels",
     ]);
+  });
+
+  it("keeps unbundled otto-pi.ts and report-server.mjs label vocabularies locked to @isaac2ingrid/protocol", async () => {
+    const { MAX_REPORT_LABELS, REPORT_LABEL_VOCABULARY } = await import("@isaac2ingrid/protocol");
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const pi = fresh();
+    const piDesc = String((pi.tools.get("report")!.parameters.properties.labels as { description?: string }).description ?? "");
+    const mcpSource = readFileSync(join(import.meta.dirname, "../src/mcp/report-server.mjs"), "utf8");
+    expect(piDesc).toContain(`max ${MAX_REPORT_LABELS}`);
+    expect(mcpSource).toContain(`max ${MAX_REPORT_LABELS}`);
+    for (const label of REPORT_LABEL_VOCABULARY) {
+      expect(piDesc).toContain(label);
+      expect(mcpSource).toContain(label);
+    }
+  });
+
+  it("normalizeReport preserves undefined vs [], deduplicates before capping at 3, and logs dropped entries", async () => {
+    const { normalizeReport } = await import("../src/pi-adapter.ts");
+    const omitted = normalizeReport({ status: "done", summary: "ok" });
+    expect(omitted).toEqual({ status: "done", summary: "ok" });
+    expect("labels" in omitted!).toBe(false);
+
+    const explicitEmpty = normalizeReport({ status: "done", summary: "ok", labels: [] });
+    expect(explicitEmpty).toEqual({ status: "done", summary: "ok", labels: [] });
+
+    const diagnostics: string[] = [];
+    const mixed = normalizeReport(
+      {
+        status: "done",
+        summary: "ok",
+        labels: [
+          "blocked-by-env",
+          "unknown-label",
+          "blocked-by-env",
+          "flaky-test",
+          "needs-migration",
+          "scope-creep",
+        ],
+      },
+      { onDiagnostic: (msg) => diagnostics.push(msg) },
+    );
+    expect(mixed?.labels).toEqual(["blocked-by-env", "flaky-test", "needs-migration"]);
+    expect(diagnostics).toEqual(["report.labels dropped invalid/excess entries: unknown-label, scope-creep"]);
   });
 
   it("report execute acknowledges and records the call", async () => {
@@ -162,5 +207,64 @@ describe("otto pi extension (connector-pi.md §7, ADR-0001)", () => {
     const result = beforeSettle(pi, { entries: [earlier] });
     expect(result?.entries?.[0]).toBe(earlier);
     expect(result?.entries?.[1]).toMatchObject({ customType: REMINDER_ENTRY_TYPE });
+  });
+
+  it("registers the propose tool (readonly_probe) returning queued_for_steward_decision and validates via normalizeProposal", async () => {
+    const { normalizeProposal } = await import("../src/pi-adapter.ts");
+    const pi = fresh();
+    const propose = pi.tools.get("propose");
+    expect(propose).toBeDefined();
+    expect(Object.keys(propose!.parameters.properties)).toEqual([
+      "kind",
+      "targetRepoRef",
+      "prompt",
+      "reason",
+      "proposalKey",
+    ]);
+
+    const ack = (await propose!.execute("call-p1", {
+      kind: "readonly_probe",
+      targetRepoRef: "shared-contracts",
+      prompt: "Inspect DTOs",
+      reason: "Check response shape",
+      proposalKey: "probe-dto-1",
+    })) as { content: { type: string; text: string }[] };
+    expect(ack.content[0]!.text).toContain("queued_for_steward_decision");
+
+    await expect(
+      propose!.execute("call-p2", {
+        kind: "write_task",
+        targetRepoRef: "shared-contracts",
+        prompt: "Mutate repo",
+        reason: "Not allowed",
+        proposalKey: "probe-bad",
+      }),
+    ).rejects.toThrow(/readonly_probe/);
+
+    expect(
+      normalizeProposal({
+        kind: "readonly_probe",
+        targetRepoRef: "shared-contracts",
+        prompt: "Inspect DTOs",
+        reason: "Check response shape",
+        proposalKey: "probe-dto-1",
+      }),
+    ).toEqual({
+      kind: "readonly_probe",
+      targetRepoRef: "shared-contracts",
+      prompt: "Inspect DTOs",
+      reason: "Check response shape",
+      proposalKey: "probe-dto-1",
+    });
+    expect(
+      normalizeProposal({
+        kind: "readonly_probe",
+        targetRepoRef: "shared-contracts",
+        prompt: "Inspect DTOs",
+        reason: "Check response shape",
+        proposalKey: "probe-dto-1",
+        extra: "forbidden",
+      }),
+    ).toBeNull();
   });
 });

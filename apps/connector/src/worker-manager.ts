@@ -11,6 +11,7 @@ import { PartialInterruptError } from "./agent.ts";
 import { classifyError } from "./adjudication.ts";
 import { killOrphans, listDescendants, type ProcRef } from "./descendants.ts";
 import { collectGitFacts } from "./git-facts.ts";
+import { HookExecutionError, runWorktreeHook } from "./hooks.ts";
 import { openPr, PrError, type PrExec } from "./pr.ts";
 import { acquireLock, markLocksHeldByDeadProcess, releaseLock, removeStaleLocks } from "./locks.ts";
 import { RESUME_PROMPT, PiAdapter } from "./pi-adapter.ts";
@@ -172,6 +173,8 @@ export interface WorkerManagerOptions {
   /** Knobs for the pr_worker command (issue #21): the exec seam lets tests script gh/git
    *  without a network or a GitHub account. */
   pr?: { exec?: PrExec; timeoutMs?: number };
+  /** Stage 2 (Plan B): worktree lifecycle hook knobs (tests shrink timeoutMs). */
+  hooks?: { timeoutMs?: number };
   /**
    * Persist-and-send for worker events (§11.3): the transport supplies this (ConnectorClient
    * writes the event to the durable EventLog — per-worker seq — before batching it out).
@@ -198,10 +201,22 @@ const IN_FLIGHT_STATES = new Set(["starting", "running", "recovering"]);
  * in-flight, awaiting an automatic resume (`lost`), or itself queued ahead of another. */
 const SERIAL_SLOT_STATES = new Set(["starting", "running", "recovering", "lost", "queued"]);
 
-/** §8.2/§13 (issue #16): settings that live in the connector's LocalStore and are set only
- * by the machine's owner via the CLI. A command carrying one is rejected outright — the
- * last line of defense against a compromised steward (connector-do-protocol §6.2). */
-const LOCAL_ONLY_ARGS = ["approveProject", "approve", "workspace", "workspaceMode"];
+/** §8.2/§13 (issue #16) + ADR-0022 Stage 2: settings that live in the connector's LocalStore
+ * and are set only by the machine's owner via the CLI. A command carrying one is rejected
+ * outright — the last line of defense against a compromised steward. */
+const LOCAL_ONLY_ARGS = [
+  "approveProject",
+  "approve",
+  "workspace",
+  "workspaceMode",
+  "setupHook",
+  "archiveHook",
+  "hooks",
+  "approveHooks",
+  "clearHooks",
+  "hookApprovedSha256",
+  "hookApprovedAt",
+];
 
 export class WorkerManager {
   private readonly store: LocalStore;
@@ -212,6 +227,8 @@ export class WorkerManager {
   private readonly defaultAdapter: AgentAdapter;
   private readonly worktrees: WorktreeManager;
   private readonly prOptions: { exec?: PrExec; timeoutMs?: number } | undefined;
+  private readonly hookOptions: { timeoutMs?: number } | undefined;
+  private readonly hookAborters = new Map<string, AbortController>();
   private readonly emit?: (workerId: string, fields: Record<string, unknown>) => void;
   private readonly now: () => number;
   private readonly throttles = new Map<string, ProgressThrottle>();
@@ -282,6 +299,7 @@ export class WorkerManager {
     this.defaultAdapter = this.adapters.get("pi") ?? list[0]!;
     this.worktrees = new WorktreeManager({ worktreesRoot: join(options.stateDir, "worktrees") });
     this.prOptions = options.pr;
+    this.hookOptions = options.hooks;
     this.emit = options.emit;
     this.now = options.now ?? Date.now;
     const recovery = options.recovery ?? {};
@@ -385,6 +403,7 @@ export class WorkerManager {
         });
       }
       case "cleanup_worktree": {
+        rejectLocalOnlyArgs(args);
         const workerId = commandWorkerId(args, envelopeWorkerId, kind);
         return this.cleanupWorktree(workerId, args.force === true);
       }
@@ -593,6 +612,50 @@ export class WorkerManager {
         throw new CommandError("aborted", "worker was stopped during startup");
       }
 
+      // ADR-0022 Stage 2 (Plan B): `setup` hook runs ONLY on newly created write-mode
+      // Git worktrees — never on main-checkout readonly runs, in-place write runs, or
+      // detached-HEAD `createReadonlyWorktree` checkouts. Worker stays `starting` and
+      // emits `progress{phase:"setup_hook"}` first to refresh Steward's `lastEventAt`.
+      if (useWorktree && !readonlyWorktree && worktree !== undefined && repo.hooks.setupHook !== null) {
+        await this.emitEvent(args.workerId, "progress", { phase: "setup_hook", target: "setup" });
+        if (this.stopRequested.has(args.workerId)) {
+          throw new CommandError("aborted", "worker was stopped during startup");
+        }
+        const hookAbort = new AbortController();
+        this.hookAborters.set(args.workerId, hookAbort);
+        try {
+          await runWorktreeHook({
+            phase: "setup",
+            workerId: args.workerId,
+            repoName: repo.name,
+            repoPath: repo.path,
+            worktreePath: worktree,
+            hooks: repo.hooks,
+            stateDir: this.stateDir,
+            proxy: this.store.getProxyConfig(),
+            secrets: this.redactionSecrets(),
+            timeoutMs: this.hookOptions?.timeoutMs,
+            abortSignal: hookAbort.signal,
+          });
+        } catch (hookErr) {
+          if (this.stopRequested.has(args.workerId)) {
+            throw new CommandError("aborted", "worker was stopped during startup");
+          }
+          if (hookErr instanceof HookExecutionError) {
+            throw new CommandError(hookErr.code, hookErr.message);
+          }
+          throw new CommandError(
+            "setup_hook_failed",
+            hookErr instanceof Error ? hookErr.message : String(hookErr),
+          );
+        } finally {
+          this.hookAborters.delete(args.workerId);
+        }
+        if (this.stopRequested.has(args.workerId)) {
+          throw new CommandError("aborted", "worker was stopped during startup");
+        }
+      }
+
       this.active.set(args.workerId, { repoId: args.repoId, worktree, branch, base });
       // The original task prompt, so a stall respawn can resend it with the continuation
       // note (issue #13); cleared when the run ends or the launch fails.
@@ -678,8 +741,13 @@ export class WorkerManager {
         await this.discardLaunchArtifacts(args.workerId, repo, { worktree, branch, base }, handle !== undefined);
         throw err;
       }
-      this.store.setWorkerState(args.workerId, "broken");
+      // Stage 2 (Plan B): if launch failed before the coding agent ever started (e.g.
+      // `setup_hook_failed`), roll back the freshly allocated empty worktree on the spot.
+      if (handle === undefined && worktree !== undefined) {
+        await this.discardLaunchArtifacts(args.workerId, repo, { worktree, branch, base }, false);
+      }
       const code = (err as { code?: string }).code ?? "startup_failed";
+      this.store.setWorkerState(args.workerId, "broken", code === "setup_hook_failed" ? "setup_hook_failed" : undefined);
       const message = err instanceof Error ? err.message : String(err);
       throw new CommandError(code, message);
     } finally {
@@ -740,7 +808,10 @@ export class WorkerManager {
       return;
     }
     const inFlight = worker ? IN_FLIGHT_STATES.has(worker.state) || worker.state === "lost" : false;
-    if (inFlight && this.launching.has(workerId)) this.stopRequested.add(workerId);
+    if (inFlight && this.launching.has(workerId)) {
+      this.stopRequested.add(workerId);
+      this.hookAborters.get(workerId)?.abort();
+    }
     // Cancel a pending automatic resume: the stop is the user's final word for this run.
     const timer = this.resumeTimers.get(workerId);
     if (timer) {
@@ -882,7 +953,8 @@ export class WorkerManager {
         return;
       }
       const message = err instanceof Error ? err.message : String(err);
-      await this.breakWorker(worker.workerId, "unknown", `Queued start failed: ${message}`, "startup_failed");
+      const failureCode = err instanceof CommandError && err.code === "setup_hook_failed" ? "setup_hook_failed" : "startup_failed";
+      await this.breakWorker(worker.workerId, "unknown", `Queued start failed: ${message}`, failureCode);
     }
   }
 
@@ -918,9 +990,33 @@ export class WorkerManager {
     }
     const repo = this.store.getRepo(worker.repoId);
     if (!repo) throw new CommandError("not_registered_repo", `repo '${worker.repoId}' is not registered on this machine`);
+    const isWriteWorktree = worker.mode === "write" && Boolean(worker.branch);
     try {
-      await this.worktrees.cleanup(repo.path, worker.worktree, { force });
+      await this.worktrees.cleanup(repo.path, worker.worktree, {
+        force,
+        ...(isWriteWorktree && repo.hooks.archiveHook !== null
+          ? {
+              beforeRemove: () =>
+                runWorktreeHook({
+                  phase: "archive",
+                  workerId,
+                  repoName: repo.name,
+                  repoPath: repo.path,
+                  worktreePath: worker.worktree!,
+                  hooks: repo.hooks,
+                  stateDir: this.stateDir,
+                  proxy: this.store.getProxyConfig(),
+                  secrets: this.redactionSecrets(),
+                  timeoutMs: this.hookOptions?.timeoutMs,
+                }),
+            }
+          : {}),
+      });
     } catch (err) {
+      if (err instanceof HookExecutionError) {
+        throw new CommandError(err.code, err.message);
+      }
+      if (err instanceof CommandError) throw err;
       const message = err instanceof Error ? err.message : String(err);
       throw new CommandError("worktree_dirty", message);
     }
@@ -2130,6 +2226,10 @@ export class WorkerManager {
         });
         return;
       }
+      case "proposal": {
+        await this.emitEvent(event.workerId, "proposal", { ...event.proposal });
+        return;
+      }
       case "settled": {
         const context = this.active.get(event.workerId);
         this.recordSessionTail(event.workerId); // §10 baseline: everything up to this settle is ours
@@ -2289,6 +2389,15 @@ export class WorkerManager {
       partial: activity.partial || undefined,
     });
     this.store.setSessionObservation(worker.workerId, worker.sessionFile, observation.lastEntryId);
+  }
+
+  private redactionSecrets(): string[] {
+    const out: string[] = [];
+    const creds = this.store.getCredentials();
+    if (creds?.token) out.push(creds.token);
+    const agy = this.store.getAntigravityApiKeyConfig();
+    if (agy?.apiKey) out.push(agy.apiKey);
+    return out;
   }
 
   private requireWorker(workerId: string): WorkerRow {

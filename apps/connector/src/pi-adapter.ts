@@ -22,7 +22,14 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PiProcess } from "./pi-process.ts";
 import { piCommandFromEnv, resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
-import { AgentModelObservationSchema, type AgentModelCatalog, type HistoryPage } from "@isaac2ingrid/protocol";
+import {
+  AgentModelObservationSchema,
+  normalizeReportLabels,
+  parseProposalPayload,
+  type AgentModelCatalog,
+  type HistoryPage,
+  type ProposalPayload,
+} from "@isaac2ingrid/protocol";
 import { PiModelDiscovery } from './pi-model-discovery.ts';
 
 /** Must match COMMAND_NAME in ./ext/otto-pi.ts (locked together by a test). */
@@ -441,6 +448,15 @@ export class PiAdapter implements AgentAdapter {
         if (tool === "report") {
           const report = normalizeReport(record.args);
           if (report) runtime.window.report = report;
+        } else if (tool === "propose") {
+          const proposal = normalizeProposal(record.args);
+          if (proposal) {
+            this.emit({
+              type: "proposal",
+              workerId: runtime.workerId,
+              proposal,
+            });
+          }
         }
         this.emit({
           type: "progress",
@@ -532,8 +548,12 @@ export function markerPreamble(commandId: string, text: string): string {
   return `[otto:command ${commandId}]\n${text}`;
 }
 
+export interface NormalizeReportOptions {
+  onDiagnostic?: (message: string) => void;
+}
+
 /** Validates and normalizes `report` tool args into the §7.2 payload; null when invalid. */
-export function normalizeReport(args: unknown): ReportPayload | null {
+export function normalizeReport(args: unknown, options?: NormalizeReportOptions): ReportPayload | null {
   if (typeof args !== "object" || args === null) return null;
   const raw = args as Record<string, unknown>;
   const status = raw.status;
@@ -548,6 +568,13 @@ export function normalizeReport(args: unknown): ReportPayload | null {
   if (decisions) payload.decisions = decisions;
   const leftovers = stringList(raw.leftovers);
   if (leftovers) payload.leftovers = leftovers;
+  const normalizedLabels = normalizeReportLabels(raw.labels);
+  if (normalizedLabels.labels !== undefined) payload.labels = normalizedLabels.labels;
+  if (normalizedLabels.dropped.length > 0) {
+    const diag = `report.labels dropped invalid/excess entries: ${normalizedLabels.dropped.join(", ")}`;
+    if (options?.onDiagnostic) options.onDiagnostic(diag);
+    else process.stderr.write(`[otto] ${diag}\n`);
+  }
   if (typeof raw.question === "string") payload.question = raw.question;
   if (typeof raw.next === "string") payload.next = raw.next;
   if (typeof raw.answer === "string") payload.answer = raw.answer;
@@ -560,6 +587,11 @@ export function normalizeReport(args: unknown): ReportPayload | null {
     };
   }
   return payload;
+}
+
+/** Strictly validates `propose` tool args into ProposalPayload; null when invalid. */
+export function normalizeProposal(args: unknown): ProposalPayload | null {
+  return parseProposalPayload(args);
 }
 
 function extractText(content: unknown): string {
@@ -593,7 +625,7 @@ function queueTexts(items: unknown): string[] {
 export function extractTarget(args: unknown): string | undefined {
   if (typeof args !== "object" || args === null) return undefined;
   const raw = args as Record<string, unknown>;
-  for (const key of ["file_path", "path", "filename", "command", "pattern", "query", "url"]) {
+  for (const key of ["file_path", "path", "filename", "command", "pattern", "query", "url", "targetRepoRef"]) {
     const value = raw[key];
     if (typeof value === "string" && value.length > 0) return value.slice(0, 80);
   }
