@@ -19,9 +19,10 @@ import { externalActivity, observeSession } from "./session-observation.ts";
 import { findSessionHolders } from "./session-holders.ts";
 import { ProgressThrottle } from "./progress.ts";
 import { inspectSessionTail, type SessionTail } from "./session-tail.ts";
-import { readSessionHistory } from "./session-history.ts";
+import { readClaudeSessionHistory, readSessionHistory } from "./session-history.ts";
 import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath } from "./full-session-history.ts";
 import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
+import type { ClaudeAdapter } from "./claude-adapter.ts";
 import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
@@ -1635,6 +1636,15 @@ export class WorkerManager {
    * come from `get_entries{since}` over RPC; otherwise the session JSONL is parsed directly
    * along the current branch. Normalized, truncated, capped at maxBytes, cursor-addressed.
    */
+  private resolveClaudeTranscriptPath(worker: WorkerRow): string | null {
+    if (!worker.sessionId) return null;
+    const cwd = worker.worktree ?? this.store.getRepo(worker.repoId)?.path;
+    const claudeAdapter = this.adapters.get("claude-code") as ClaudeAdapter | undefined;
+    return claudeAdapter
+      ? claudeAdapter.resolveSessionPath(cwd, worker.sessionId)
+      : claudeSessionPath(cwd, worker.sessionId);
+  }
+
   async history(workerId: string, since: string | undefined, maxBytes: number, format?: "full"): Promise<HistoryPage> {
     const worker = this.store.getWorker(workerId);
     if (!worker) throw new CommandError("not_found", `worker ${workerId} is unknown on this machine`);
@@ -1642,8 +1652,7 @@ export class WorkerManager {
       // The agent's own record on this machine, whether or not its process is still running.
       let path: string | null = worker.sessionFile ?? null;
       if (worker.agent === "claude-code") {
-        const cwd = worker.worktree ?? this.store.getRepo(worker.repoId)?.path;
-        path = worker.sessionId && cwd ? claudeSessionPath(cwd, worker.sessionId) : null;
+        path = this.resolveClaudeTranscriptPath(worker);
       } else if (worker.agent === "antigravity") {
         const defaultDir = process.env.AGY_CONFIG_DIR ?? join(homedir(), ".gemini");
         path = worker.sessionId
@@ -1662,6 +1671,13 @@ export class WorkerManager {
         // session file is now the truth — fall through instead of surfacing the race.
         if ((err as { code?: string }).code !== "not_running") throw err;
       }
+    }
+    if (worker.agent === "claude-code") {
+      const claudePath = this.resolveClaudeTranscriptPath(worker);
+      if (!claudePath) {
+        throw new CommandError("no_history", `worker ${workerId} has no Claude session file to read`);
+      }
+      return readClaudeSessionHistory(claudePath, { since, maxBytes });
     }
     if (!worker.sessionFile) {
       throw new CommandError("no_history", `worker ${workerId} has no session file to read`);

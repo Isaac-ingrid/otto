@@ -208,11 +208,13 @@ describe("claudeSessionPath", () => {
     expect(claudeSessionPath("/srv/repo-a/worktrees/w1", ID, config)).toBe(join(folder, `${ID}.jsonl`));
   });
 
-  it("falls back to the session id when the folder name is not the one it computed", () => {
+  it("falls back to the session id when the folder name is not the one it computed or cwd is absent", () => {
     const folder = join(config, "projects", "some-other-spelling-of-the-path");
     mkdirSync(folder, { recursive: true });
     writeFileSync(join(folder, `${ID}.jsonl`), "");
     expect(claudeSessionPath("/srv/repo-a", ID, config)).toBe(join(folder, `${ID}.jsonl`));
+    expect(claudeSessionPath(null, ID, config)).toBe(join(folder, `${ID}.jsonl`));
+    expect(claudeSessionPath(undefined, ID, config)).toBe(join(folder, `${ID}.jsonl`));
   });
 
   it("says there is none when Claude Code wrote nothing here, and refuses anything that is not a session id", () => {

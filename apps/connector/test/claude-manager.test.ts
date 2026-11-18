@@ -115,11 +115,104 @@ describe("hello.agents and worker identity (issue #17 AC)", () => {
 });
 
 describe("capability degradation at the manager (§3, issue #17 AC)", () => {
-  it('keeps Claude explicit model selection disabled during the pi-only rollout', async () => {
-    setup([], []);
-    expect(manager.agents.find(agent => agent.kind === 'claude-code')?.modelCatalog?.capabilities.selection).toBe('none');
-    await expect(manager.handleCommand('claude-model-gate', 'start_worker', { ...args(), model: 'sonnet' })).rejects.toMatchObject({ code: 'unsupported_model' });
-    expect(store.getWorker('w-claude-m1')).toBeNull();
+  it("unlocks Claude explicit launch model selection, rejects malformed IDs before creating a row, and preserves --model across deferred send and cold SQLite reopen", async () => {
+    const piScenario = writeScenario(dir, "pi-model-unlock", []);
+    const claudeScenario = writeClaudeScenario(
+      dir,
+      "claude-model-unlock",
+      [
+        [{ delayMs: 800 }, ...claudeReportRun({ status: "done", summary: "run 1" })],
+        [...claudeReportRun({ status: "done", summary: "run 2 deferred" })],
+        [...claudeReportRun({ status: "done", summary: "run 3 cold reopen" })],
+      ],
+      { model: "claude-sonnet-4-6-20260514" },
+    );
+    manager = new WorkerManager({
+      store,
+      stateDir,
+      adapters: [
+        fakePiAdapter(stateDir, piScenario),
+        fakeClaudeAdapter(stateDir, claudeScenario, { FAKE_CLAUDE_LOG: CLAUDE_PROMPT_LOG() }),
+      ],
+      emit: (workerId, fields) => {
+        const stored = eventLog.append(workerId, fields);
+        events.push(JSON.parse(stored.payload) as EmittedEvent);
+      },
+    });
+
+    const claudeAgent = manager.agents.find((agent) => agent.kind === "claude-code");
+    expect(claudeAgent?.modelCatalog?.capabilities).toMatchObject({
+      selection: "launch",
+      discovery: "suggested",
+      customModelInput: true,
+      idFormat: "opaque",
+    });
+
+    // Malformed opaque IDs (such as unbalanced bracket suffixes) fail before creating any worker row.
+    await expect(
+      manager.handleCommand("claude-bad-model", "start_worker", { ...args(), model: "sonnet[" }),
+    ).rejects.toMatchObject({ code: "unsupported_model" });
+    expect(store.getWorker("w-claude-m1")).toBeNull();
+
+    // 1. Start with explicit `--model sonnet[1m]` (`task-default`) and queue a mid-run deferred send.
+    await manager.handleCommand(
+      "claude-model-start",
+      "start_worker",
+      { ...args(), model: "sonnet[1m]", modelSource: "task-default" },
+    );
+    await manager.handleCommand("claude-deferred", "send", {
+      workerId: "w-claude-m1",
+      text: "follow up after run 1",
+      intent: "auto",
+    });
+
+    await waitFor(() => eventsOf("w-claude-m1", "settled").length >= 2, 15_000, "deferred claude run");
+    expect(store.getWorker("w-claude-m1")).toMatchObject({
+      requestedModel: "sonnet[1m]",
+      modelSource: "task-default",
+    });
+    expect(JSON.parse(store.getWorker("w-claude-m1")!.launchObservedModel!)).toMatchObject({
+      id: "claude-sonnet-4-6-20260514",
+      source: "init",
+    });
+
+    // 2. Reopen SQLite and rebuild WorkerManager from scratch (cold send with zero in-memory StartSpec).
+    await manager.stopProcess("w-claude-m1");
+    manager.stop();
+    store.close();
+
+    store = new LocalStore(join(stateDir, "connector.sqlite"));
+    eventLog = new EventLog(store.database);
+    manager = new WorkerManager({
+      store,
+      stateDir,
+      adapters: [
+        fakePiAdapter(stateDir, piScenario),
+        fakeClaudeAdapter(stateDir, claudeScenario, { FAKE_CLAUDE_LOG: CLAUDE_PROMPT_LOG() }),
+      ],
+      emit: (workerId, fields) => {
+        const stored = eventLog.append(workerId, fields);
+        events.push(JSON.parse(stored.payload) as EmittedEvent);
+      },
+    });
+
+    const coldSend = await manager.handleCommand("claude-cold-send", "send", {
+      workerId: "w-claude-m1",
+      text: "continue after restart",
+      intent: "auto",
+    });
+    expect(coldSend).toMatchObject({ relaunched: true });
+    await waitFor(() => eventsOf("w-claude-m1", "settled").length >= 3, 15_000, "cold send settle");
+
+    const promptRecords = readFileSync(CLAUDE_PROMPT_LOG(), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { argv: string[] });
+    expect(promptRecords).toHaveLength(3);
+    const expectedUuid = claudeSessionId("w-claude-m1");
+    expect(promptRecords[0]!.argv).toEqual(expect.arrayContaining(["--session-id", expectedUuid, "--model", "sonnet[1m]"]));
+    expect(promptRecords[1]!.argv).toEqual(expect.arrayContaining(["--resume", expectedUuid, "--model", "sonnet[1m]"]));
+    expect(promptRecords[2]!.argv).toEqual(expect.arrayContaining(["--resume", expectedUuid, "--model", "sonnet[1m]"]));
   });
   it("refuses readonly tasks and images for an agent that honestly cannot do them", async () => {
     setup([], []);
@@ -435,5 +528,89 @@ describe("PR #59 review fixes", () => {
     await managerB.handleCommand("g3", "stop_process", { workerId: "w-claude-m1" }, undefined);
     expect(store.getWorker("w-claude-m1")!.state).toBe("idle");
     managerB.stop();
+  });
+
+  it("reads both normalized and Web full-session history across multi-turn --resume runs and after cleanup_worktree", async () => {
+    const claudeConfigDir = join(dir, "claude-config");
+    const piScenario = writeScenario(dir, "pi-hist", []);
+    const claudeScenario = writeClaudeScenario(dir, "claude-hist", [
+      [
+        { emit: claudeToolUse("Edit", { file_path: "README.md" }) },
+        ...claudeReportRun({ status: "done", summary: "first leg done" }),
+      ],
+      [...claudeReportRun({ status: "done", summary: "second leg done" })],
+    ]);
+    manager = new WorkerManager({
+      store,
+      stateDir,
+      adapters: [
+        fakePiAdapter(stateDir, piScenario),
+        fakeClaudeAdapter(stateDir, claudeScenario, {
+          FAKE_CLAUDE_LOG: CLAUDE_PROMPT_LOG(),
+          CLAUDE_CONFIG_DIR: claudeConfigDir,
+        }),
+      ],
+      emit: (workerId, fields) => {
+        events.push(JSON.parse(eventLog.append(workerId, fields).payload) as EmittedEvent);
+      },
+    });
+
+    // Turn 1: initial start_worker in an isolated write worktree.
+    await manager.handleCommand("h-start-1", "start_worker", cmdArgs(args({ prompt: "First turn prompt" })), undefined);
+    await waitFor(() => eventsOf("w-claude-m1", "settled").length >= 1, 15_000, "turn 1 settle");
+
+    // Turn 2: cold send (`--resume <uuid>`) appending to the same Claude session JSONL.
+    await manager.stopProcess("w-claude-m1");
+    await manager.handleCommand(
+      "h-send-2",
+      "send",
+      { workerId: "w-claude-m1", text: "Second turn follow-up", intent: "auto" },
+      undefined,
+    );
+    await waitFor(() => eventsOf("w-claude-m1", "settled").length >= 2, 15_000, "turn 2 settle");
+    await manager.stopProcess("w-claude-m1");
+
+    // 1. Standard normalized history (`format === undefined`): both turns + tool summary + cursor pagination.
+    const normPage = await manager.history("w-claude-m1", undefined, 1024 * 1024);
+    expect(normPage.done).toBe(true);
+    expect(normPage.entries.filter((e) => e.role === "user").map((e) => e.text)).toEqual([
+      "First turn prompt",
+      "Second turn follow-up",
+    ]);
+    expect(normPage.entries.some((e) => e.tools?.some((t) => t.name === "Edit" && t.args === "README.md"))).toBe(true);
+
+    const secondUserIdx = normPage.entries.findIndex((e) => e.text === "Second turn follow-up");
+    const sinceCursor = normPage.entries[secondUserIdx - 1]!.id;
+    const normTail = await manager.history("w-claude-m1", sinceCursor, 1024 * 1024);
+    expect(normTail.entries[0]!.text).toBe("Second turn follow-up");
+
+    // 2. Clean up the isolated Git worktree (`worker.worktree` becomes null) to prove both normalized
+    //    and Web `format: "full"` still locate `<sessionUuid>.jsonl` and parse cleanly!
+    await manager.handleCommand("h-cleanup", "cleanup_worktree", { workerId: "w-claude-m1", force: true }, undefined);
+    expect(store.getWorker("w-claude-m1")!.worktree).toBeNull();
+
+    const normAfterCleanup = await manager.history("w-claude-m1", undefined, 1024 * 1024);
+    expect(normAfterCleanup.entries.map((e) => e.id)).toEqual(normPage.entries.map((e) => e.id));
+
+    const fullAfterCleanup = await manager.history("w-claude-m1", undefined, 1024 * 1024, "full");
+    expect(fullAfterCleanup.format).toBe("full");
+    expect(fullAfterCleanup.done).toBe(true);
+
+    // Reassemble with the Web Session Viewer's exact `createAssembler` + `describeRecord`!
+    // @ts-expect-error -- untyped JS module in steward/ui
+    const { createAssembler, describeRecord } = await import("../../steward/ui/session-model.js");
+    const assembler = createAssembler();
+    const described: Array<{ agent: string; blocks: Array<{ t: string; text?: string }> }> = [];
+    for (const entry of fullAfterCleanup.entries) {
+      const res = assembler.push(entry) as { record?: unknown };
+      if (res.record) {
+        described.push(
+          describeRecord(res.record) as { agent: string; blocks: Array<{ t: string; text?: string }> },
+        );
+      }
+    }
+    expect(described.every((d) => d.agent === "claude")).toBe(true);
+    expect(described.some((d) => d.blocks.some((b) => b.t === "text" && b.text === "First turn prompt"))).toBe(true);
+    expect(described.some((d) => d.blocks.some((b) => b.t === "text" && b.text === "Second turn follow-up"))).toBe(true);
   });
 });

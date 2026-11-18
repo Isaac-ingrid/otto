@@ -164,21 +164,28 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Claude Code keeps a session's transcript at `<config>/projects/<cwd, non-alphanumerics as "-">/<uuid>.jsonl`.
- * The folder name is its convention, not ours, so when the computed place is empty the session id
- * (a UUID, unique to the worker) finds the file anywhere under `projects`.
+ * The folder name is its convention, not ours, so when `cwd` is absent (e.g. a cleaned-up worktree
+ * or unregistered repo) or the computed place is empty, the session id (a UUID, unique to the
+ * worker) finds the file anywhere under `projects`.
  */
-export function claudeSessionPath(cwd: string, sessionId: string, configDir: string = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")): string | null {
+export function claudeSessionPath(
+  cwd: string | null | undefined,
+  sessionId: string,
+  configDir: string = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
+): string | null {
   if (!UUID.test(sessionId)) throw failure("no_history", "That is not a Claude Code session id.");
   const projects = join(configDir, "projects");
-  const folders = new Set([cwd]);
-  try {
-    folders.add(realpathSync(cwd)); // Claude Code names the folder after the physical working directory
-  } catch {
-    // The directory is gone (a cleaned-up worktree); the session id search below still works.
-  }
-  for (const folder of folders) {
-    const candidate = join(projects, folder.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
-    if (existsSync(candidate)) return candidate;
+  if (typeof cwd === "string" && cwd.length > 0) {
+    const folders = new Set([cwd]);
+    try {
+      folders.add(realpathSync(cwd)); // Claude Code names the folder after the physical working directory
+    } catch {
+      // The directory is gone (a cleaned-up worktree); the session id search below still works.
+    }
+    for (const folder of folders) {
+      const candidate = join(projects, folder.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
+      if (existsSync(candidate)) return candidate;
+    }
   }
   try {
     for (const entry of readdirSync(projects, { withFileTypes: true })) {

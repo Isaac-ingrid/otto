@@ -1,9 +1,10 @@
 // Agent-owned model selection is independent of the steward provider/key registry.
 import { z } from 'zod';
 
-// One bounded argv value. Opaque CLI IDs may contain colons/context suffixes (e.g. Claude);
-// strict qualified provider/model IDs exclude those. Never concatenate a shell command.
-export const AgentModelIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/:\[\]-]*$/);
+// One bounded argv value. Opaque CLI IDs may contain colons, @ version tags (Vertex), or
+// trailing context suffixes like `[1m]` (Claude); strict qualified provider/model IDs exclude
+// those. Never concatenate a shell command.
+export const AgentModelIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/@:\[\]-]*$/);
 export const AgentModelCapabilitiesSchema = z.object({
   selection: z.enum(['none', 'launch', 'idle']),
   discovery: z.enum(['none', 'suggested', 'enumerated']),
@@ -50,11 +51,28 @@ export function agentModelCatalogFor(catalogs: Record<string, AgentModelCatalog>
   return catalogs && Object.hasOwn(catalogs, agent) ? catalogs[agent] : undefined;
 }
 
+/**
+ * Validates bounded opaque CLI model identifiers (such as Claude Code aliases `sonnet`,
+ * `opusplan`, `sonnet[1m]`, Anthropic concrete versions `claude-sonnet-4-6`, Bedrock IDs/ARNs
+ * `us.anthropic.claude-sonnet-4-6-v1:0`, or Vertex IDs `claude-sonnet-4-5@20250929`).
+ * Rejects path traversal (`..`), empty segments (`//`), trailing punctuation, and malformed
+ * or mid-string bracket fragments.
+ */
+export function validateClaudeModelId(model: string): boolean {
+  if (!AgentModelIdSchema.safeParse(model).success) return false;
+  if (model.includes('..') || model.includes('//')) return false;
+  if (!/^[^\][]+(?:\[[A-Za-z0-9_-]{1,16}\])?$/.test(model)) return false;
+  const base = model.replace(/\[[A-Za-z0-9_-]{1,16}\]$/, '');
+  if (/[/:@.]$/.test(base)) return false;
+  return true;
+}
+
 /** Absent capabilities (old connectors/adapters) permit only following the agent default. */
 export function acceptsAgentModel(catalog: AgentModelCatalog | undefined, model: string | null | undefined): boolean {
   if (model == null) return true;
   if (!AgentModelIdSchema.safeParse(model).success || !catalog || catalog.capabilities.selection === 'none') return false;
   if (catalog.capabilities.idFormat === 'qualified' && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(model) || !model.includes('/') || model.endsWith('/'))) return false;
+  if (catalog.capabilities.idFormat === 'opaque' && !validateClaudeModelId(model)) return false;
   const listed = catalog.models.some(entry => entry.id === model);
   if (catalog.capabilities.discovery === 'enumerated') return catalog.status === 'ready' && listed;
   return listed || catalog.capabilities.customModelInput;

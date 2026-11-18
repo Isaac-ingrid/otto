@@ -1,10 +1,6 @@
 # ADR-0021: Local-agent model defaults are adapter capabilities and immutable worker requests
 
-Status: owner-authorized pi-only pilot deployed; this Windows connector was upgraded locally.
-The owner confirmed normal pi-only operation and authorized committing/pushing this batch;
-no npm publication is authorized. The local-pi discovery follow-up below was also owner-authorized
-and deployed, with a real metadata-only Settings/Machines refresh check (experiment 0010). Claude explicit selection, broader real recovery acceptance and
-independent implementation review remain pending.
+Status: pi pilot deployed and verified (experiments 0009–0012); Claude Code (`claude-code`) explicit launch model selection (`selection: launch`, `idFormat: opaque`, `validateClaudeModelId`) unlocked in source with isolated `fake-claude` self-test and reproducible live driver ([Experiment 0013](../research/experiments/0013-claude-model-selection-acceptance.md)); real-CLI `--live` execution awaits a machine with `claude` installed; no npm publication is authorized.
 
 ## Context
 

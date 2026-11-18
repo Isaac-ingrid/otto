@@ -26,4 +26,9 @@ command check. It does not accept manual/stall recovery or production daemon sup
 resume and first watchdog respawn after an OS-induced stall, using unchanged 8-minute silence
 and real CPU sampling. Both scoped cases passed; second-stall/changed-task cases remain unaccepted.
 
+[Experiment 0013](0013-claude-model-selection-acceptance.md) unlocks `claude-code` explicit launch
+model selection (`selection: launch`, `idFormat: opaque`), adds bounded Claude model ID validation
+across Steward and Connector, and provides `0013-claude-model-selection-driver.mjs` (`--preflight`,
+`--selftest`, and `--live --confirm-paid`).
+
 No automatic acceptance, agent launch, or production write is implied by adding a record.

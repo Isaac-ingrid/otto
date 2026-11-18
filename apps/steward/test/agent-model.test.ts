@@ -160,4 +160,63 @@ describe('machine × agent model defaults', () => {
       expect(JSON.parse(row.payload)).toMatchObject({ model: 'model-a', modelSource: 'task-default' });
     });
   });
+
+  it('supports claude-code opaque launch catalog (aliases, [1m], Vertex @) and rejects malformed opaque IDs at Settings save', async () => {
+    const claudeCatalog: AgentModelCatalog = {
+      capabilities: {
+        selection: 'launch',
+        discovery: 'suggested',
+        customModelInput: true,
+        actualModelObservation: true,
+        thinkingSelection: false,
+        idFormat: 'opaque',
+      },
+      status: 'ready',
+      models: ['sonnet', 'opus', 'haiku', 'opusplan'].map(id => ({ id, name: id })),
+    };
+    const paired = await pairDevice('mac-claude');
+    const connected = await connectAndHello(paired.deviceId, paired.token, 1, {
+      agents: [
+        {
+          kind: 'claude-code',
+          version: '2.0.0',
+          capabilities: { steer: false, followUp: false, interrupt: true, resume: true, history: true, images: false, structuredReport: true, readonly: false },
+          modelCatalog: claudeCatalog,
+        },
+      ],
+      repos: [{ repoId: '/srv/claude-repo', name: 'claude-repo', path: '/srv/claude-repo', defaultBranch: 'main', remote: '' }],
+    });
+    sockets.push(connected.ws);
+
+    const cookie = await webLogin();
+    const { csrf } = await (await SELF.fetch('https://example.com/app/api/workspace', { headers: { cookie } })).json() as { csrf: string };
+    const setClaude = (model: unknown) =>
+      SELF.fetch('https://example.com/app/api/settings/agent-model', {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+        body: JSON.stringify({ deviceId: paired.deviceId, agent: 'claude-code', model }),
+      });
+
+    expect((await setClaude('sonnet[')).status).toBe(409);
+    expect((await setClaude('anthropic:')).status).toBe(409);
+
+    expect((await setClaude('claude-sonnet-4-5@20250929')).status).toBe(200);
+    expect((await setClaude('sonnet[1m]')).status).toBe(200);
+
+    const dispatched = await ownerStub().dispatchForTest({
+      newTitle: 'Claude 模型派发',
+      prompt: '修复测试',
+      repoRef: 'claude-repo',
+      mode: 'write',
+      agent: 'claude-code',
+    });
+    expect(dispatched.kind).toBe('dispatched');
+    const cmd = await connected.reader.nextWhere(frame => frame.t === 'cmd' && frame.kind === 'start_worker');
+    expect(cmd.args).toMatchObject({
+      agent: 'claude-code',
+      mode: 'write',
+      model: 'sonnet[1m]',
+      modelSource: 'task-default',
+    });
+  });
 });

@@ -1,12 +1,18 @@
 // Session-history reads (connector-pi.md §11.4): the JSONL fallback parses the session file
 // along the CURRENT branch (walking back from the leaf via parentId — forks leave off-branch
 // entries in the file), normalizes to roles/text/tool summaries, truncates, and caps at
-// maxBytes with a pagination cursor.
+// maxBytes with a pagination cursor. Claude Code transcripts are normalized via
+// `readClaudeSessionHistory` / `normalizeClaudeEntries`.
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { normalizeSessionEntries, readSessionHistory } from "../src/session-history.ts";
+import {
+  normalizeClaudeEntries,
+  normalizeSessionEntries,
+  readClaudeSessionHistory,
+  readSessionHistory,
+} from "../src/session-history.ts";
 
 let dir: string;
 
@@ -79,10 +85,9 @@ describe("readSessionHistory (JSONL along the current branch)", () => {
     ]);
     const page = readSessionHistory(file);
     const tools = page.entries[1]!.tools!;
-    expect(tools).toHaveLength(51); // 50 summaries + the count marker
+    expect(tools).toHaveLength(51);
     expect(tools[49]).toEqual({ name: "bash", args: "echo 49" });
     expect(tools[50]).toEqual({ name: "+4950 more tool calls" });
-    // The normalized entry stays far below the 256 KiB chunk cap.
     expect(Buffer.byteLength(JSON.stringify(page.entries[1]))).toBeLessThan(16 * 1024);
   });
 
@@ -115,7 +120,6 @@ describe("readSessionHistory (JSONL along the current branch)", () => {
     expect(page.entries.map((e) => e.id)).toEqual(["e1"]);
     expect(page.done).toBe(false);
     expect(page.cursor).toBe("e1");
-    // Continuing from the cursor delivers the rest of the branch.
     const rest = readSessionHistory(file, { since: page.cursor! });
     expect(rest.entries.map((e) => e.id)).toEqual(["e2", "e7"]);
   });
@@ -131,7 +135,7 @@ describe("readSessionHistory (JSONL along the current branch)", () => {
     const lines = [
       JSON.stringify({ type: "session", version: 3, id: "w-torn" }),
       JSON.stringify(entry("e1", null, userMessage("hello"))),
-      JSON.stringify(entry("e2", "e1", assistantMessage([{ type: "text", text: "half-writ" }]))).slice(0, 40), // torn
+      JSON.stringify(entry("e2", "e1", assistantMessage([{ type: "text", text: "half-writ" }]))).slice(0, 40),
     ];
     writeFileSync(path, lines.join("\n") + "\n");
     const page = readSessionHistory(path);
@@ -159,5 +163,115 @@ describe("normalizeSessionEntries (the live get_entries path's shared normalizer
     const page = normalizeSessionEntries([entry("e0", null, { type: "message", message: { role: "system", content: "You are…" } })]);
     expect(page.entries).toEqual([]);
     expect(page.done).toBe(true);
+  });
+});
+
+describe("readClaudeSessionHistory & normalizeClaudeEntries (Claude Code JSONL transcripts)", () => {
+  function writeClaudeFixture(name: string, records: Array<Record<string, unknown>>, trailingRaw = ""): string {
+    const path = join(dir, `${name}.jsonl`);
+    const body = records.map((r) => JSON.stringify(r)).join("\n") + "\n" + trailingRaw;
+    writeFileSync(path, body, "utf8");
+    return path;
+  }
+
+  it("normalizes Claude user/assistant records, preserves sibling parallel tool_use entries, and skips sidechains, pure tool_result wrappers, and bookkeeping", () => {
+    const records = [
+      { type: "system", subtype: "init", uuid: "sys-1", content: "init" },
+      { type: "user", uuid: "u-1", parentUuid: null, message: { role: "user", content: "Inspect auth and config" } },
+      // Parallel sibling assistant tool_use entries sharing parentUuid "u-1" (must BOTH be kept!):
+      {
+        type: "assistant",
+        uuid: "a-1a",
+        parentUuid: "u-1",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "internal reasoning" },
+            { type: "text", text: "Reading auth..." },
+            { type: "tool_use", id: "tu-1", name: "Read", input: { file_path: "src/auth.ts" } },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        uuid: "a-1b",
+        parentUuid: "u-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tu-2", name: "Bash", input: { command: "git status --short" } }],
+        },
+      },
+      // Pure tool_result user wrapper (must be skipped like pi's role='toolResult'):
+      {
+        type: "user",
+        uuid: "u-toolres",
+        parentUuid: "a-1b",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tu-1", content: "export function login() {}" }],
+        },
+      },
+      // Sub-agent sidechain entry (must be skipped in normalized view):
+      {
+        type: "assistant",
+        uuid: "a-side",
+        parentUuid: "u-1",
+        isSidechain: true,
+        message: { role: "assistant", content: "sub-agent internal note" },
+      },
+      // Thinking-only assistant entry with no text or tool calls (skipped):
+      {
+        type: "assistant",
+        uuid: "a-think-only",
+        parentUuid: "u-toolres",
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "pondering" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a-final",
+        parentUuid: "u-toolres",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "All checks passed." }],
+        },
+      },
+      { type: "file-history-snapshot", messageId: "a-final" },
+    ];
+
+    // Also append an unterminated trailing line (no newline yet -> mid-write by live claude):
+    const halfWritten = '{"type":"assistant","uuid":"a-writing","message":{"role":"assistant","content":"still str';
+    const file = writeClaudeFixture("claude-1", records, halfWritten);
+
+    const page = readClaudeSessionHistory(file);
+    expect(page.done).toBe(true);
+    expect(page.cursor).toBe("a-final");
+    expect(page.entries).toEqual([
+      { id: "u-1", role: "user", text: "Inspect auth and config" },
+      {
+        id: "a-1a",
+        role: "assistant",
+        text: "Reading auth...",
+        tools: [{ name: "Read", args: "src/auth.ts" }],
+      },
+      {
+        id: "a-1b",
+        role: "assistant",
+        text: "",
+        tools: [{ name: "Bash", args: "git status --short" }],
+      },
+      { id: "a-final", role: "assistant", text: "All checks passed." },
+    ]);
+
+    // Cursor pagination (`since`) and byte budget (`maxBytes`) work identically to pi!
+    const afterFirstTool = readClaudeSessionHistory(file, { since: "a-1a" });
+    expect(afterFirstTool.entries.map((e) => e.id)).toEqual(["a-1b", "a-final"]);
+
+    const firstEntryBytes = Buffer.byteLength(JSON.stringify(page.entries[0]), "utf8");
+    const budgeted = normalizeClaudeEntries(records, { maxBytes: firstEntryBytes + 8 });
+    expect(budgeted.done).toBe(false);
+    expect(budgeted.cursor).toBe("u-1");
+    expect(budgeted.entries).toHaveLength(1);
+    const tail = normalizeClaudeEntries(records, { since: budgeted.cursor! });
+    expect(tail.entries.map((e) => e.id)).toEqual(["a-1a", "a-1b", "a-final"]);
   });
 });

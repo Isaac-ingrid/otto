@@ -20,14 +20,27 @@ import type {
   StartSpec,
   WorkerHandle,
 } from "./agent.ts";
+import {
+  AgentModelObservationSchema,
+  validateClaudeModelId,
+  type AgentModelCatalog,
+  type HistoryPage,
+} from "@isaac2ingrid/protocol";
 import { AdapterError } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
+import { claudeSessionPath } from "./full-session-history.ts";
 import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, WORKER_SYSTEM_PROMPT } from "./install.ts";
 import { resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
+import {
+  normalizeClaudeEntries,
+  readClaudeSessionHistory,
+  type ClaudeTranscriptRecord,
+} from "./session-history.ts";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { appendCapped } from "./logger.ts";
@@ -93,8 +106,9 @@ const CLAUDE_CAPABILITIES: AgentCapabilities = {
   // still works and the fixed resume prompt covers half-finished tool calls (§9.2).
   interrupt: true,
   resume: true,
-  // Claude Code keeps transcripts under ~/.claude; no raw-history read is exposed (MVP).
-  history: false,
+  // Transcripts live at `<claudeConfig>/projects/<cwd-slug>/<sessionUuid>.jsonl` (with live
+  // stream fallback before the first disk flush).
+  history: true,
   // -p reads the prompt from stdin as text; there is no image channel.
   images: false,
   structuredReport: true,
@@ -129,6 +143,8 @@ interface WorkerRuntime {
   sessionId: string;
   proposalsFile: string;
   emittedProposalKeys: Set<string>;
+  /** In-flight transcript fallback while running before/without disk flush. */
+  liveEntries: ClaudeTranscriptRecord[];
   /** Set when the connector itself ends this process; makes exits "expected". */
   stopping: boolean;
   /** An interrupt killed this run before its `result`; the exit settles it as aborted. */
@@ -143,17 +159,48 @@ interface WorkerRuntime {
   buffered: RawAdapterEvent[] | null;
 }
 
+export const CLAUDE_SUGGESTED_MODELS = [
+  { id: "sonnet", name: "sonnet" },
+  { id: "opus", name: "opus" },
+  { id: "haiku", name: "haiku" },
+  { id: "opusplan", name: "opusplan" },
+] as const;
+
 export class ClaudeAdapter implements AgentAdapter {
   readonly kind = "claude-code" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
   readonly modelCatalog = {
-    // Pi-only rollout: retain Claude's existing default behavior, but do not advertise
-    // explicit model selection before real Claude startup/resume acceptance.
-    capabilities: { selection: 'none', discovery: 'suggested', customModelInput: false, actualModelObservation: true, thinkingSelection: false },
-    status: 'ready',
-    // CLI aliases are suggestions and may resolve to changing concrete models.
-    models: ['sonnet', 'opus', 'haiku'].map(id => ({ id, name: id })),
-  } satisfies import('@isaac2ingrid/protocol').AgentModelCatalog;
+    // ADR-0021 Decisions 2, 3, 8, 9: headless `claude -p --model <id>` selects at launch,
+    // accepts CLI aliases (`sonnet`, `opus`, `haiku`, `opusplan`, `sonnet[1m]`) as well as
+    // concrete Anthropic / Bedrock / Vertex / gateway model IDs, and reports the resolved
+    // concrete model in `system/init.model` separately from the requested value.
+    capabilities: {
+      selection: "launch",
+      discovery: "suggested",
+      customModelInput: true,
+      actualModelObservation: true,
+      thinkingSelection: false,
+      idFormat: "opaque",
+    },
+    status: "ready",
+    models: CLAUDE_SUGGESTED_MODELS.map((m) => ({ ...m })),
+  } satisfies AgentModelCatalog;
+
+  validateModel(model: string): boolean {
+    return validateClaudeModelId(model);
+  }
+
+  /** Effective Claude config directory (`options.env.CLAUDE_CONFIG_DIR` -> `process.env.CLAUDE_CONFIG_DIR` -> `~/.claude`). */
+  claudeConfigDir(): string {
+    const envDir = this.options.env?.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR;
+    return typeof envDir === "string" && envDir.length > 0 ? envDir : join(homedir(), ".claude");
+  }
+
+  /** Locates `<claudeConfig>/projects/.../<sessionId>.jsonl` for this adapter's config root. */
+  resolveSessionPath(cwd: string | null | undefined, sessionId: string | null | undefined): string | null {
+    if (!sessionId) return null;
+    return claudeSessionPath(cwd, sessionId, this.claudeConfigDir());
+  }
 
   private readonly options: ClaudeAdapterOptions;
   private readonly workerLogsDir: string | null;
@@ -273,6 +320,13 @@ export class ClaudeAdapter implements AgentAdapter {
       sessionId,
       proposalsFile,
       emittedProposalKeys: new Set(),
+      liveEntries: [
+        {
+          type: "user",
+          uuid: `live-user-${spec.commandId || sessionId}`,
+          message: { role: "user", content: spec.prompt },
+        },
+      ],
       stopping: false,
       interrupting: false,
       resultSeen: false,
@@ -307,8 +361,15 @@ export class ClaudeAdapter implements AgentAdapter {
           `otto MCP server status '${mcp.status}': the report tool is not available; refusing to run unreported`,
         );
       }
-      if (typeof init.model === 'string' && init.model.length > 0 && init.model.length <= 256 && !/[\x00-\x1f\x7f]/.test(init.model)) {
-        spec.onModelObserved?.({ id: init.model, source: 'init', observedAt: Date.now() });
+      if (typeof init.model === "string") {
+        const observation = AgentModelObservationSchema.safeParse({
+          id: init.model,
+          source: "init",
+          observedAt: Date.now(),
+        });
+        if (observation.success) {
+          spec.onModelObserved?.(observation.data);
+        }
       }
       const handle: WorkerHandle = { workerId: spec.workerId, sessionId, cwd: spec.cwd };
       setImmediate(() => this.flushBuffered(runtime));
@@ -414,6 +475,20 @@ export class ClaudeAdapter implements AgentAdapter {
     return out;
   }
 
+  /** §11.4 live path: reads Claude Code's on-disk `<sessionUuid>.jsonl` when already flushed,
+   *  or falls back to the in-flight streamed entries while the child process is still running. */
+  async history(id: string, since: string | undefined, maxBytes: number): Promise<HistoryPage> {
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.process.hasExited) {
+      throw new AdapterError("not_running", `no live claude process for worker ${id}`);
+    }
+    const diskPath = this.resolveSessionPath(runtime.cwd, runtime.sessionId);
+    if (diskPath) {
+      return readClaudeSessionHistory(diskPath, { since, maxBytes });
+    }
+    return normalizeClaudeEntries(runtime.liveEntries, { since, maxBytes });
+  }
+
   workerActivity(): Array<{ workerId: string; pid: number; lastOutputAt: number }> {
     const out: Array<{ workerId: string; pid: number; lastOutputAt: number }> = [];
     for (const [workerId, runtime] of this.runtimes) {
@@ -462,6 +537,20 @@ export class ClaudeAdapter implements AgentAdapter {
         const message = record.message as Record<string, unknown> | undefined;
         if (!message) return;
         runtime.turn += 1;
+        const liveEntryId =
+          typeof record.uuid === "string" && record.uuid.length > 0
+            ? record.uuid
+            : typeof message.id === "string" && message.id.length > 0
+              ? message.id
+              : `live-assistant-${runtime.turn}`;
+        runtime.liveEntries.push({
+          type: "assistant",
+          uuid: liveEntryId,
+          message: {
+            role: "assistant",
+            content: message.content,
+          },
+        });
         runtime.pendingText = "";
         const content = Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : [];
         for (const block of content) {
@@ -505,10 +594,13 @@ export class ClaudeAdapter implements AgentAdapter {
         const errored =
           record.is_error === true || (typeof record.subtype === "string" && record.subtype.startsWith("error"));
         if (errored) {
+          const errorsList = Array.isArray(record.errors)
+            ? record.errors.filter((e): e is string => typeof e === "string" && e.trim().length > 0).join("; ")
+            : "";
           const detail =
             typeof record.result === "string" && record.result.length > 0
               ? record.result
-              : String(record.subtype ?? "error during execution");
+              : errorsList || runtime.window.lastAssistant?.text?.trim() || String(record.subtype ?? "error during execution");
           runtime.window.lastAssistant = {
             stopReason: "error",
             errorMessage: detail,
@@ -597,6 +689,7 @@ export class ClaudeProcess {
   private stdoutBuffer = "";
   private readonly decoder = new StringDecoder("utf8");
   private stderrTail = "";
+  private preInitError = "";
   private readonly stderrLimit = 64 * 1024;
   private exited = false;
   private exitWaiters: (() => void)[] = [];
@@ -643,12 +736,14 @@ export class ClaudeProcess {
   waitForInit(timeoutMs: number): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       if (this.exited || !this.child) {
-        reject(new Error(`claude process exited before init; stderr tail:\n${this.stderrTail.slice(-2000)}`));
+        const detail = redactText(this.preInitError || this.stderrTail.slice(-2000));
+        reject(new Error(`claude process exited before init; detail:\n${detail}`));
         return;
       }
       const timer = setTimeout(() => {
         this.initWaiter = null;
-        reject(new Error(`no system/init within ${timeoutMs}ms; stderr tail:\n${this.stderrTail.slice(-2000)}`));
+        const detail = redactText(this.preInitError || this.stderrTail.slice(-2000));
+        reject(new Error(`no system/init within ${timeoutMs}ms; detail:\n${detail}`));
       }, timeoutMs);
       timer.unref?.();
       this.initWaiter = { resolve, reject, timer };
@@ -719,6 +814,18 @@ export class ClaudeProcess {
         this.initWaiter = null;
         clearTimeout(waiter.timer);
         waiter.resolve(record);
+      } else if (
+        this.initWaiter &&
+        record.type === "result" &&
+        (record.is_error === true || (typeof record.subtype === "string" && record.subtype.startsWith("error")))
+      ) {
+        const errorsList = Array.isArray(record.errors)
+          ? record.errors.filter((e): e is string => typeof e === "string" && e.trim().length > 0).join("; ")
+          : "";
+        this.preInitError =
+          typeof record.result === "string" && record.result.length > 0
+            ? record.result
+            : errorsList || String(record.subtype ?? "error before init");
       }
       this.options.onEvent(record);
     }
@@ -734,13 +841,18 @@ export class ClaudeProcess {
 
   private handleExit(code: number | null, signal: NodeJS.Signals | null, error?: Error): void {
     if (this.exited) return;
+    const trailing = this.decoder.end();
+    if (trailing || this.stdoutBuffer.length > 0) {
+      this.onStdoutChunk(Buffer.from(`${trailing}\n`, "utf8"));
+    }
     this.exited = true;
     if (error) this.appendStderr(Buffer.from(`\n[otto] spawn error: ${error.message}\n`));
     if (this.initWaiter) {
       const waiter = this.initWaiter;
       this.initWaiter = null;
       clearTimeout(waiter.timer);
-      waiter.reject(new Error(`claude process exited (code=${code} signal=${signal}); stderr tail:\n${this.stderrTail.slice(-2000)}`));
+      const detail = redactText([this.preInitError, this.stderrTail.slice(-2000)].filter(Boolean).join("\n"));
+      waiter.reject(new Error(`claude process exited (code=${code} signal=${signal}); stderr tail:\n${detail}`));
     }
     this.options.onExit({ code, signal });
     for (const waiter of this.exitWaiters) waiter();

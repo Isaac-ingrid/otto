@@ -13,24 +13,11 @@
 //   FAKE_CLAUDE_SCRIPT    path to the JSON scenario file (required)
 //   FAKE_CLAUDE_LOG       path to append consumed prompts as JSON lines (assertions)
 //   FAKE_CLAUDE_ARGV_LOG  path to append the child argv at startup (invocation-shape tests)
-//
-// Scenario file:
-//   {
-//     "startup": { "delayMs": 300, "exit": 9, "mcpStatus": "connected" },
-//     "runs": [ [ <step>, ... ], ... ]   // runs[k] plays on the k-th invocation
-//   }
-//   The run index lives in `<script>.runs` (a plain counter file) so successive PROCESSES
-//   consume successive runs — every claude run is a fresh process, unlike fake-pi.
-// Step:
-//   { "delayMs": 20 }                // pause
-//   { "emit": { ... } }              // one verbatim stream-json event
-//   { "shell": "git add -A" }        // run in cwd, ignore failures
-//   { "result": { ... } }            // override the final result event's fields
-//   { "noResult": true }             // suppress the final result (crash shapes; pair with exit)
-//   { "exit": 7 }                    // crash the fake process
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+//   CLAUDE_CONFIG_DIR     when set, appends realistic `<CLAUDE_CONFIG_DIR>/projects/<slug>/<sessionId>.jsonl`
+//                         transcript lines so session-history and full-session-history tests run end-to-end
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { exec } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 const scriptPath = process.env.FAKE_CLAUDE_SCRIPT;
 if (!scriptPath) {
@@ -49,6 +36,26 @@ function argValue(flag) {
   return idx !== -1 && argv[idx + 1] ? argv[idx + 1] : null;
 }
 const sessionId = argValue("--session-id") ?? argValue("--resume") ?? "00000000-0000-4000-8000-000000000001";
+const modelArg = argValue("--model");
+
+function transcriptFilePath() {
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  if (!configDir) return null;
+  let physicalCwd = process.cwd();
+  try {
+    physicalCwd = realpathSync(physicalCwd);
+  } catch {
+    // keep process.cwd()
+  }
+  const folder = join(configDir, "projects", physicalCwd.replace(/[^a-zA-Z0-9]/g, "-"));
+  mkdirSync(folder, { recursive: true });
+  return join(folder, `${sessionId}.jsonl`);
+}
+
+function appendTranscriptRecord(filePath, record) {
+  if (!filePath) return;
+  appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -68,13 +75,35 @@ function nextRunIndex() {
   return current;
 }
 
-async function playRun(steps) {
+async function playRun(steps, runIndex, transcriptPath, parentEntryUuid) {
   const merged = Array.isArray(steps) ? steps : [];
   let resultOverride = null;
   let noResult = false;
+  let lastUuid = parentEntryUuid;
+  let stepSeq = 0;
   for (const step of merged) {
     if (step.delayMs) await sleep(step.delayMs);
-    if (step.emit) writeLine(step.emit);
+    if (step.emit) {
+      writeLine(step.emit);
+      if (transcriptPath && step.emit.type === "assistant" && step.emit.message) {
+        stepSeq += 1;
+        const uuid = step.emit.uuid ?? `fc-a-${runIndex}-${stepSeq}`;
+        appendTranscriptRecord(transcriptPath, {
+          type: "assistant",
+          uuid,
+          parentUuid: lastUuid,
+          isSidechain: false,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          message: {
+            role: "assistant",
+            ...(modelArg || scenario.startup?.model ? { model: scenario.startup?.model ?? modelArg } : {}),
+            ...step.emit.message,
+          },
+        });
+        lastUuid = uuid;
+      }
+    }
     if (step.shell) await new Promise((r) => exec(step.shell, () => r(undefined)));
     if (step.result) resultOverride = step.result;
     if (step.noResult) noResult = true;
@@ -100,6 +129,30 @@ async function main() {
   const startup = scenario.startup ?? {};
   if (startup.delayMs) await sleep(startup.delayMs);
   if (startup.exit !== undefined) process.exit(startup.exit);
+  const runIndex = nextRunIndex();
+  const transcriptPath = transcriptFilePath();
+  let lastUuid = null;
+  if (transcriptPath && existsSync(transcriptPath)) {
+    const existing = readFileSync(transcriptPath, "utf8").trim().split("\n").filter(Boolean);
+    if (existing.length > 0) {
+      try {
+        lastUuid = JSON.parse(existing[existing.length - 1]).uuid ?? null;
+      } catch {
+        lastUuid = null;
+      }
+    }
+  }
+  const userUuid = `fc-u-${runIndex}`;
+  appendTranscriptRecord(transcriptPath, {
+    type: "user",
+    uuid: userUuid,
+    parentUuid: lastUuid,
+    isSidechain: false,
+    sessionId,
+    timestamp: new Date().toISOString(),
+    message: { role: "user", content: prompt },
+  });
+
   writeLine({
     type: "system",
     subtype: "init",
@@ -107,8 +160,8 @@ async function main() {
     session_id: sessionId,
     mcp_servers: [{ name: "otto", status: startup.mcpStatus ?? "connected" }],
   });
-  const run = scenario.runs?.[nextRunIndex()] ?? [];
-  await playRun(run);
+  const run = scenario.runs?.[runIndex] ?? [];
+  await playRun(run, runIndex, transcriptPath, userUuid);
 }
 
 // The prompt is consumed only on stdin EOF (spike-conclusions §2) — this is the assertion.

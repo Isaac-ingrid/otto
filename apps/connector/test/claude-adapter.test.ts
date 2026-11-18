@@ -132,14 +132,14 @@ describe("invocation contract (spike-conclusions §2)", () => {
     30_000,
   );
 
-  it("declares its capabilities honestly: no steer, no follow-up, no images, no readonly", () => {
+  it("declares its capabilities honestly: history=true, no steer, no follow-up, no images, no readonly", () => {
     setup([]);
     expect(adapter.capabilities).toMatchObject({
       steer: false,
       followUp: false,
       interrupt: true,
       resume: true,
-      history: false,
+      history: true,
       images: false,
       structuredReport: true,
       readonly: false,
@@ -406,5 +406,30 @@ describe("detectClaude / defaultAdapters (hello.agents advertises only what is i
     expect(defaultAdapters(stateDir, missing, missing).map((a) => a.kind)).toEqual([
       "pi",
     ]);
+  });
+
+  it("serves in-flight streamed history while running even before any disk JSONL flush", async () => {
+    setup([
+      [
+        { emit: claudeToolUse("Bash", { command: "git diff --stat" }) },
+        { emit: claudeAssistantText("Checking diff...", "tool_use") },
+        { delayMs: 600 },
+        ...(claudeReportRun({ status: "done", summary: "done" }) as unknown as Array<Record<string, unknown>>),
+      ],
+    ]);
+    await adapter.start(
+      spec({
+        workerId: "w-claude-live-hist",
+        threadId: "t-hist",
+        prompt: "Inspect repo changes",
+        commandId: "cmd-live-hist",
+      }),
+    );
+    await waitFor(() => events.some((e) => e.type === "progress" && e.phase === "thinking"), 5_000, "streamed turn");
+    const livePage = await adapter.history!("w-claude-live-hist", undefined, 1024 * 1024);
+    expect(livePage.done).toBe(true);
+    expect(livePage.entries[0]).toMatchObject({ role: "user", text: "Inspect repo changes" });
+    expect(livePage.entries.some((e) => e.role === "assistant" && e.tools?.[0]?.name === "Bash")).toBe(true);
+    await adapter.stopProcess("w-claude-live-hist");
   });
 });
