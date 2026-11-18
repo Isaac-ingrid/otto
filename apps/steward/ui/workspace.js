@@ -299,7 +299,7 @@ function renderFeed(stick) {
 
 // ---- the main pane: the conversation, or one worker's recorded session --------------------------------------
 
-const agentName = (agent) => ({ pi: 'pi', 'claude-code': 'Claude Code' }[agent] ?? agent);
+const agentName = (agent) => ({ pi: 'pi', 'claude-code': 'Claude Code', antigravity: 'Antigravity' }[agent] ?? agent);
 
 function urlFor(threadId, workerId) {
   return threadId ? `/app/threads/${threadId}${workerId ? `/workers/${workerId}` : ''}` : '/app';
@@ -535,7 +535,7 @@ function workerNode(thread, worker) {
   const pr = worker.pr;
   return h('div', { class: 'worker-card' },
     h('div', { class: 'worker-title' },
-      h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
+      h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent === 'antigravity' ? '✦' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
       h('span', { class: 'worker-state' }, h('span', { class: `status-dot ${active ? 'green' : 'gray'}` }), tOr(`worker${cap(worker.state)}`, worker.state))),
     h('div', { class: 'worker-meta' }, [worker.machine, worker.unreachable ? t('unreachable') : null].filter(Boolean).join(' · ')),
     h('div', { class: 'worker-facts' }, t('agentModelRequested', { model: worker.requestedModel ?? t('agentModelFollow') })),
