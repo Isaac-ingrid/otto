@@ -30,7 +30,15 @@ export const RepoSchema = z.object({
   defaultBranch: z.string(),
   remote: z.string(),
   capability: RepoCapabilitySchema.optional(),
+  /** ADR-0022 Stage 2 (Plan B): boolean-only capability summary for worktree hooks.
+   *  Never carries script contents or machine-local hook paths. */
+  capabilityKind: z.enum(["git", "plain"]).optional(),
+  hasSetupHook: z.boolean().optional(),
+  hasArchiveHook: z.boolean().optional(),
+  approved: z.boolean().optional(),
 });
+
+export type Repo = z.infer<typeof RepoSchema>;
 
 /** The one place a `Repo` (old wire shape, new wire shape, or a mix mid-rollout) becomes a
  *  real `RepoCapability`. Every reader should call this instead of reading `.defaultBranch`/

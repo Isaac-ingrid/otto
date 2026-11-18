@@ -12,3 +12,5 @@ export * from "./directories.ts";
 export * from "./direct-worker-cmd.ts";
 export * from "./thread-subscription.ts";
 export * from './agent-models.ts';
+export * from "./report.ts";
+export * from "./proposal.ts";

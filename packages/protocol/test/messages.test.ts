@@ -105,6 +105,38 @@ describe("RepoSchema / capabilityOf (issue #88: Git as a detected capability)", 
     const plain = { ...legacyRepo, capability: { kind: "plain" as const } };
     expect(capabilityOf(plain)).toEqual({ kind: "plain" });
   });
+
+  it("accepts Stage 2 boolean hook capability summaries and strips any local script path fields (ADR-0022)", () => {
+    const parsed = RepoSchema.safeParse({
+      ...legacyRepo,
+      capability: { kind: "git", gitRoot: "/r", defaultBranch: "main", remote: "git@x:r.git" },
+      capabilityKind: "git",
+      hasSetupHook: true,
+      hasArchiveHook: false,
+      approved: true,
+      setupHook: "/Users/alice/.otto/hooks/setup.sh",
+      archiveHook: "archive.sh",
+      hookApprovedSha256: "a".repeat(64),
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data).toMatchObject({
+      capabilityKind: "git",
+      hasSetupHook: true,
+      hasArchiveHook: false,
+      approved: true,
+    });
+    expect("setupHook" in parsed.data).toBe(false);
+    expect("archiveHook" in parsed.data).toBe(false);
+    expect("hookApprovedSha256" in parsed.data).toBe(false);
+
+    expect(
+      HelloMessageSchema.safeParse({
+        ...validHello,
+        repos: [parsed.data],
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe("ErrorMessageSchema", () => {
