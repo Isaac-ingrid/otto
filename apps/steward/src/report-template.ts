@@ -7,6 +7,7 @@
 // rendered message — structured plain text plus optional opaque-action buttons (POST
 // /api/actions); Thread identity always resolves server-side from the message id, never from
 // data stuffed into a button (§3.1).
+import type { ReportLabel } from "@isaac2ingrid/protocol";
 import type { GitFacts, ReportRow, WorkerRow } from "./ledger.ts";
 
 /** Lengths from spec §7.5 / steward.md §6.4. */
@@ -75,6 +76,8 @@ export interface ReportCardInput {
   /** The worker's full answer/finding (issue #76): present when `report.answer` carried a
    *  conclusion for a task that produced no code change, independent of `did`. */
   answer?: string;
+  /** Bounded categorical outcome labels (ADR-0022 Stage 1); omitted when absent/empty. */
+  labels?: readonly ReportLabel[];
 }
 
 function clip(text: string, max: number): string {
@@ -85,6 +88,9 @@ function clip(text: string, max: number): string {
 /** Renders the three-part report as one local message. */
 export function renderReportCard(input: ReportCardInput): LocalMessage {
   const lines: string[] = [`${TONE_BADGE[input.tone]} ${clip(input.conclusion, MAX_CONCLUSION + 2)}`];
+  if (input.labels && input.labels.length > 0) {
+    lines.push(`标签：${input.labels.join(", ")}`);
+  }
   const did = input.did.filter((item) => item.trim().length > 0).slice(0, MAX_DID_ITEMS).map((item) => `- ${clip(item, MAX_DID_ITEM + 2)}`);
   if (did.length > 0) lines.push("", "做了什么：", ...did);
   if (input.answer && input.answer.trim().length > 0) {
@@ -162,6 +168,7 @@ export function reportCardFor(report: ReportRow, worker: WorkerRow, machineName:
     tone: toneOfReport(report.status),
     conclusion: report.summary,
     did: didBullets(report),
+    ...(report.labels?.length ? { labels: report.labels } : {}),
     answer: report.answer ?? undefined,
     // The consent ask replaces the generic next-step line when it applies: the decision the
     // card exists to collect IS what the owner must do next.
@@ -343,6 +350,7 @@ export function workerQuestionCard(input: {
   question: string;
   summary?: string;
   did?: string[];
+  labels?: readonly ReportLabel[];
   threadTitle: string;
   footer: string;
   detailsUrl?: string;
@@ -351,6 +359,7 @@ export function workerQuestionCard(input: {
     tone: "attention",
     conclusion: `❓ ${input.threadTitle}：worker 需要你的回答`,
     did: input.did ?? [],
+    ...(input.labels?.length ? { labels: input.labels } : {}),
     needsYou: input.question,
     rawNeedsYou: true, // VERBATIM — uncapped, whitespace preserved (review finding 6)
     threadTitle: input.threadTitle,
@@ -392,6 +401,45 @@ export function askUserCard(input: { question: string; threadTitle?: string; but
     ...(button.primary ? { primary: true } : {}),
   }));
   return buttons.length > 0 ? { text: lines.join("\n"), buttons } : { text: lines.join("\n") };
+}
+
+export interface ProposalApprovalCardInput {
+  proposalId: string;
+  threadTitle: string;
+  workerId: string;
+  sourceMachineName: string;
+  targetMachineName: string;
+  targetRepoName: string;
+  targetRepoId: string;
+  selectedAgent: string;
+  reason: string;
+  prompt: string;
+}
+
+/**
+ * ADR-0022 Stage 4 (Plan A v2): bound owner confirmation card for a cross-machine
+ * `readonly_probe` proposal. Never auto-approved; expires in 10 minutes; accepts only
+ * its dedicated buttons (`proposal:<id>:approve` / `proposal:<id>:decline`).
+ */
+export function proposalApprovalCard(input: ProposalApprovalCardInput): LocalMessage {
+  const head = input.threadTitle ? `【${input.threadTitle}】` : "";
+  return {
+    text: [
+      `${head}❓ 确认跨机器启动只读探针？（${clip(input.targetRepoName, 40)} @ ${clip(input.targetMachineName, 40)}）`,
+      "",
+      `- 发起会话：${input.workerId} @ ${input.sourceMachineName}`,
+      `- 目标机器：${input.targetMachineName}（${input.selectedAgent}，mode=readonly）`,
+      `- 目标仓库：${input.targetRepoName}（${input.targetRepoId}）`,
+      `- 探查原因：${clip(input.reason, 180)}`,
+      `- 探查任务：${clip(input.prompt, 240)}`,
+      "",
+      "此确认 10 分钟内有效；确认前不会消耗目标机器额度。请使用专用批准／拒绝按钮；文字回复不会执行。",
+    ].join("\n"),
+    buttons: [
+      { label: "批准只读探针", action: `proposal:${input.proposalId}:approve`, primary: true },
+      { label: "拒绝", action: `proposal:${input.proposalId}:decline` },
+    ],
+  };
 }
 
 // ---- proactive behavior (issue #20, steward.md §8; spike-conclusions §2 "digest routines") ----
@@ -508,6 +556,7 @@ export type QuietSection =
       tone: Tone;
       conclusion: string;
       did: string[];
+      labels?: readonly ReportLabel[];
       needsYou?: string;
       threadTitle: string;
       /** One-time signed timeline URL appended by the system, never by the LLM (§6.4). */
@@ -517,12 +566,15 @@ export type QuietSection =
 
 type ReportSection = Extract<QuietSection, { kind: "report" }>;
 
-/** One report section as a text block: badge + heading, the did bullets, the needs-you line,
- *  its own 详情 link, and its footer. */
+/** One report section as a text block: badge + heading, optional labels, the did bullets,
+ *  the needs-you line, its footer, and its own 详情 link. */
 function mergedSectionText(section: ReportSection): string {
   const lines: string[] = [];
   const heading = clip(`${section.threadTitle ? `「${section.threadTitle}」` : ""}${section.conclusion}`.trim(), 120);
   lines.push(`**${TONE_BADGE[section.tone]} ${heading}**`);
+  if (section.labels && section.labels.length > 0) {
+    lines.push(`标签：${section.labels.join(", ")}`);
+  }
   const did = section.did
     .filter((item) => item.trim().length > 0)
     .slice(0, MAX_DID_ITEMS)
@@ -530,8 +582,8 @@ function mergedSectionText(section: ReportSection): string {
   if (section.needsYou && section.needsYou.trim().length > 0) {
     did.push(`**需要你**：${clip(section.needsYou, MAX_NEEDS_YOU + 6)}`);
   }
+  if (did.length > 0) lines.push(...did);
   if (section.footer && section.footer.trim().length > 0) lines.push(clip(section.footer, 200));
-  if (did.length > 0) lines.splice(1, 0, ...did);
   if (section.detailsUrl) lines.push(`详情：${section.detailsUrl}`);
   return lines.join("\n");
 }

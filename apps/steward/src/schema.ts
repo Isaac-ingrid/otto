@@ -1098,4 +1098,76 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE TABLE sh_agent_model_default (deviceId TEXT NOT NULL, agent TEXT NOT NULL, model TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(deviceId, agent))`;
     },
   },
+  {
+    // ADR-0022 Stage 1 (Plan C): bounded categorical labels on worker closing reports.
+    // NULL = omitted (`undefined`), `"[]"` = explicitly empty `labels: []`.
+    id: "039_report_labels",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_report ADD COLUMN labels TEXT`;
+      });
+    },
+  },
+  {
+    // ADR-0022 Stage 2 (Plan B): boolean-only capability summary for registered Directories.
+    // Script contents and machine-local hook paths never leave the connector.
+    id: "040_repo_hook_capabilities",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN capabilityKind TEXT NOT NULL DEFAULT 'git'`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN hasSetupHook INTEGER NOT NULL DEFAULT 0`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN hasArchiveHook INTEGER NOT NULL DEFAULT 0`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN approved INTEGER NOT NULL DEFAULT 0`;
+      });
+    },
+  },
+  {
+    // ADR-0022 Stage 3 (Plan A v1): same-machine read-only worker proposals (`readonly_probe`),
+    // `sibling` lineage isolation (`workerRelation`, `proposalDepth`), and explicit per-agent
+    // capability maps (`agentCapabilities`) so Steward routes probes strictly to `readonly: true`.
+    id: "041_readonly_proposals",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_machine ADD COLUMN agentCapabilities TEXT`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN workerRelation TEXT NOT NULL DEFAULT 'relay'`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN proposalDepth INTEGER NOT NULL DEFAULT 0`;
+      });
+      sql`CREATE TABLE IF NOT EXISTS sh_proposal (
+        id TEXT PRIMARY KEY,
+        workerId TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        threadId TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        proposalKey TEXT NOT NULL,
+        dedupeKey TEXT NOT NULL UNIQUE,
+        targetRepoRef TEXT NOT NULL,
+        targetRepoId TEXT,
+        targetDeviceId TEXT,
+        selectedAgent TEXT,
+        prompt TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL,
+        rejectCode TEXT,
+        spawnedWorkerId TEXT,
+        cmdId TEXT,
+        createdAt INTEGER NOT NULL,
+        expiresAt INTEGER,
+        decidedBy TEXT,
+        decidedAt INTEGER
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_proposal_thread ON sh_proposal (threadId, createdAt)`;
+      sql`CREATE INDEX IF NOT EXISTS sh_proposal_worker ON sh_proposal (workerId, createdAt)`;
+      sql`CREATE INDEX IF NOT EXISTS sh_proposal_pending ON sh_proposal (status, expiresAt)`;
+    },
+  },
 ];

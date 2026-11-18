@@ -4,6 +4,7 @@
 // with ⟦ is not something the user said (§4.2). The marker characters are escaped out of
 // inbound user text (see escapeMarkers), so the two input classes can never be forged into
 // each other.
+import type { ReportLabel } from "@isaac2ingrid/protocol";
 import type { GitFacts, MachineRow, ThreadRow, WorkerRow } from "./ledger.ts";
 
 /** The content marker characters; ⟦ at an input's start means "system, not user". */
@@ -51,8 +52,10 @@ export interface EventWakeInput {
     changes: string[] | null;
     decisions: string[] | null;
     leftovers: string[] | null;
+    labels?: ReportLabel[] | null;
     tests: { ran: boolean; passed?: boolean; note?: string } | null;
     question: string | null;
+    answer?: string | null;
     git: GitFacts | null;
   } | null;
   /** The settled outcome when the wake is a failure-class `settled` event. */
@@ -74,12 +77,15 @@ export interface EventWakeInput {
 export function eventWakeText(input: EventWakeInput): string {
   const { thread, worker, machine } = input;
   const head = `${MARK_OPEN}event${MARK_CLOSE} thread=${thread?.threadId ?? "?"} 「${thread?.title ?? "已归档"}」`;
-  const who = `worker ${worker.workerId}（${worker.agent}@${machine?.name ?? worker.deviceId}，${worker.mode === "write" ? "写任务" : worker.mode}）`;
+  const isSibling = worker.workerRelation === "sibling";
+  const who = `worker ${worker.workerId}（${worker.agent}@${machine?.name ?? worker.deviceId}，${worker.mode === "write" ? "写任务" : worker.mode}${isSibling ? "，只读探针 sibling" : ""}）`;
 
   if (input.report) {
     const r = input.report;
     const lines = [head, `- ${who} 汇报 ${r.status}：${r.summary}`];
     if (input.questionId) lines.push(`questionId=${input.questionId}`);
+    if (r.labels?.length) lines.push(`  标签：${r.labels.join(", ")}`);
+    if (r.answer) lines.push(`  结论：${escapeMarkers(r.answer).slice(0, 600)}`);
     if (r.changes?.length) lines.push(`  改动：${r.changes.join("；")}`);
     if (r.tests?.ran) lines.push(`  测试：${r.tests.passed === false ? "未通过" : "通过"}${r.tests.note ? `（${r.tests.note}）` : ""}`);
     if (r.git) {
@@ -91,7 +97,9 @@ export function eventWakeText(input: EventWakeInput): string {
     lines.push(`已发送给用户的通知：${input.notified ? "是（核心模板卡片）" : "否"}`);
     lines.push(
       r.status === "done"
-        ? "请做记账：用 update_thread 更新摘要。" +
+        ? isSibling
+          ? "这是只读探针（sibling）的完成汇报，核心未单独打扰用户。请把关键结论并入 update_thread 摘要（必要时用 send_to_worker 同步给主链 worker，或确需用户知晓时 notify_user）；无事可做用 no_action 结束。"
+          : "请做记账：用 update_thread 更新摘要。" +
             (input.summaryRewriteDue
               ? "⚠️ 这次的摘要更新落在整十版：必须【从头重写】（按 get_thread 的时间线与汇报重建，不要在旧摘要上缝补）。"
               : "") +

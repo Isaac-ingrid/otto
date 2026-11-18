@@ -859,6 +859,66 @@ export class Dispatcher {
       brief: brief !== null,
     };
   }
+
+  /**
+   * ADR-0022 Stage 3 & 4 (Plan A v1 + v2): dispatches any `auto_approved` (same-machine) or
+   * owner-`approved` (cross-machine) read-only proposals via standard `start_worker`
+   * (`mode: "readonly"`, selected `readonly: true` agent). Strictly isolated from the Thread's
+   * main `relay` chain: never closes open owner questions, never mutates `sh_thread.lastMachine`,
+   * and never adds to `sh_thread_repo`. Idempotent on `proposal.cmdId` (`proposal:<proposalId>`).
+   */
+  async dispatchApprovedProposals(): Promise<number> {
+    let dispatched = 0;
+    for (const proposal of this.ledger.proposals.pendingDispatch()) {
+      if (
+        !proposal.spawnedWorkerId ||
+        !proposal.targetDeviceId ||
+        !proposal.targetRepoId ||
+        !proposal.selectedAgent
+      ) {
+        continue;
+      }
+      const cmdId = proposal.cmdId ?? `proposal:${proposal.id}`;
+      const machine = this.ledger.machines.get(proposal.targetDeviceId);
+      const candidateModel = this.#deps.agentModelDefault?.(proposal.targetDeviceId, proposal.selectedAgent) ?? null;
+      const validModel =
+        candidateModel &&
+        machine &&
+        acceptsAgentModel(agentModelCatalogFor(machine.modelCatalogs, proposal.selectedAgent), candidateModel)
+          ? candidateModel
+          : null;
+      if (validModel) {
+        this.ledger.workers.setModelRequest(proposal.spawnedWorkerId, validModel, "task-default");
+      }
+      const originLabel = proposal.decidedBy === "auto_same_machine" ? "同机" : "跨机（经用户批准）";
+      const probePrompt = [
+        `【只读探针任务（由${originLabel} worker ${proposal.workerId} 提议）】`,
+        `原因：${proposal.reason}`,
+        "",
+        proposal.prompt,
+      ].join("\n");
+      await this.#deps.enqueueCommand(
+        proposal.targetDeviceId,
+        "start_worker",
+        {
+          workerId: proposal.spawnedWorkerId,
+          threadId: proposal.threadId,
+          repoId: proposal.targetRepoId,
+          mode: "readonly",
+          prompt: probePrompt,
+          ...(proposal.selectedAgent !== DEFAULT_AGENT ? { agent: proposal.selectedAgent } : {}),
+          ...(validModel ? { model: validModel, modelSource: "task-default" as const } : {}),
+        },
+        {
+          workerId: proposal.spawnedWorkerId,
+          cmdId,
+        },
+      );
+      this.ledger.proposals.markDispatched(proposal.id, cmdId);
+      dispatched += 1;
+    }
+    return dispatched;
+  }
 }
 
 /** Thread titles stay scannable in cards and the brief: first line of the prompt, clipped. */

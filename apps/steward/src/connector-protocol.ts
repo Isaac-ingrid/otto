@@ -94,6 +94,7 @@ export interface ConnectorProtocolDeps {
   drainWakes: () => Promise<void>;
   armWorkerSweeps: () => void;
   armQuestionFallback: () => Promise<void>;
+  dispatchApprovedProposals: () => Promise<unknown>;
   cancelDirectoryReadsForConnection: (connectionId: string, result: DirectoryReadResult) => void;
   cancelDirectoryReadsForDevice: (deviceId: string, result: DirectoryReadResult) => void;
 }
@@ -553,6 +554,9 @@ export class ConnectorProtocol {
         // Events catching up can release a parked hello-snapshot verdict for a reaped
         // worker (issue #13 review finding 2) — resolve before anything reads the state.
         this.deps.ledger.workers.resolveReapPending();
+        // ADR-0022 Stage 3: any auto-approved same-machine readonly proposals enqueue their
+        // `start_worker` (`mode: "readonly"`) command immediately after the reducer commits.
+        void this.deps.dispatchApprovedProposals();
         // Any applied event can start a run (started/resumed) or end one (settled/lost) —
         // the maintenance alarm follows suit (issue #13).
         this.deps.armWorkerSweeps();

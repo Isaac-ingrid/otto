@@ -5,12 +5,30 @@
 // knowledge half, issue #18) live in notes.ts behind the `notes` handle below — same rule:
 // sh_note* is reached only through the memory module. The situation brief's character
 // budget is brief.ts's.
-import { ulid, AgentModelObservationSchema, type AgentModelCatalog, type AgentModelObservation } from "@isaac2ingrid/protocol";
+import {
+  ulid,
+  AgentModelObservationSchema,
+  capabilityOf,
+  MAX_GLOBAL_AUTO_SIBLINGS,
+  MAX_IN_FLIGHT_SIBLINGS_PER_THREAD,
+  MAX_PENDING_OWNER_PROPOSALS,
+  MAX_PROPOSAL_DEPTH,
+  MAX_PROPOSALS_PER_WORKER,
+  normalizeReportLabels,
+  PROPOSAL_CONFIRM_TTL_MS,
+  ProposalEventSchema,
+  type AgentModelCatalog,
+  type AgentModelObservation,
+  type ProposalKind,
+  type ProposalRejectCode,
+  type ProposalStatus,
+  type ReportLabel,
+} from "@isaac2ingrid/protocol";
 import type { GitFacts, HelloMessage } from "@isaac2ingrid/protocol";
 import { createBudget } from "./budget.ts";
 import { createNotes, type NoteRow } from "./notes.ts";
 import { assembleBrief, type BriefDecision, type HandoffBrief } from "./handoff.ts";
-import { eventWakeText, externalActivityWakeText, queueReturnedWakeText } from "./wake-text.ts";
+import { escapeMarkers, eventWakeText, externalActivityWakeText, queueReturnedWakeText } from "./wake-text.ts";
 import { createMachineStatus, type MachineReliability } from "./machine-status.ts";
 import type { StartWorkerInput } from "./dispatch.ts";
 import type { QuietSection } from "./report-template.ts";
@@ -106,8 +124,12 @@ export interface WorkerRow {
   sessionId: string | null;
   branch: string | null;
   cmdId: string | null;
-  /** The worker this one continues from — the relay relationship (issue #8, §2.2). */
+  /** The worker this one continues from (relay) or was proposed by (sibling). */
   parentWorker: string | null;
+  /** ADR-0022 Decision 6: `'relay'` main chain vs `'sibling'` read-only probe. */
+  workerRelation?: "relay" | "sibling";
+  /** ADR-0022 Decision 6: `0` for main-chain workers, `1` for spawned sibling probes. */
+  proposalDepth?: number;
   lastOutcome: string | null;
   lastEventAt: number | null;
   lastProgress: string | null;
@@ -126,6 +148,7 @@ export interface ReportRow {
   changes: string[] | null;
   decisions: string[] | null;
   leftovers: string[] | null;
+  labels?: ReportLabel[] | null;
   tests: { ran: boolean; passed?: boolean; note?: string } | null;
   question: string | null;
   next: string | null;
@@ -172,11 +195,47 @@ export interface MachineRow {
   online: boolean;
   lastSeen: number | null;
   agents: string[];
+  agentCapabilities?: Record<string, Record<string, boolean>>;
   modelCatalogs?: Record<string, AgentModelCatalog>;
   maxWorkers: number;
   /** The connector process generation (protocol §6.1): changes on every connector restart. */
   bootId: string | null;
   reliability?: MachineReliability | null;
+}
+
+export interface ProposalRow {
+  id: string;
+  workerId: string;
+  seq: number;
+  threadId: string;
+  kind: ProposalKind;
+  proposalKey: string;
+  dedupeKey: string;
+  targetRepoRef: string;
+  targetRepoId: string | null;
+  targetDeviceId: string | null;
+  selectedAgent: string | null;
+  prompt: string;
+  reason: string;
+  status: ProposalStatus;
+  rejectCode: ProposalRejectCode | null;
+  spawnedWorkerId: string | null;
+  cmdId: string | null;
+  createdAt: number;
+  expiresAt: number | null;
+  decidedBy: string | null;
+  decidedAt: number | null;
+}
+
+export interface RepoSummaryRow {
+  repoId: string;
+  deviceId: string;
+  name: string;
+  online: boolean;
+  capabilityKind: "git" | "plain";
+  hasSetupHook: boolean;
+  hasArchiveHook: boolean;
+  approved: boolean;
 }
 
 export interface OfflineDispatchRow {
@@ -201,7 +260,8 @@ export interface NotifyRow {
     | "machine_online"
     | "waited_started"
     | "pr_created"
-    | "pr_failed";
+    | "pr_failed"
+    | "proposal_confirm";
   threadId: string;
   workerId: string | null;
   questionId: string | null;
@@ -209,6 +269,41 @@ export interface NotifyRow {
    *  pr_failed's stage/message) — JSON, read by the renderer, written by the reducer. */
   payload: string | null;
 }
+
+export type ProposalDecisionOutcome =
+  | {
+      status: "approved";
+      appliedNow: true;
+      proposal: ProposalRow;
+      spawnedWorkerId: string;
+      cmdId: string;
+    }
+  | {
+      status: "already_decided";
+      appliedNow: false;
+      proposal: ProposalRow;
+    }
+  | {
+      status: "declined";
+      appliedNow: boolean;
+      proposal: ProposalRow;
+    }
+  | {
+      status: "expired";
+      appliedNow: boolean;
+      proposal: ProposalRow;
+    }
+  | {
+      status: "rejected";
+      appliedNow: true;
+      rejectCode: ProposalRejectCode;
+      proposal: ProposalRow;
+    }
+  | {
+      status: "not_found";
+      appliedNow: false;
+      proposal: null;
+    };
 
 /** The consent gate's durable state (issue #21): the user's tap on a done card's
  *  [同意]/[先不要], the pr_worker command it sent, and the async result that came back. */
@@ -456,8 +551,10 @@ export interface NewWorkerInput {
   cmdId?: string;
   requestedModel?: string | null;
   modelSource?: 'agent-default' | 'task-default' | 'override';
-  /** Relay (issue #8): the worker this session continues from. */
+  /** Relay (issue #8) or sibling parent (ADR-0022). */
   parentWorker?: string;
+  workerRelation?: "relay" | "sibling";
+  proposalDepth?: number;
 }
 
 /** One event row lifted out of the protocol layer's `event_inbox`. */
@@ -495,6 +592,7 @@ const viewMachine = (r: Record<string, unknown>): MachineRow => ({
   online: !!r.online,
   lastSeen: (r.lastSeen as number | null) ?? null,
   agents: jsonOrNull<string[]>(r.agents as string | null) ?? [],
+  agentCapabilities: jsonOrNull<Record<string, Record<string, boolean>>>(r.agentCapabilities as string | null) ?? {},
   modelCatalogs: jsonOrNull<Record<string, AgentModelCatalog>>(r.modelCatalogs as string | null) ?? {},
   maxWorkers: (r.maxWorkers as number | null) ?? 1,
   bootId: (r.bootId as string | null) ?? null,
@@ -518,11 +616,37 @@ const viewWorker = (r: Record<string, unknown>): WorkerRow => ({
   branch: (r.branch as string | null) ?? null,
   cmdId: (r.cmdId as string | null) ?? null,
   parentWorker: (r.parentWorker as string | null) ?? null,
+  workerRelation: r.workerRelation === "sibling" ? "sibling" : "relay",
+  proposalDepth: typeof r.proposalDepth === "number" ? r.proposalDepth : 0,
   lastOutcome: (r.lastOutcome as string | null) ?? null,
   lastEventAt: (r.lastEventAt as number | null) ?? null,
   lastProgress: (r.lastProgress as string | null) ?? null,
   contextPercent: (r.contextPercent as number | null) ?? null,
   createdAt: r.createdAt as number,
+});
+
+const viewProposal = (r: Record<string, unknown>): ProposalRow => ({
+  id: r.id as string,
+  workerId: r.workerId as string,
+  seq: r.seq as number,
+  threadId: r.threadId as string,
+  kind: r.kind as ProposalKind,
+  proposalKey: r.proposalKey as string,
+  dedupeKey: r.dedupeKey as string,
+  targetRepoRef: r.targetRepoRef as string,
+  targetRepoId: (r.targetRepoId as string | null) ?? null,
+  targetDeviceId: (r.targetDeviceId as string | null) ?? null,
+  selectedAgent: (r.selectedAgent as string | null) ?? null,
+  prompt: r.prompt as string,
+  reason: r.reason as string,
+  status: r.status as ProposalStatus,
+  rejectCode: (r.rejectCode as ProposalRejectCode | null) ?? null,
+  spawnedWorkerId: (r.spawnedWorkerId as string | null) ?? null,
+  cmdId: (r.cmdId as string | null) ?? null,
+  createdAt: r.createdAt as number,
+  expiresAt: (r.expiresAt as number | null) ?? null,
+  decidedBy: (r.decidedBy as string | null) ?? null,
+  decidedAt: (r.decidedAt as number | null) ?? null,
 });
 
 const viewReport = (r: Record<string, unknown>): ReportRow => ({
@@ -534,6 +658,7 @@ const viewReport = (r: Record<string, unknown>): ReportRow => ({
   changes: jsonOrNull<string[]>(r.changes as string | null),
   decisions: jsonOrNull<string[]>(r.decisions as string | null),
   leftovers: jsonOrNull<string[]>(r.leftovers as string | null),
+  labels: jsonOrNull<ReportLabel[]>(r.labels as string | null),
   tests: jsonOrNull<ReportRow["tests"]>(r.tests as string | null),
   question: (r.question as string | null) ?? null,
   next: (r.next as string | null) ?? null,
@@ -670,9 +795,19 @@ export function createLedger(deps: LedgerDeps) {
   });
 
   function recordRepository(deviceId: string, repo: HelloMessage["repos"][number]): void {
+    const capabilityKind = repo.capabilityKind ?? capabilityOf(repo).kind;
+    const hasSetupHook = repo.hasSetupHook === true ? 1 : 0;
+    const hasArchiveHook = repo.hasArchiveHook === true ? 1 : 0;
+    const approved = (hasSetupHook === 1 || hasArchiveHook === 1) && repo.approved === true ? 1 : 0;
     sql`
-      INSERT OR REPLACE INTO sh_repo (repoId, deviceId, name, path, defaultBranch, remote, updatedAt)
-      VALUES (${repo.repoId}, ${deviceId}, ${repo.name}, ${repo.path}, ${repo.defaultBranch}, ${repo.remote}, ${now()})
+      INSERT OR REPLACE INTO sh_repo (
+        repoId, deviceId, name, path, defaultBranch, remote,
+        capabilityKind, hasSetupHook, hasArchiveHook, approved, updatedAt
+      )
+      VALUES (
+        ${repo.repoId}, ${deviceId}, ${repo.name}, ${repo.path}, ${repo.defaultBranch}, ${repo.remote},
+        ${capabilityKind}, ${hasSetupHook}, ${hasArchiveHook}, ${approved}, ${now()}
+      )
     `;
   }
 
@@ -692,12 +827,23 @@ export function createLedger(deps: LedgerDeps) {
     upsertFromHello(hello: HelloMessage): void {
       const ts = now();
       machineStatus.setOnline(hello.deviceId, true, hello.machine.name);
+      const agentCapabilities = JSON.stringify(
+        Object.fromEntries(
+          hello.agents.map((a) => [
+            a.kind,
+            Object.fromEntries(
+              Object.entries(a.capabilities ?? {}).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"),
+            ),
+          ]),
+        ),
+      );
       sql`
-        INSERT INTO sh_machine (deviceId, name, online, lastSeen, agents, maxWorkers, bootId, modelCatalogs)
-        VALUES (${hello.deviceId}, ${hello.machine.name}, 1, ${ts}, ${JSON.stringify(hello.agents.map((a) => a.kind))}, ${hello.limits.maxWorkers}, ${hello.bootId}, ${JSON.stringify(Object.fromEntries(hello.agents.filter(a => a.modelCatalog).map(a => [a.kind, a.modelCatalog])))})
+        INSERT INTO sh_machine (deviceId, name, online, lastSeen, agents, agentCapabilities, maxWorkers, bootId, modelCatalogs)
+        VALUES (${hello.deviceId}, ${hello.machine.name}, 1, ${ts}, ${JSON.stringify(hello.agents.map((a) => a.kind))}, ${agentCapabilities}, ${hello.limits.maxWorkers}, ${hello.bootId}, ${JSON.stringify(Object.fromEntries(hello.agents.filter(a => a.modelCatalog).map(a => [a.kind, a.modelCatalog])))})
         ON CONFLICT (deviceId) DO UPDATE SET
           name = excluded.name, online = 1, lastSeen = excluded.lastSeen,
-          agents = excluded.agents, maxWorkers = excluded.maxWorkers, bootId = excluded.bootId, modelCatalogs = excluded.modelCatalogs
+          agents = excluded.agents, agentCapabilities = excluded.agentCapabilities,
+          maxWorkers = excluded.maxWorkers, bootId = excluded.bootId, modelCatalogs = excluded.modelCatalogs
       `;
       for (const snapshot of hello.workers) {
         if (workers.get(snapshot.workerId)?.deviceId === hello.deviceId) recordModelObservations(snapshot.workerId, snapshot);
@@ -745,6 +891,17 @@ export function createLedger(deps: LedgerDeps) {
     },
   };
 
+  const viewRepoSummary = (r: Record<string, unknown>): RepoSummaryRow => ({
+    repoId: r.repoId as string,
+    deviceId: r.deviceId as string,
+    name: r.name as string,
+    online: Number(r.online ?? 0) === 1,
+    capabilityKind: r.capabilityKind === "plain" ? "plain" : "git",
+    hasSetupHook: Number(r.hasSetupHook ?? 0) === 1,
+    hasArchiveHook: Number(r.hasArchiveHook ?? 0) === 1,
+    approved: Number(r.approved ?? 0) === 1,
+  });
+
   const repos = {
     recordRegistration: recordRepository,
     /** Machines that have a repo matching `ref` by name or exact repoId (routing signal 2). */
@@ -755,13 +912,23 @@ export function createLedger(deps: LedgerDeps) {
         ORDER BY repoId
       `;
     },
-    /** All registered repos (the brief's repos line, issue #7). */
-    list(): Array<{ repoId: string; deviceId: string; name: string; online: boolean }> {
-      return sql<{ repoId: string; deviceId: string; name: string; online: boolean }>`
-        SELECT r.repoId, r.deviceId, r.name, COALESCE(m.online, 0) AS online
+    get(repoId: string, deviceId: string): RepoSummaryRow | null {
+      const row = sql<Record<string, unknown>>`
+        SELECT r.repoId, r.deviceId, r.name, COALESCE(m.online, 0) AS online,
+               r.capabilityKind, r.hasSetupHook, r.hasArchiveHook, r.approved
+        FROM sh_repo r LEFT JOIN sh_machine m ON m.deviceId = r.deviceId
+        WHERE r.repoId = ${repoId} AND r.deviceId = ${deviceId}
+      `[0];
+      return row ? viewRepoSummary(row) : null;
+    },
+    /** All registered repos (the brief's repos line, issue #7, plus Stage 2 boolean hook summary). */
+    list(): RepoSummaryRow[] {
+      return sql<Record<string, unknown>>`
+        SELECT r.repoId, r.deviceId, r.name, COALESCE(m.online, 0) AS online,
+               r.capabilityKind, r.hasSetupHook, r.hasArchiveHook, r.approved
         FROM sh_repo r LEFT JOIN sh_machine m ON m.deviceId = r.deviceId
         ORDER BY r.name, r.repoId
-      `;
+      `.map(viewRepoSummary);
     },
   };
 
@@ -979,10 +1146,18 @@ export function createLedger(deps: LedgerDeps) {
   const workers = {
     register(input: NewWorkerInput): WorkerRow {
       const ts = now();
+      const workerRelation = input.workerRelation ?? "relay";
+      const proposalDepth = input.proposalDepth ?? (workerRelation === "sibling" ? 1 : 0);
       sql`
-        INSERT INTO sh_worker (workerId, threadId, deviceId, repoId, agent, mode, state, cmdId, parentWorker, createdAt, updatedAt, requestedModel, modelSource)
-        VALUES (${input.workerId}, ${input.threadId}, ${input.deviceId}, ${input.repoId ?? null},
-                ${input.agent}, ${input.mode}, 'starting', ${input.cmdId ?? null}, ${input.parentWorker ?? null}, ${ts}, ${ts}, ${input.requestedModel ?? null}, ${input.modelSource ?? 'agent-default'})
+        INSERT INTO sh_worker (
+          workerId, threadId, deviceId, repoId, agent, mode, state, cmdId, parentWorker,
+          workerRelation, proposalDepth, createdAt, updatedAt, requestedModel, modelSource
+        )
+        VALUES (
+          ${input.workerId}, ${input.threadId}, ${input.deviceId}, ${input.repoId ?? null},
+          ${input.agent}, ${input.mode}, 'starting', ${input.cmdId ?? null}, ${input.parentWorker ?? null},
+          ${workerRelation}, ${proposalDepth}, ${ts}, ${ts}, ${input.requestedModel ?? null}, ${input.modelSource ?? 'agent-default'}
+        )
       `;
       // A fresh run of this id: any deferred reap-reconcile verdict is void.
       sql`DELETE FROM sh_reap_pending WHERE workerId = ${input.workerId}`;
@@ -997,27 +1172,30 @@ export function createLedger(deps: LedgerDeps) {
         SELECT * FROM sh_worker WHERE threadId = ${threadId} ORDER BY createdAt, workerId
       `.map(viewWorker);
     },
-    /** The Thread's most recent worker — continuation target and relay-base source (spec §5.3). */
+    /** The Thread's most recent main-chain (`relay`) worker — continuation target and relay-base
+     *  source (spec §5.3; ADR-0022 Decision 6: `sibling` probes never hijack main-chain continuations). */
     latestOnThread(threadId: string): WorkerRow | null {
       const row = sql<Record<string, unknown>>`
-        SELECT * FROM sh_worker WHERE threadId = ${threadId} ORDER BY createdAt DESC, workerId DESC LIMIT 1
+        SELECT * FROM sh_worker
+        WHERE threadId = ${threadId} AND workerRelation = 'relay'
+        ORDER BY createdAt DESC, workerId DESC LIMIT 1
       `[0];
       return row ? viewWorker(row) : null;
     },
-    /** The Thread's most recent worker that actually has a branch — the relay base when the
-     *  latest leg ran readonly or never started (issue #8, spec §5.3). `target` filters out
-     *  same-machine/different-repo rows: relaying repo-A's branch name into repo-B's clone
-     *  would just fail the start (PR #54 review finding 3); cross-machine rows stay — the
+    /** The Thread's most recent main-chain (`relay`) worker that actually has a branch — the relay
+     *  base when the latest leg ran readonly or never started (issue #8, spec §5.3). `target`
+     *  filters out same-machine/different-repo rows: relaying repo-A's branch name into repo-B's
+     *  clone would just fail the start (PR #54 review finding 3); cross-machine rows stay — the
      *  branch may exist there after a push+fetch, and the dispatch flags `crossMachine`. */
     latestBranchOnThread(threadId: string, target?: { deviceId: string; repoId: string | null }): WorkerRow | null {
       const row = target
         ? sql<Record<string, unknown>>`
-            SELECT * FROM sh_worker WHERE threadId = ${threadId} AND branch IS NOT NULL
+            SELECT * FROM sh_worker WHERE threadId = ${threadId} AND workerRelation = 'relay' AND branch IS NOT NULL
               AND NOT (deviceId = ${target.deviceId} AND repoId IS NOT NULL AND ${target.repoId} IS NOT NULL AND repoId != ${target.repoId})
             ORDER BY createdAt DESC, workerId DESC LIMIT 1
           `[0]
         : sql<Record<string, unknown>>`
-            SELECT * FROM sh_worker WHERE threadId = ${threadId} AND branch IS NOT NULL
+            SELECT * FROM sh_worker WHERE threadId = ${threadId} AND workerRelation = 'relay' AND branch IS NOT NULL
             ORDER BY createdAt DESC, workerId DESC LIMIT 1
           `[0];
       return row ? viewWorker(row) : null;
@@ -1046,6 +1224,9 @@ export function createLedger(deps: LedgerDeps) {
     /** Backfills the start_worker cmdId once the command exists (registration precedes it). */
     setCmdId(workerId: string, cmdId: string): void {
       sql`UPDATE sh_worker SET cmdId = ${cmdId}, updatedAt = ${now()} WHERE workerId = ${workerId}`;
+    },
+    setModelRequest(workerId: string, requestedModel: string | null, modelSource: NonNullable<WorkerRow['modelSource']>): void {
+      sql`UPDATE sh_worker SET requestedModel = ${requestedModel}, modelSource = ${modelSource}, updatedAt = ${now()} WHERE workerId = ${workerId}`;
     },
 
     /**
@@ -1385,7 +1566,8 @@ export function createLedger(deps: LedgerDeps) {
      * afterwards (handoff.renderHandoffBrief leaves the section open for exactly that).
      *
      * `fromWorker` names the leg to continue from; it defaults to the Thread's latest
-     * worker. Pointers fall back to the Thread's latest reported git facts when that leg
+     * `relay` worker (`sibling` probes never override main-chain relay state, ADR-0022).
+     * Pointers fall back to the Thread's latest reported git facts when that leg
      * reported none (connector-pi.md §7.2: facts come from git, never the model).
      */
     build(threadId: string, fromWorker?: string): HandoffBrief | null {
@@ -1393,9 +1575,16 @@ export function createLedger(deps: LedgerDeps) {
       if (!thread) return null;
       const all = workers.listByThread(threadId);
       if (all.length === 0) return null;
+      const relayWorkers = all.filter((w) => (w.workerRelation ?? "relay") === "relay");
       const named = fromWorker !== undefined ? all.find((w) => w.workerId === fromWorker) : undefined;
-      const fromWorkerRow = named ?? all.at(-1)!;
-      const threadReports = reports.listByThread(threadId);
+      const fromWorkerRow = named ?? relayWorkers.at(-1);
+      if (!fromWorkerRow) return null;
+      const allReports = reports.listByThread(threadId);
+      const relayWorkerIds = new Set(relayWorkers.map((w) => w.workerId));
+      const threadReports =
+        (fromWorkerRow.workerRelation ?? "relay") === "relay"
+          ? allReports.filter((r) => relayWorkerIds.has(r.workerId))
+          : allReports;
       const latestGit = threadReports.filter((r): r is ReportRow & { git: GitFacts } => r.git !== null).at(-1) ?? null;
       // A readonly from-leg has no branch of its own: its predecessor's pointers carry the
       // relay (finding 4) — same resolution the dispatcher uses for the base.
@@ -1408,6 +1597,225 @@ export function createLedger(deps: LedgerDeps) {
         ...(pointerWorker ? { pointerWorker } : {}),
         reports: threadReports,
         latestGit,
+      });
+    },
+  };
+
+  /** ADR-0022 Decision 7: picks an agent on `machine` that explicitly declares `readonly: true`.
+   *  Prefers `preferredAgent` when it is read-only-capable, then `pi`, then any `readonly: true` agent. */
+  function selectReadonlyAgent(machine: MachineRow | null, preferredAgent?: string): string | null {
+    if (!machine) return null;
+    const caps = machine.agentCapabilities ?? {};
+    const isReadonlyCapable = (agent: string): boolean =>
+      machine.agents.includes(agent) && caps[agent]?.readonly === true;
+    if (preferredAgent && isReadonlyCapable(preferredAgent)) return preferredAgent;
+    if (isReadonlyCapable("pi")) return "pi";
+    for (const agent of machine.agents) {
+      if (isReadonlyCapable(agent)) return agent;
+    }
+    return null;
+  }
+
+  const proposals = {
+    get(id: string): ProposalRow | null {
+      const row = sql<Record<string, unknown>>`SELECT * FROM sh_proposal WHERE id = ${id}`[0];
+      return row ? viewProposal(row) : null;
+    },
+    byDedupeKey(dedupeKey: string): ProposalRow | null {
+      const row = sql<Record<string, unknown>>`SELECT * FROM sh_proposal WHERE dedupeKey = ${dedupeKey}`[0];
+      return row ? viewProposal(row) : null;
+    },
+    list(): ProposalRow[] {
+      return sql<Record<string, unknown>>`SELECT * FROM sh_proposal ORDER BY createdAt, id`.map(viewProposal);
+    },
+    listByThread(threadId: string): ProposalRow[] {
+      return sql<Record<string, unknown>>`
+        SELECT * FROM sh_proposal WHERE threadId = ${threadId} ORDER BY createdAt, id
+      `.map(viewProposal);
+    },
+    listByWorker(workerId: string): ProposalRow[] {
+      return sql<Record<string, unknown>>`
+        SELECT * FROM sh_proposal WHERE workerId = ${workerId} ORDER BY createdAt, id
+      `.map(viewProposal);
+    },
+    pendingDispatch(): ProposalRow[] {
+      return sql<Record<string, unknown>>`
+        SELECT * FROM sh_proposal WHERE status IN ('auto_approved', 'approved') ORDER BY createdAt, id
+      `.map(viewProposal);
+    },
+    markDispatched(id: string, cmdId: string): boolean {
+      sql`UPDATE sh_proposal SET status = 'dispatched', cmdId = ${cmdId} WHERE id = ${id} AND status IN ('auto_approved', 'approved')`;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    },
+    expireDue(nowMs: number = now()): number {
+      return tx(() => {
+        const due = sql<Record<string, unknown>>`
+          SELECT * FROM sh_proposal
+          WHERE status = 'pending_owner' AND expiresAt IS NOT NULL AND expiresAt <= ${nowMs}
+          ORDER BY createdAt, id
+        `.map(viewProposal);
+        for (const p of due) {
+          sql`
+            UPDATE sh_proposal
+            SET status = 'expired', decidedBy = 'ttl_expired', decidedAt = ${nowMs}
+            WHERE id = ${p.id} AND status = 'pending_owner'
+          `;
+          questions.close(p.id, "跨机只读探针确认已过期");
+          timeline.add(p.threadId, "note", `跨机只读探针确认已过期（${p.targetRepoRef}）`, {
+            proposalId: p.id,
+            proposalKey: p.proposalKey,
+            workerId: p.workerId,
+          });
+          recomputeThreadState(p.threadId);
+        }
+        return due.length;
+      });
+    },
+    decide(id: string, approve: boolean, ownerRef: string): ProposalDecisionOutcome {
+      if (!ownerRef.startsWith("user:")) throw new Error("owner_action_required");
+      return tx(() => {
+        const current = proposals.get(id);
+        if (!current) return { status: "not_found", appliedNow: false, proposal: null };
+        const tsNow = now();
+        if (current.status === "declined") {
+          return { status: "declined", appliedNow: false, proposal: current };
+        }
+        if (current.status === "expired") {
+          return { status: "expired", appliedNow: false, proposal: current };
+        }
+        if (current.status !== "pending_owner") {
+          return { status: "already_decided", appliedNow: false, proposal: current };
+        }
+        if ((current.expiresAt !== null && current.expiresAt <= tsNow) || questions.get(id)?.status !== "open") {
+          sql`
+            UPDATE sh_proposal
+            SET status = 'expired', decidedBy = 'ttl_expired', decidedAt = ${tsNow}
+            WHERE id = ${id}
+          `;
+          questions.close(id, "跨机只读探针确认已过期");
+          timeline.add(current.threadId, "note", `跨机只读探针确认已过期（${current.targetRepoRef}）`, {
+            proposalId: id,
+            proposalKey: current.proposalKey,
+            workerId: current.workerId,
+          });
+          recomputeThreadState(current.threadId);
+          return { status: "expired", appliedNow: true, proposal: proposals.get(id)! };
+        }
+        if (!approve) {
+          sql`
+            UPDATE sh_proposal
+            SET status = 'declined', decidedBy = ${ownerRef}, decidedAt = ${tsNow}
+            WHERE id = ${id}
+          `;
+          questions.close(id, "暂不探测");
+          timeline.add(current.threadId, "answer", `拒绝跨机只读探针（${current.targetRepoRef}）`, {
+            proposalId: id,
+            proposalKey: current.proposalKey,
+            workerId: current.workerId,
+          });
+          recomputeThreadState(current.threadId);
+          return { status: "declined", appliedNow: true, proposal: proposals.get(id)! };
+        }
+
+        const rejectLive = (rejectCode: ProposalRejectCode, noteText: string): ProposalDecisionOutcome => {
+          sql`
+            UPDATE sh_proposal
+            SET status = 'rejected', rejectCode = ${rejectCode}, decidedBy = ${ownerRef}, decidedAt = ${tsNow}
+            WHERE id = ${id}
+          `;
+          questions.close(id, noteText);
+          timeline.add(current.threadId, "note", noteText, {
+            proposalId: id,
+            proposalKey: current.proposalKey,
+            workerId: current.workerId,
+            rejectCode,
+          });
+          if (threads.get(current.threadId)) recomputeThreadState(current.threadId);
+          return { status: "rejected", appliedNow: true, rejectCode, proposal: proposals.get(id)! };
+        };
+
+        const thread = threads.get(current.threadId);
+        if (!thread || thread.archived) {
+          return rejectLive("thread_archived", "批准跨机只读探针失败（thread_archived）：所属 Thread 已归档或不存在");
+        }
+        const machine = current.targetDeviceId ? machines.get(current.targetDeviceId) : null;
+        if (!machine || !machine.online) {
+          return rejectLive(
+            "machine_offline",
+            `批准跨机只读探针失败（machine_offline）：目标机器已离线（${current.targetRepoRef}）`,
+          );
+        }
+        const repoSummary =
+          current.targetRepoId && current.targetDeviceId
+            ? repos.get(current.targetRepoId, current.targetDeviceId)
+            : null;
+        if (!repoSummary) {
+          return rejectLive(
+            "repo_not_found",
+            `批准跨机只读探针失败（repo_not_found）：目标仓库已不在该机器登记（${current.targetRepoRef}）`,
+          );
+        }
+        const agent = current.selectedAgent;
+        if (!agent || !machine.agents.includes(agent) || machine.agentCapabilities?.[agent]?.readonly !== true) {
+          return rejectLive(
+            "no_readonly_agent",
+            `批准跨机只读探针失败（no_readonly_agent）：目标机器 ${machine.name} 的只读代理能力已变化`,
+          );
+        }
+        const activeThreadSiblings = sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM sh_worker
+          WHERE threadId = ${current.threadId} AND workerRelation = 'sibling'
+            AND state IN ('queued', 'starting', 'running', 'recovering')
+        `[0]!.n;
+        if (activeThreadSiblings >= MAX_IN_FLIGHT_SIBLINGS_PER_THREAD) {
+          return rejectLive("quota_exceeded", "批准跨机只读探针失败（quota_exceeded）：当前 Thread 运行中的只读探针已达上限");
+        }
+
+        const parent = workers.get(current.workerId);
+        const spawnedWorkerId = `w_${ulid()}`;
+        const cmdId = `proposal:${id}`;
+        workers.register({
+          workerId: spawnedWorkerId,
+          threadId: current.threadId,
+          deviceId: machine.deviceId,
+          repoId: repoSummary.repoId,
+          agent,
+          mode: "readonly",
+          cmdId,
+          parentWorker: current.workerId,
+          workerRelation: "sibling",
+          proposalDepth: Math.min(MAX_PROPOSAL_DEPTH, (parent?.proposalDepth ?? 0) + 1),
+        });
+        sql`
+          UPDATE sh_proposal
+          SET status = 'approved', spawnedWorkerId = ${spawnedWorkerId}, cmdId = ${cmdId},
+              decidedBy = ${ownerRef}, decidedAt = ${tsNow}
+          WHERE id = ${id}
+        `;
+        questions.close(id, "批准只读探针");
+        timeline.add(
+          current.threadId,
+          "dispatch",
+          `已批准跨机只读探针 ${spawnedWorkerId}（${agent}@${machine.name}，仓库 ${escapeMarkers(repoSummary.name)}）：${current.reason}`,
+          {
+            workerId: spawnedWorkerId,
+            parentWorker: current.workerId,
+            proposalId: id,
+            proposalKey: current.proposalKey,
+            cmdId,
+            repoId: repoSummary.repoId,
+            workerRelation: "sibling",
+            crossMachine: true,
+          },
+        );
+        recomputeThreadState(current.threadId);
+        return {
+          status: "approved",
+          appliedNow: true,
+          proposal: proposals.get(id)!,
+          spawnedWorkerId,
+          cmdId,
+        };
       });
     },
   };
@@ -1823,6 +2231,7 @@ export function createLedger(deps: LedgerDeps) {
         SELECT * FROM sh_outbound
         WHERE kind = 'card' AND createdAt > ${sinceMs} AND (
           id LIKE 'offer:%' OR id LIKE 'offline:%' OR id LIKE 'switch:%' OR id LIKE 'noteask:%'
+          OR id LIKE 'proposalapproval:%' OR id LIKE 'prwatchapproval:%'
           OR (id LIKE 'notify:report:%' AND payload LIKE '%pr_approve%')
           OR questionId IS NOT NULL OR payload LIKE '%"action":"ask:%' OR payload LIKE '%"action":"asknew:%'
         )
@@ -2323,13 +2732,23 @@ export function createLedger(deps: LedgerDeps) {
           sql`UPDATE sh_worker SET state = 'running', lastOutcome = NULL, updatedAt = ${now()} WHERE workerId = ${workerId}`;
           timeline.add(worker.threadId, "resumed", "重新收到事件，恢复运行（回收后自动纠正）", { workerId, seq, resurrected: true });
         }
+        const isSibling = worker.workerRelation === "sibling";
         const status = (event.status === "blocked" || event.status === "needs_decision" ? event.status : "done") as ReportRow["status"];
+        const normalizedLabels = normalizeReportLabels(event.labels);
+        if (normalizedLabels.dropped.length > 0) {
+          sql`
+            INSERT INTO sh_channel_log (ts, channel, reason, detail)
+            VALUES (${now()}, 'local', 'report_labels_dropped', ${`${workerId}:${seq} dropped=${normalizedLabels.dropped.join(",")}`})
+          `;
+        }
+        const storedLabels = normalizedLabels.labels;
         sql`
-          INSERT OR IGNORE INTO sh_report (workerId, seq, threadId, status, summary, changes, decisions, leftovers, tests, question, next, git, answer, receivedAt)
+          INSERT OR IGNORE INTO sh_report (workerId, seq, threadId, status, summary, changes, decisions, leftovers, labels, tests, question, next, git, answer, receivedAt)
           VALUES (${workerId}, ${seq}, ${worker.threadId}, ${status}, ${str(event.summary) ?? ""},
                   ${event.changes ? JSON.stringify(event.changes) : null},
                   ${event.decisions ? JSON.stringify(event.decisions) : null},
                   ${event.leftovers ? JSON.stringify(event.leftovers) : null},
+                  ${storedLabels !== undefined ? JSON.stringify(storedLabels) : null},
                   ${event.tests ? JSON.stringify(event.tests) : null},
                   ${str(event.question)}, ${str(event.next)},
                   ${event.git ? JSON.stringify(event.git) : null}, ${str(event.answer)}, ${now()})
@@ -2338,10 +2757,27 @@ export function createLedger(deps: LedgerDeps) {
           UPDATE sh_worker SET lastOutcome = ${`reported:${status}`}, lastEventAt = ${ts}, updatedAt = ${now()}
           WHERE workerId = ${workerId}
         `;
-        sql`UPDATE sh_thread SET unread = 1 WHERE threadId = ${worker.threadId}`;
-        timeline.add(worker.threadId, "report", `汇报（${status}）：${str(event.summary) ?? ""}`, { workerId, seq });
+        if (!isSibling || status !== "done") {
+          sql`UPDATE sh_thread SET unread = 1 WHERE threadId = ${worker.threadId}`;
+        }
+        const labelSuffix = storedLabels && storedLabels.length > 0 ? `\n标签：${storedLabels.join(", ")}` : "";
+        timeline.add(
+          worker.threadId,
+          "report",
+          `${isSibling ? "只读探针汇报" : "汇报"}（${status}）：${str(event.summary) ?? ""}${labelSuffix}`,
+          {
+            workerId,
+            seq,
+            ...(isSibling ? { workerRelation: "sibling" } : {}),
+            ...(storedLabels && storedLabels.length > 0 ? { labels: storedLabels } : {}),
+          },
+        );
         if (status === "done") {
-          notifications.queue(`report:${workerId}:${seq}`, "done_report", worker.threadId, workerId);
+          // ADR-0022 Decision 8: `sibling` done reports feed Steward synthesis via `event`
+          // wake without spamming a standalone owner done card.
+          if (!isSibling) {
+            notifications.queue(`report:${workerId}:${seq}`, "done_report", worker.threadId, workerId);
+          }
         } else {
           questions.insert({
             qid: `q_${workerId}_${seq}`, threadId: worker.threadId, workerId,
@@ -2364,13 +2800,15 @@ export function createLedger(deps: LedgerDeps) {
               changes: Array.isArray(event.changes) ? (event.changes as string[]) : null,
               decisions: Array.isArray(event.decisions) ? (event.decisions as string[]) : null,
               leftovers: Array.isArray(event.leftovers) ? (event.leftovers as string[]) : null,
+              labels: storedLabels ?? null,
               tests: (event.tests as ReportRow["tests"]) ?? null,
               question: str(event.question),
+              answer: str(event.answer),
               git: (event.git as ReportRow["git"]) ?? null,
             },
-            notified: status === "done",
+            notified: status === "done" && !isSibling,
             // issue #8: the anti-drift rewrite prompt rides the done-bookkeeping wake.
-            ...(status === "done" && threads.summaryStatus(worker.threadId).rewriteDue ? { summaryRewriteDue: true } : {}),
+            ...(status === "done" && !isSibling && threads.summaryStatus(worker.threadId).rewriteDue ? { summaryRewriteDue: true } : {}),
             ...(status !== "done" ? { questionId: `q_${workerId}_${seq}` } : {}),
           }),
           { priority: status === "done" ? "normal" : "high" },
@@ -2558,6 +2996,270 @@ export function createLedger(deps: LedgerDeps) {
         });
         break;
       }
+      case "proposal": {
+        if (resurrectable) {
+          sql`UPDATE sh_worker SET state = 'running', lastOutcome = NULL, updatedAt = ${now()} WHERE workerId = ${workerId}`;
+          timeline.add(worker.threadId, "resumed", "重新收到事件，恢复运行（回收后自动纠正）", { workerId, seq, resurrected: true });
+        }
+        sql`UPDATE sh_worker SET lastEventAt = ${ts}, updatedAt = ${now()} WHERE workerId = ${workerId}`;
+        const parsedProposal = ProposalEventSchema.safeParse(event);
+        if (!parsedProposal.success) {
+          sql`
+            INSERT INTO sh_channel_log (ts, channel, reason, detail)
+            VALUES (${now()}, 'local', 'invalid_proposal_event', ${`${workerId}:${seq}`})
+          `;
+          break;
+        }
+        const p = parsedProposal.data;
+        const dedupeKey = `${workerId}:${p.proposalKey}`;
+        if (proposals.byDedupeKey(dedupeKey) !== null) {
+          // Replay or duplicate proposalKey from the same worker: idempotent no-op.
+          break;
+        }
+        const safePrompt = escapeMarkers(p.prompt);
+        const safeReason = escapeMarkers(p.reason);
+        const safeTarget = escapeMarkers(p.targetRepoRef);
+        const tsNow = now();
+        const existingWorkerProposalCount =
+          sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_proposal WHERE workerId = ${workerId}`[0]!.n;
+        const recordRejected = (
+          rejectCode: ProposalRejectCode,
+          noteText: string,
+          targetDeviceId: string | null = null,
+          targetRepoId: string | null = null,
+        ): void => {
+          if (existingWorkerProposalCount >= 20) {
+            sql`
+              INSERT INTO sh_channel_log (ts, channel, reason, detail)
+              VALUES (${tsNow}, 'local', 'proposal_spam_dropped', ${`${workerId}:${seq} code=${rejectCode}`})
+            `;
+            return;
+          }
+          const proposalId = `prop_${ulid()}`;
+          sql`
+            INSERT INTO sh_proposal (
+              id, workerId, seq, threadId, kind, proposalKey, dedupeKey, targetRepoRef,
+              targetRepoId, targetDeviceId, selectedAgent, prompt, reason, status, rejectCode,
+              spawnedWorkerId, cmdId, createdAt, expiresAt, decidedBy, decidedAt
+            )
+            VALUES (
+              ${proposalId}, ${workerId}, ${seq}, ${worker.threadId}, ${p.kind}, ${p.proposalKey}, ${dedupeKey}, ${safeTarget},
+              ${targetRepoId}, ${targetDeviceId}, NULL, ${safePrompt}, ${safeReason}, 'rejected', ${rejectCode},
+              NULL, NULL, ${tsNow}, NULL, 'steward_core', ${tsNow}
+            )
+          `;
+          timeline.add(worker.threadId, "note", noteText, {
+            workerId,
+            seq,
+            proposalId,
+            proposalKey: p.proposalKey,
+            rejectCode,
+          });
+        };
+
+        if ((worker.proposalDepth ?? 0) >= MAX_PROPOSAL_DEPTH || worker.workerRelation === "sibling") {
+          recordRejected("depth_exceeded", `拒绝只读探针提案（depth_exceeded）：子探针不可级联发起提案（${safeTarget}）`);
+          break;
+        }
+        const activeThreadSiblings = sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM sh_worker
+          WHERE threadId = ${worker.threadId} AND workerRelation = 'sibling'
+            AND state IN ('queued', 'starting', 'running', 'recovering')
+        `[0]!.n;
+        const pendingThreadProposals = sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM sh_proposal
+          WHERE threadId = ${worker.threadId} AND status = 'pending_owner' AND expiresAt > ${tsNow}
+        `[0]!.n;
+        if (
+          existingWorkerProposalCount >= MAX_PROPOSALS_PER_WORKER ||
+          activeThreadSiblings + pendingThreadProposals >= MAX_IN_FLIGHT_SIBLINGS_PER_THREAD
+        ) {
+          recordRejected("quota_exceeded", `拒绝只读探针提案（quota_exceeded）：超出配额上限（${safeTarget}）`);
+          break;
+        }
+        const matches = repos.machinesHaving(p.targetRepoRef);
+        if (matches.length === 0) {
+          recordRejected("repo_not_found", `拒绝只读探针提案（repo_not_found）：未找到已登记仓库「${safeTarget}」`);
+          break;
+        }
+        const sameMachineRepo = matches.find((m) => m.deviceId === worker.deviceId);
+        if (!sameMachineRepo) {
+          // ADR-0022 Stage 4 (v2): cross-machine `readonly_probe` NEVER auto-approves; verify an
+          // online remote machine with a `readonly: true` agent exists, then enter `pending_owner`
+          // and deliver a bound owner confirmation card to Needs you.
+          const remoteMatches = matches.filter((m) => m.deviceId !== worker.deviceId);
+          const onlineCandidates = remoteMatches
+            .map((rm) => ({ repo: rm, machine: machines.get(rm.deviceId) }))
+            .filter((c): c is { repo: (typeof remoteMatches)[number]; machine: MachineRow } =>
+              c.machine !== null && c.machine.online,
+            );
+          if (onlineCandidates.length === 0) {
+            recordRejected(
+              "machine_offline",
+              `拒绝跨机只读探针提案（machine_offline）：目标仓库「${safeTarget}」所在远端机器不在线`,
+              remoteMatches[0]!.deviceId,
+              remoteMatches[0]!.repoId,
+            );
+            break;
+          }
+          const readonlyCandidates = onlineCandidates
+            .map((c) => ({
+              ...c,
+              agent: selectReadonlyAgent(c.machine, worker.agent),
+              freeSlots: Math.max(0, c.machine.maxWorkers - machines.runningCount(c.machine.deviceId)),
+            }))
+            .filter((c): c is typeof c & { agent: string } => c.agent !== null);
+          if (readonlyCandidates.length === 0) {
+            recordRejected(
+              "no_readonly_agent",
+              `拒绝跨机只读探针提案（no_readonly_agent）：远端在线机器上没有支持严格只读模式的代理（${safeTarget}）`,
+              onlineCandidates[0]!.repo.deviceId,
+              onlineCandidates[0]!.repo.repoId,
+            );
+            break;
+          }
+          const thread = threads.get(worker.threadId);
+          if (!thread || thread.archived) {
+            recordRejected(
+              "thread_archived",
+              `拒绝跨机只读探针提案（thread_archived）：所属 Thread 已归档`,
+              readonlyCandidates[0]!.repo.deviceId,
+              readonlyCandidates[0]!.repo.repoId,
+            );
+            break;
+          }
+          const pendingGlobalOwner = sql<{ n: number }>`
+            SELECT COUNT(*) AS n FROM sh_proposal WHERE status = 'pending_owner' AND expiresAt > ${tsNow}
+          `[0]!.n;
+          if (pendingGlobalOwner >= MAX_PENDING_OWNER_PROPOSALS) {
+            recordRejected(
+              "quota_exceeded",
+              `拒绝跨机只读探针提案（quota_exceeded）：待确认跨机探针已达全局上限（${safeTarget}）`,
+              readonlyCandidates[0]!.repo.deviceId,
+              readonlyCandidates[0]!.repo.repoId,
+            );
+            break;
+          }
+          readonlyCandidates.sort(
+            (a, b) =>
+              b.freeSlots - a.freeSlots ||
+              a.repo.deviceId.localeCompare(b.repo.deviceId) ||
+              a.repo.repoId.localeCompare(b.repo.repoId),
+          );
+          const chosen = readonlyCandidates[0]!;
+          const proposalId = `prop_${ulid()}`;
+          const expiresAt = tsNow + PROPOSAL_CONFIRM_TTL_MS;
+          sql`
+            INSERT INTO sh_proposal (
+              id, workerId, seq, threadId, kind, proposalKey, dedupeKey, targetRepoRef,
+              targetRepoId, targetDeviceId, selectedAgent, prompt, reason, status, rejectCode,
+              spawnedWorkerId, cmdId, createdAt, expiresAt, decidedBy, decidedAt
+            )
+            VALUES (
+              ${proposalId}, ${workerId}, ${seq}, ${worker.threadId}, ${p.kind}, ${p.proposalKey}, ${dedupeKey}, ${safeTarget},
+              ${chosen.repo.repoId}, ${chosen.repo.deviceId}, ${chosen.agent}, ${safePrompt}, ${safeReason}, 'pending_owner', NULL,
+              NULL, NULL, ${tsNow}, ${expiresAt}, NULL, NULL
+            )
+          `;
+          questions.insert({
+            qid: proposalId,
+            threadId: null,
+            workerId: null,
+            text: `确认在 ${chosen.machine.name} 启动只读探针查看 ${escapeMarkers(chosen.repo.repoName)}？原因：${safeReason}`,
+            options: ["批准只读探针", "暂不探测"],
+          });
+          notifications.queue(`proposal:${proposalId}`, "proposal_confirm", worker.threadId, workerId, proposalId);
+          sql`UPDATE sh_thread SET unread = 1 WHERE threadId = ${worker.threadId}`;
+          timeline.add(
+            worker.threadId,
+            "question",
+            `等待确认跨机只读探针（${chosen.agent}@${chosen.machine.name}，仓库 ${escapeMarkers(chosen.repo.repoName)}）：${safeReason}`,
+            {
+              workerId,
+              seq,
+              proposalId,
+              proposalKey: p.proposalKey,
+              targetDeviceId: chosen.repo.deviceId,
+              targetRepoId: chosen.repo.repoId,
+            },
+          );
+          break;
+        }
+        const activeGlobalAutoSiblings = sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM sh_worker w
+          JOIN sh_proposal pr ON pr.spawnedWorkerId = w.workerId
+          WHERE w.workerRelation = 'sibling'
+            AND w.state IN ('queued', 'starting', 'running', 'recovering')
+            AND pr.decidedBy = 'auto_same_machine'
+        `[0]!.n;
+        if (activeGlobalAutoSiblings >= MAX_GLOBAL_AUTO_SIBLINGS) {
+          recordRejected("quota_exceeded", `拒绝只读探针提案（quota_exceeded）：超出配额上限（${safeTarget}）`);
+          break;
+        }
+        const machine = machines.get(worker.deviceId);
+        if (!machine || !machine.online) {
+          recordRejected(
+            "machine_offline",
+            `拒绝只读探针提案（machine_offline）：同机不在线，无法启动只读探针（${safeTarget}）`,
+            worker.deviceId,
+            sameMachineRepo.repoId,
+          );
+          break;
+        }
+        const selectedAgent = selectReadonlyAgent(machine, worker.agent);
+        if (!selectedAgent) {
+          recordRejected(
+            "no_readonly_agent",
+            `拒绝只读探针提案（no_readonly_agent）：机器 ${machine.name} 上没有支持严格只读模式的代理`,
+            worker.deviceId,
+            sameMachineRepo.repoId,
+          );
+          break;
+        }
+
+        const proposalId = `prop_${ulid()}`;
+        const spawnedWorkerId = `w_${ulid()}`;
+        const cmdId = `proposal:${proposalId}`;
+        workers.register({
+          workerId: spawnedWorkerId,
+          threadId: worker.threadId,
+          deviceId: worker.deviceId,
+          repoId: sameMachineRepo.repoId,
+          agent: selectedAgent,
+          mode: "readonly",
+          cmdId,
+          parentWorker: worker.workerId,
+          workerRelation: "sibling",
+          proposalDepth: (worker.proposalDepth ?? 0) + 1,
+        });
+        sql`
+          INSERT INTO sh_proposal (
+            id, workerId, seq, threadId, kind, proposalKey, dedupeKey, targetRepoRef,
+            targetRepoId, targetDeviceId, selectedAgent, prompt, reason, status, rejectCode,
+            spawnedWorkerId, cmdId, createdAt, expiresAt, decidedBy, decidedAt
+          )
+          VALUES (
+            ${proposalId}, ${workerId}, ${seq}, ${worker.threadId}, ${p.kind}, ${p.proposalKey}, ${dedupeKey}, ${safeTarget},
+            ${sameMachineRepo.repoId}, ${worker.deviceId}, ${selectedAgent}, ${safePrompt}, ${safeReason}, 'auto_approved', NULL,
+            ${spawnedWorkerId}, ${cmdId}, ${tsNow}, NULL, 'auto_same_machine', ${tsNow}
+          )
+        `;
+        timeline.add(
+          worker.threadId,
+          "dispatch",
+          `自动批准同机只读探针 ${spawnedWorkerId}（${selectedAgent}@${machine.name}，仓库 ${escapeMarkers(sameMachineRepo.repoName)}）：${safeReason}`,
+          {
+            workerId: spawnedWorkerId,
+            parentWorker: worker.workerId,
+            proposalId,
+            proposalKey: p.proposalKey,
+            cmdId,
+            repoId: sameMachineRepo.repoId,
+            workerRelation: "sibling",
+          },
+        );
+        break;
+      }
       default:
         // process_exit and future event types carry no ledger semantics yet.
         break;
@@ -2586,6 +3288,7 @@ export function createLedger(deps: LedgerDeps) {
    * never set by the LLM or the user. `unread` is set where the news lands, cleared on read.
    */
   function recomputeThreadState(threadId: string): void {
+    const tsNow = now();
     sql`
       UPDATE sh_thread SET state = CASE
         WHEN EXISTS (
@@ -2593,9 +3296,11 @@ export function createLedger(deps: LedgerDeps) {
         ) THEN 'running'
         WHEN EXISTS (
           SELECT 1 FROM sh_question q WHERE q.threadId = sh_thread.threadId AND q.status = 'open'
+        ) OR EXISTS (
+          SELECT 1 FROM sh_proposal pr WHERE pr.threadId = sh_thread.threadId AND pr.status = 'pending_owner' AND pr.expiresAt > ${tsNow}
         ) THEN 'waiting_you'
         ELSE 'idle'
-      END, lastActivityAt = ${now()}
+      END, lastActivityAt = ${tsNow}
       WHERE threadId = ${threadId}
     `;
   }
@@ -2663,11 +3368,15 @@ export function createLedger(deps: LedgerDeps) {
   const debug = {
     snapshot(): {
       machines: MachineRow[];
+      repos: RepoSummaryRow[];
       threads: Array<ThreadRow & { repoIds: string[]; workers: WorkerRow[]; questions: QuestionRow[]; timeline: TimelineRow[] }>;
+      reports: ReportRow[];
       /** Every question row, threadless routing asks included (issue #7). */
       questions: QuestionRow[];
       /** The consent gate's rows (issue #21) — what the user tapped and what came back. */
       prConsent: PrConsentRow[];
+      /** ADR-0022 Stage 3: worker read-only proposals and their deterministic verdicts. */
+      proposals: ProposalRow[];
       pendingNotifications: NotifyRow[];
       runs: RunRow[];
       wakes: WakeRow[];
@@ -2683,6 +3392,7 @@ export function createLedger(deps: LedgerDeps) {
     } {
       return {
         machines: machines.list(),
+        repos: repos.list(),
         threads: threads.list().map((t) => ({
           ...t,
           repoIds: threads.repoIds(t.threadId),
@@ -2692,10 +3402,12 @@ export function createLedger(deps: LedgerDeps) {
           `,
           timeline: timeline.list(t.threadId),
         })),
+        reports: sql<Record<string, unknown>>`SELECT * FROM sh_report ORDER BY receivedAt, seq`.map(viewReport),
         questions: sql<QuestionRow>`
           SELECT * FROM sh_question ORDER BY askedAt
         `,
         prConsent: sql<Record<string, unknown>>`SELECT * FROM sh_pr_consent ORDER BY decidedAt`.map(viewPrConsent),
+        proposals: proposals.list(),
         pendingNotifications: notifications.pending(),
         runs: runs.rows(),
         wakes: sql<WakeRow>`SELECT * FROM sh_wake ORDER BY id`,
@@ -2722,7 +3434,7 @@ export function createLedger(deps: LedgerDeps) {
 
   return {
     machines, machineStatus, offlineDispatches, repos, threads, workers, reports, questions, timeline, notifications, outbound,
-    runs, ownerInputs, webRequests, wakes, notes, budget, routines, followups, offers, handoff, views, applyPendingEvents, recomputeThreadState, debug,
+    runs, ownerInputs, webRequests, wakes, notes, budget, routines, followups, offers, handoff, proposals, views, applyPendingEvents, recomputeThreadState, debug,
     prConsent,
   };
 }

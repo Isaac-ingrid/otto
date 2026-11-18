@@ -19,10 +19,13 @@ import {
   prConsentFor,
   prCreatedCard,
   prFailureNeedsYou,
+  mergedSectionsText,
   renderReportCard,
   reportCardFor,
   toneOfReport,
+  workerQuestionCard,
 } from "../src/report-template.ts";
+import { eventWakeText } from "../src/wake-text.ts";
 
 it("keeps the complete question option so paths with the same prefix remain distinguishable", () => {
   const labels = [
@@ -300,5 +303,78 @@ describe("reportCardFor: the answer section (issue #76)", () => {
     expect(card.text).toContain("做了什么：");
     expect(card.text).toContain("auth/session.ts 里补上了 token 过期后的刷新");
     expect(card.text).toContain("顺带说明一下这次改动的背景。");
+  });
+});
+
+describe("bounded report labels deterministic rendering (ADR-0022 Stage 1)", () => {
+  it("omits 标签 line when labels is null or empty, and renders it beneath heading when present", () => {
+    const unlabeled = reportCardFor(report({ labels: null }), worker, "mac-studio", "登录 bug");
+    const emptyLabeled = reportCardFor(report({ labels: [] }), worker, "mac-studio", "登录 bug");
+    expect(unlabeled.text).not.toContain("标签：");
+    expect(emptyLabeled.text).toBe(unlabeled.text);
+
+    const labeled = reportCardFor(
+      report({ labels: ["needs-human-verify", "flaky-test"] }),
+      worker,
+      "mac-studio",
+      "登录 bug",
+    );
+    const lines = labeled.text.split("\n");
+    expect(lines[0]).toContain("✅ 登录 bug 修好，测试通过");
+    expect(lines[1]).toBe("标签：needs-human-verify, flaky-test");
+  });
+
+  it("renders labels in workerQuestionCard, mergedSectionsText, and eventWakeText only when non-empty", () => {
+    const question = workerQuestionCard({
+      question: "缺少测试环境变量，请确认是否使用 staging 配置？",
+      labels: ["blocked-by-env"],
+      threadTitle: "集成测试",
+      footer: "f",
+    });
+    expect(question.text).toContain("标签：blocked-by-env");
+
+    const merged = mergedSectionsText([
+      {
+        kind: "report",
+        tone: "success",
+        conclusion: "迁移完成",
+        did: ["新增 039_report_labels"],
+        labels: ["needs-migration"],
+        threadTitle: "数据库演进",
+      },
+    ]);
+    expect(merged).toContain("**✅ 「数据库演进」迁移完成**\n标签：needs-migration\n- 新增 039_report_labels");
+
+    const wakeWithLabels = eventWakeText({
+      thread: {
+        threadId: "t_test",
+        title: "登录 bug",
+        goal: null,
+        summary: null,
+        summaryAt: null,
+        state: "idle",
+        unread: true,
+        lastMachine: "dev_x",
+        lastActivityAt: 1,
+        archived: false,
+        createdFromMsg: null,
+        createdAt: 1,
+      },
+      worker,
+      machine: null,
+      report: {
+        status: "done",
+        summary: "修好了",
+        changes: ["a.ts"],
+        decisions: null,
+        leftovers: null,
+        labels: ["scope-creep"],
+        tests: null,
+        question: null,
+        git: null,
+      },
+      notified: true,
+    });
+    expect(wakeWithLabels).toContain("  标签：scope-creep");
   });
 });

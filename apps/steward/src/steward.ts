@@ -101,6 +101,7 @@ import {
   prCreatedCard,
   prFailureNeedsYou,
   prCommandArgs,
+  proposalApprovalCard,
   type AskCardButton,
   type QuietSection,
 } from "./report-template.ts";
@@ -305,6 +306,7 @@ export class Steward extends Agent<Env> {
       drainWakes: () => this.drainWakes(),
       armWorkerSweeps: () => this.armWorkerSweeps(),
       armQuestionFallback: () => this.armQuestionFallback(),
+      dispatchApprovedProposals: () => this.dispatcher.dispatchApprovedProposals(),
       cancelDirectoryReadsForConnection: (connectionId, result) => this.connectorProto.cancelReadsForConnection(connectionId, result),
       cancelDirectoryReadsForDevice: (deviceId, result) => this.connectorProto.cancelReadsForDevice(deviceId, result),
     }));
@@ -352,6 +354,8 @@ export class Steward extends Agent<Env> {
     this.resetWorkerSweepChain();
     // Crash-window machine-status intents (created, never drained) get their due-date wake.
     this.rearmNoticeDrain();
+    // Crash-window auto-approved proposals (reduced, never enqueued) dispatch now.
+    void this.dispatcher.dispatchApprovedProposals();
     // Wakes queued by past reducers (crash between queue and submit, §11) drain now.
     void this.drainWakes();
     void this.pollRuns();
@@ -1585,6 +1589,7 @@ export class Steward extends Agent<Env> {
         // 要] cannot ride a merged card (sections carry no buttons, and one merged message
         // settles N member rows' providerMsgIds, which would break the tap's §3.1 routing) —
         // so it pushes on its own, buttons intact.
+        const isProposalConfirm = intent.kind === "proposal_confirm" && intent.questionId !== null;
         const quiet =
           intent.kind === "done_report" &&
           !questionTied &&
@@ -1593,11 +1598,16 @@ export class Steward extends Agent<Env> {
         await this.enqueueOutbound({
           kind: "card",
           to: OWNER_ID,
-          // Stable id (issue #21): the done card's [同意]/[先不要] resolves through this id
-          // (`notify:report:<workerId>:<seq>`) on callback — the §3.1 rule applied to consent.
-          id: `notify:${intent.dedupeKey}`,
+          // Stable id (issue #21 / ADR-0022): done-card PR consent (`notify:report:<w>:<seq>`)
+          // and cross-machine readonly proposal confirmation (`proposalapproval:<proposalId>`)
+          // resolve through their bound outbound row id on callback.
+          id: isProposalConfirm ? `proposalapproval:${intent.questionId}` : `notify:${intent.dedupeKey}`,
           threadId: intent.threadId,
-          questionId: questionTied && question!.threadId !== null ? question!.qid : null,
+          questionId: isProposalConfirm
+            ? intent.questionId
+            : questionTied && question!.threadId !== null
+              ? question!.qid
+              : null,
           card: rendered.card,
           urgency: quiet ? "quiet" : "push",
           ...(quiet && rendered.section !== undefined ? { part: rendered.section } : {}),
@@ -1632,6 +1642,39 @@ export class Steward extends Agent<Env> {
     // steward.md §6.4: the timeline link is appended by the system — a fresh one-time link
     // per card, never by the (M2) LLM.
     const detailsUrl = await this.web.linkUrl(linkTargetForThread(thread.threadId));
+
+    if (intent.kind === "proposal_confirm") {
+      if (!intent.questionId) return null;
+      const proposal = this.ledger.proposals.get(intent.questionId);
+      if (
+        !proposal ||
+        proposal.status !== "pending_owner" ||
+        proposal.expiresAt === null ||
+        proposal.expiresAt <= Date.now() ||
+        !proposal.targetDeviceId ||
+        !proposal.targetRepoId ||
+        !proposal.selectedAgent
+      ) {
+        return null;
+      }
+      const targetMachine = this.ledger.machines.get(proposal.targetDeviceId);
+      const targetRepo = this.ledger.repos.get(proposal.targetRepoId, proposal.targetDeviceId);
+      return {
+        card: proposalApprovalCard({
+          proposalId: proposal.id,
+          threadTitle: thread.title,
+          workerId: worker.workerId,
+          sourceMachineName: machineName,
+          targetMachineName: targetMachine?.name ?? proposal.targetDeviceId,
+          targetRepoName: targetRepo?.name ?? proposal.targetRepoRef,
+          targetRepoId: proposal.targetRepoId,
+          selectedAgent: proposal.selectedAgent,
+          reason: proposal.reason,
+          prompt: proposal.prompt,
+        }),
+        holdsConsentAsk: true,
+      };
+    }
 
     // Machine status (issue #14, steward.md §5.3): only when in-flight work is affected,
     // debounced two minutes — and the drop only counts if the worker is still unreachable
@@ -1696,6 +1739,7 @@ export class Steward extends Agent<Env> {
                 tone: toneOfReport(report.status),
                 conclusion: report.summary,
                 did: didBullets(report),
+                ...(report.labels?.length ? { labels: report.labels } : {}),
                 ...(needsYou !== undefined ? { needsYou } : {}),
                 threadTitle: thread.title,
                 ...(detailsUrl ? { detailsUrl } : {}),
@@ -1745,6 +1789,7 @@ export class Steward extends Agent<Env> {
           question: question.text,
           ...(report?.summary ? { summary: report.summary } : {}),
           ...(report?.changes?.length ? { did: didBullets(report) } : {}),
+          ...(report?.labels?.length ? { labels: report.labels } : {}),
           threadTitle: thread.title,
           footer,
           detailsUrl: detailsUrl ?? undefined,
@@ -2142,6 +2187,7 @@ export class Steward extends Agent<Env> {
     let reaped = 0;
     const now = Date.now();
     try {
+      this.ledger.proposals.expireDue(now);
       // Query with the shorter threshold and classify per worker in one pass.
       for (const worker of this.ledger.workers.silentSince(Math.min(this.reapOfflineMs, this.stallAlarmMs))) {
         const silentMs = now - (worker.lastEventAt ?? worker.createdAt);
@@ -2332,6 +2378,7 @@ export class Steward extends Agent<Env> {
   async sweepQuestionFallback(): Promise<{ forwarded: number }> {
     let forwarded = 0;
     try {
+      this.ledger.proposals.expireDue();
       const pending = this.ledger.questions.unhandled();
       this.ledger.questions.queueFallbacks();
       forwarded = this.ledger.notifications.pending().filter((n) => n.questionId !== null && pending.some((q) => q.qid === n.questionId)).length;
@@ -2581,6 +2628,56 @@ export class Steward extends Agent<Env> {
     }
   }
 
+  private async handleProposalApprovalAction(msgId: string, action: string, cardMsgId: string): Promise<void> {
+    const match = /^proposal:(prop_[A-Za-z0-9_-]+):(approve|decline)$/.exec(action);
+    const inbound = this.sql`SELECT 1 AS ok FROM sh_inbound WHERE channel = 'local' AND msgId = ${msgId} AND ownerAuthorized = 1 AND eventType = 'action'`;
+    if (!match || inbound.length !== 1) return;
+    const proposalId = match[1]!;
+    const approve = match[2] === "approve";
+    const row = this.ledger.outbound.rowForProviderMsg(cardMsgId);
+    if (!row || row.id !== `proposalapproval:${proposalId}`) return;
+    const card = this.ledger.outbound.row(row.id);
+    if (
+      card?.kind !== "card" ||
+      !cardView((JSON.parse(String(card.payload)) as { card?: unknown }).card).buttons.some((b) => b.action === action)
+    ) {
+      return;
+    }
+    try {
+      const result = this.ledger.proposals.decide(proposalId, approve, `user:${msgId}`);
+      if (result.status === "not_found") return;
+      const threadId = result.proposal.threadId;
+      this.ledger.ownerInputs.record(
+        "local",
+        msgId,
+        approve ? "批准跨机只读探针" : "暂不探测跨机只读探针",
+        threadId,
+      );
+      let text: string;
+      if (result.status === "approved") {
+        await this.dispatcher.dispatchApprovedProposals();
+        const targetMachineName = result.proposal.targetDeviceId
+          ? (this.ledger.machines.get(result.proposal.targetDeviceId)?.name ?? result.proposal.targetDeviceId)
+          : "目标机器";
+        text = `已批准跨机只读探针 ${result.spawnedWorkerId}（${result.proposal.selectedAgent}@${targetMachineName}，仓库 ${result.proposal.targetRepoRef}），正在只读模式下启动；不影响主会话写分支与其他提问。`;
+      } else if (result.status === "declined") {
+        text = result.appliedNow
+          ? "已拒绝此次跨机只读探针；未启动远端会话，主任务与其他提问不受影响。"
+          : "该跨机只读探针此前已拒绝，不会重复执行。";
+      } else if (result.status === "expired") {
+        text = "该跨机只读探针确认已过期（超过 10 分钟），未启动远端会话。";
+      } else if (result.status === "rejected") {
+        text = `无法启动跨机只读探针（${result.rejectCode}）：目标机器或仓库状态已变化，未下发任何执行命令。`;
+      } else {
+        text = `该跨机只读探针确认已处理（当前状态：${result.proposal.status}），不会重复启动。`;
+      }
+      await this.dispatcher.replyToCard(cardMsgId, text, threadId);
+    } catch (err) {
+      this.logChannel("proposal_approval_failed", `${proposalId} ${errorText(err)}`);
+      await this.dispatcher.replyToCard(cardMsgId, "处理跨机只读探针确认时出错，未启动任何远端会话。");
+    }
+  }
+
   private async armPrWatches(): Promise<void> {
     // One idempotent cron, not an LLM heartbeat or a self-extending one-shot chain.
     await this.schedule("* * * * *", "pollPrWatches");
@@ -2814,6 +2911,17 @@ export class Steward extends Agent<Env> {
     this.ledger.ownerInputs.record("local", input.msgId, input.text, routedThread?.threadId ?? null);
     if (routedRow?.questionId && this.prWatchApprovals.get(routedRow.questionId)) {
       await this.dispatcher.replyToCard(input.parentId!, '此 PR 操作尚未因文字回复执行；请使用该消息上的专用确认/不执行按钮。其他提问与 worker 不受影响。', routedThread?.threadId);
+      return;
+    }
+    if (
+      routedRow?.id.startsWith("proposalapproval:") ||
+      (routedRow?.questionId && this.ledger.proposals.get(routedRow.questionId))
+    ) {
+      await this.dispatcher.replyToCard(
+        input.parentId!,
+        "跨机只读探针尚未因文字回复启动；请使用确认卡上的「批准只读探针」或「暂不探测」按钮。其他提问与 worker 不受影响。",
+        routedThread?.threadId,
+      );
       return;
     }
     if (routedThread && input.parentId) {
@@ -3447,6 +3555,10 @@ export class Steward extends Agent<Env> {
       await this.handlePrWatchApprovalAction(input.msgId, action, input.cardMsgId);
       return;
     }
+    if (action.startsWith("proposal:")) {
+      await this.handleProposalApprovalAction(input.msgId, action, input.cardMsgId);
+      return;
+    }
     if (action.startsWith("ask:") || action.startsWith("asknew:")) {
       await this.handleAskCardAction(input.msgId, action, input.cardMsgId);
       return;
@@ -3622,6 +3734,10 @@ export class Steward extends Agent<Env> {
     const question = this.ledger.questions.get(qid ?? "");
     if (qid && this.prWatchApprovals.get(qid)) {
       await this.dispatcher.replyToCard(cardMsgId, '此操作只能使用专用 PR 确认按钮，普通选项不能授权执行。');
+      return;
+    }
+    if (qid && this.ledger.proposals.get(qid)) {
+      await this.dispatcher.replyToCard(cardMsgId, "此操作只能使用确认卡上的专用审批按钮，普通选项不能授权启动跨机探针。");
       return;
     }
     if (!question) {

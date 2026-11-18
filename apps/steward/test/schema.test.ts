@@ -341,4 +341,101 @@ describe("migration 010 (routing, issue #7)", () => {
       expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
     });
   });
+
+  it("039_report_labels: backfills sh_report.labels as NULL on pre-039 rows and tolerates duplicate re-runs", async () => {
+    const id = env.Steward.idFromName(`test-migrations-${crypto.randomUUID()}`);
+    const stub = env.Steward.get(id);
+    await runInDurableObject(stub, async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance);
+      const tx = <T>(fn: () => T): T =>
+        (instance as unknown as { ctx: DurableObjectState }).ctx.storage.transactionSync(fn);
+
+      runMigrations(sql, MIGRATIONS.filter((m) => m.id !== "039_report_labels"), tx);
+      sql`INSERT INTO sh_thread (threadId, title, state, unread, lastActivityAt, archived, createdAt) VALUES ('t_pre39', '旧汇报', 'idle', 0, 1, 0, 1)`;
+      sql`INSERT INTO sh_worker (workerId, threadId, deviceId, agent, mode, state, createdAt, updatedAt) VALUES ('w_pre39', 't_pre39', 'd', 'pi', 'write', 'idle', 1, 1)`;
+      sql`INSERT INTO sh_report (workerId, seq, threadId, status, summary, receivedAt) VALUES ('w_pre39', 1, 't_pre39', 'done', '升级前完成', 1)`;
+
+      runMigrations(sql, MIGRATIONS, tx);
+      expect(sql<{ summary: string; labels: string | null }>`SELECT summary, labels FROM sh_report WHERE workerId = 'w_pre39'`).toEqual([
+        { summary: "升级前完成", labels: null },
+      ]);
+      expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
+    });
+  });
+
+  it("040_repo_hook_capabilities: backfills boolean hook summary defaults on pre-040 sh_repo rows and tolerates duplicate re-runs", async () => {
+    const id = env.Steward.idFromName(`test-migrations-${crypto.randomUUID()}`);
+    const stub = env.Steward.get(id);
+    await runInDurableObject(stub, async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance);
+      const tx = <T>(fn: () => T): T =>
+        (instance as unknown as { ctx: DurableObjectState }).ctx.storage.transactionSync(fn);
+
+      runMigrations(sql, MIGRATIONS.filter((m) => m.id !== "040_repo_hook_capabilities"), tx);
+      sql`INSERT INTO sh_repo (repoId, deviceId, name, path, defaultBranch, remote, updatedAt)
+          VALUES ('/srv/pre40', 'dev_pre40', 'pre40', '/srv/pre40', 'main', 'git@example:pre40.git', 1)`;
+
+      runMigrations(sql, MIGRATIONS, tx);
+      expect(
+        sql<{ capabilityKind: string; hasSetupHook: number; hasArchiveHook: number; approved: number }>`
+          SELECT capabilityKind, hasSetupHook, hasArchiveHook, approved FROM sh_repo WHERE repoId = '/srv/pre40'
+        `,
+      ).toEqual([
+        {
+          capabilityKind: "git",
+          hasSetupHook: 0,
+          hasArchiveHook: 0,
+          approved: 0,
+        },
+      ]);
+      expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
+    });
+  });
+
+  it("041_readonly_proposals: backfills workerRelation/proposalDepth/agentCapabilities defaults, creates sh_proposal with unique dedupeKey, and tolerates duplicate re-runs", async () => {
+    const id = env.Steward.idFromName(`test-migrations-${crypto.randomUUID()}`);
+    const stub = env.Steward.get(id);
+    await runInDurableObject(stub, async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance);
+      const tx = <T>(fn: () => T): T =>
+        (instance as unknown as { ctx: DurableObjectState }).ctx.storage.transactionSync(fn);
+
+      runMigrations(sql, MIGRATIONS.filter((m) => m.id !== "041_readonly_proposals"), tx);
+      sql`INSERT INTO sh_machine (deviceId, name, online, maxWorkers) VALUES ('dev_pre41', 'mac-pre41', 1, 2)`;
+      sql`INSERT INTO sh_thread (threadId, title, state, unread, lastActivityAt, archived, createdAt)
+          VALUES ('t_pre41', '旧主链', 'idle', 0, 1, 0, 1)`;
+      sql`INSERT INTO sh_worker (workerId, threadId, deviceId, agent, mode, state, createdAt, updatedAt)
+          VALUES ('w_pre41', 't_pre41', 'dev_pre41', 'pi', 'write', 'idle', 1, 1)`;
+
+      runMigrations(sql, MIGRATIONS, tx);
+      expect(
+        sql<{ workerRelation: string; proposalDepth: number }>`
+          SELECT workerRelation, proposalDepth FROM sh_worker WHERE workerId = 'w_pre41'
+        `,
+      ).toEqual([{ workerRelation: "relay", proposalDepth: 0 }]);
+      expect(
+        sql<{ agentCapabilities: string | null }>`
+          SELECT agentCapabilities FROM sh_machine WHERE deviceId = 'dev_pre41'
+        `,
+      ).toEqual([{ agentCapabilities: null }]);
+
+      sql`INSERT INTO sh_proposal (
+        id, workerId, seq, threadId, kind, proposalKey, dedupeKey, targetRepoRef,
+        prompt, reason, status, createdAt
+      ) VALUES (
+        'prop_1', 'w_pre41', 1, 't_pre41', 'readonly_probe', 'k1', 'w_pre41:k1', 'shared',
+        'check', 'why', 'rejected', 1
+      )`;
+      expect(() =>
+        sql`INSERT INTO sh_proposal (
+          id, workerId, seq, threadId, kind, proposalKey, dedupeKey, targetRepoRef,
+          prompt, reason, status, createdAt
+        ) VALUES (
+          'prop_2', 'w_pre41', 2, 't_pre41', 'readonly_probe', 'k1', 'w_pre41:k1', 'shared',
+          'check', 'why', 'rejected', 2
+        )`,
+      ).toThrow(/UNIQUE/i);
+      expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
+    });
+  });
 });

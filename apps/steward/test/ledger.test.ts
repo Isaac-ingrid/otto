@@ -295,4 +295,211 @@ describe("the reducer: derived state, unread, notification intents (steward.md �
     const rows = await ownerStub().outboundRows(10);
     expect(rows.some((r) => r.kind === "card" && r.threadId === snap.threads[0]!.threadId)).toBe(true);
   });
+
+  it("persists report.labels (distinguishing undefined->null vs []->[]), strips unknown/excess labels idempotently, and never triggers dispatch or archiving (ADR-0022)", async () => {
+    await ownerStub().setQuietMergeForTest(0);
+    const { ws, reader } = await connectMachine();
+    try {
+      const wOmitted = await dispatchAndAwaitWorker(reader, "无标签任务");
+      await sendEvents(ws, [
+        event(wOmitted, 1, { type: "started", sessionId: wOmitted }),
+        event(wOmitted, 2, { type: "report", status: "done", summary: "未传标签" }),
+        event(wOmitted, 3, { type: "settled", outcome: "reported" }),
+      ]);
+
+      const wEmpty = await dispatchAndAwaitWorker(reader, "空数组标签任务");
+      await sendEvents(ws, [
+        event(wEmpty, 1, { type: "started", sessionId: wEmpty }),
+        event(wEmpty, 2, { type: "report", status: "done", summary: "显式空标签", labels: [] }),
+        event(wEmpty, 3, { type: "settled", outcome: "reported" }),
+      ]);
+
+      const wLabeled = await dispatchAndAwaitWorker(reader, "带受控与越界标签任务");
+      const labeledBatch = [
+        event(wLabeled, 1, { type: "started", sessionId: wLabeled }),
+        event(wLabeled, 2, {
+          type: "report",
+          status: "done",
+          summary: "修好了但需要人工核验",
+          changes: ["apps/steward/src/ledger.ts"],
+          decisions: ["保留幂等边界清洗"],
+          labels: [
+            "blocked-by-env",
+            "unknown-freeform-tag",
+            "blocked-by-env",
+            "needs-human-verify",
+            "flaky-test",
+            "scope-creep",
+          ],
+        }),
+        event(wLabeled, 3, { type: "settled", outcome: "reported" }),
+      ];
+      await sendEvents(ws, labeledBatch);
+
+      let snap = await snapshotWhere(
+        (s) => s.reports.length === 3 && s.threads.every((t) => t.state === "idle"),
+        "all three label variants reduced",
+      );
+
+      // Replay the exact (workerId, seq) batch: idempotent across sh_report, timeline, wakes, and channel log.
+      await sendEvents(ws, labeledBatch);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      snap = await ownerStubDebug();
+
+      const omittedRow = snap.reports.find((r) => r.workerId === wOmitted)!;
+      const emptyRow = snap.reports.find((r) => r.workerId === wEmpty)!;
+      const labeledRow = snap.reports.find((r) => r.workerId === wLabeled)!;
+      expect(omittedRow.labels).toBeNull();
+      expect(emptyRow.labels).toEqual([]);
+      expect(labeledRow.labels).toEqual(["blocked-by-env", "needs-human-verify", "flaky-test"]);
+
+      // Diagnostic logged once, never surfaced as owner failure/question, never persisted in sh_report.
+      const logs = await ownerStub().channelLogEntries(20);
+      const dropLogs = logs.filter((l) => l.reason === "report_labels_dropped");
+      expect(dropLogs).toHaveLength(1);
+      expect(dropLogs[0]!.detail).toContain("unknown-freeform-tag,scope-creep");
+
+      const labeledThread = snap.threads.find((t) => t.workers.some((w) => w.workerId === wLabeled))!;
+      expect(labeledThread.archived).toBe(false);
+      expect(labeledThread.state).toBe("idle");
+      expect(labeledThread.workers).toHaveLength(1); // no automatic follow-up dispatch
+      const reportTimeline = labeledThread.timeline.filter((e) => e.kind === "report");
+      expect(reportTimeline).toHaveLength(1);
+      expect(reportTimeline[0]!.text).toContain("标签：blocked-by-env, needs-human-verify, flaky-test");
+
+      const labeledWake = snap.wakes.find((w) => w.dedupeKey === `report:${wLabeled}:2`)!;
+      expect(labeledWake.text).toContain("  标签：blocked-by-env, needs-human-verify, flaky-test");
+
+      await waitWhileOutboundPending();
+      const cardsText = JSON.stringify(await cardPayloads());
+      expect(cardsText).toContain("标签：blocked-by-env, needs-human-verify, flaky-test");
+      expect(cardsText).not.toContain("unknown-freeform-tag");
+      expect(cardsText).not.toContain("scope-creep");
+
+      // Stage 1 invariant: handoff brief does NOT inject labels.
+      const brief = await ownerStub().handoffForTest(labeledThread.threadId);
+      expect(JSON.stringify(brief)).not.toContain("blocked-by-env");
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("persists boolean repo hook capability summaries from hello.repos and coerces unconfigured approved=true to false (ADR-0022 Stage 2)", async () => {
+    const { deviceId, token } = await pairDevice("mac-hooks");
+    const { ws } = await connectAndHello(deviceId, token, 1, {
+      machine: { name: "mac-hooks", memTotalMB: 65536, memFreeMB: 31000 },
+      agents: [{ kind: "pi", version: "1.2.0", capabilities: { steer: true } }],
+      repos: [
+        {
+          repoId: "/srv/git-hooked",
+          name: "git-hooked",
+          path: "/srv/git-hooked",
+          defaultBranch: "main",
+          remote: "git@example:git-hooked.git",
+          capability: { kind: "git", gitRoot: "/srv/git-hooked", defaultBranch: "main", remote: "git@example:git-hooked.git" },
+          capabilityKind: "git",
+          hasSetupHook: true,
+          hasArchiveHook: false,
+          approved: true,
+        },
+        {
+          repoId: "/srv/plain-dir",
+          name: "plain-dir",
+          path: "/srv/plain-dir",
+          defaultBranch: "",
+          remote: "",
+          capability: { kind: "plain" },
+          capabilityKind: "plain",
+          hasSetupHook: false,
+          hasArchiveHook: false,
+          approved: true,
+        },
+        {
+          repoId: "/srv/legacy-git",
+          name: "legacy-git",
+          path: "/srv/legacy-git",
+          defaultBranch: "main",
+          remote: "",
+        },
+      ],
+      limits: { maxWorkers: 4, running: 0 },
+    });
+
+    try {
+      const snap = await snapshotWhere((s) => s.repos.length === 3, "three repo summaries persisted");
+      expect(snap.repos.find((r) => r.repoId === "/srv/git-hooked")).toEqual({
+        repoId: "/srv/git-hooked",
+        deviceId,
+        name: "git-hooked",
+        online: true,
+        capabilityKind: "git",
+        hasSetupHook: true,
+        hasArchiveHook: false,
+        approved: true,
+      });
+      expect(snap.repos.find((r) => r.repoId === "/srv/plain-dir")).toEqual({
+        repoId: "/srv/plain-dir",
+        deviceId,
+        name: "plain-dir",
+        online: true,
+        capabilityKind: "plain",
+        hasSetupHook: false,
+        hasArchiveHook: false,
+        approved: false,
+      });
+      expect(snap.repos.find((r) => r.repoId === "/srv/legacy-git")).toEqual({
+        repoId: "/srv/legacy-git",
+        deviceId,
+        name: "legacy-git",
+        online: true,
+        capabilityKind: "git",
+        hasSetupHook: false,
+        hasArchiveHook: false,
+        approved: false,
+      });
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("progress{phase:'setup_hook'} refreshes sh_worker.lastEventAt while keeping worker state 'starting' and out of timeline (ADR-0022 B3)", async () => {
+    const { ws, reader } = await connectMachine();
+    try {
+      const workerId = await dispatchAndAwaitWorker(reader, "初始化带长耗时 setup 钩子的 worktree");
+      let snap = await snapshotWhere((s) => s.threads[0]?.workers[0]?.workerId === workerId, "worker registered in starting");
+      expect(snap.threads[0]!.workers[0]).toMatchObject({
+        workerId,
+        state: "starting",
+        lastEventAt: null,
+      });
+
+      const hookTs = Date.now() + 45_000;
+      await sendEvents(ws, [
+        { workerId, seq: 1, ts: hookTs, type: "progress", phase: "setup_hook", target: "setup" },
+      ]);
+
+      snap = await snapshotWhere(
+        (s) => s.threads[0]?.workers[0]?.lastEventAt === hookTs,
+        "setup_hook progress refreshed lastEventAt",
+      );
+      const duringSetup = snap.threads[0]!.workers[0]!;
+      expect(duringSetup.state).toBe("starting");
+      expect(JSON.parse(duringSetup.lastProgress!)).toEqual({
+        phase: "setup_hook",
+        tool: null,
+        target: "setup",
+        turn: null,
+      });
+      expect(snap.threads[0]!.state).toBe("running");
+      expect(snap.threads[0]!.timeline.some((e) => e.kind === "progress")).toBe(false);
+
+      await sendEvents(ws, [
+        event(workerId, 2, { type: "started", sessionId: workerId, branch: "otto/t-setup" }),
+      ]);
+      snap = await snapshotWhere((s) => s.threads[0]?.workers[0]?.state === "running", "worker transitioned to running");
+      expect(snap.threads[0]!.workers[0]!.branch).toBe("otto/t-setup");
+    } finally {
+      ws.close();
+    }
+  });
 });

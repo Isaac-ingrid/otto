@@ -182,6 +182,7 @@ export function cardKind(row: Pick<CardRow, "id" | "questionId">, view: CardView
   if (id.startsWith("offer:")) return "offer";
   if (id.startsWith("offline:") || id.startsWith("switch:")) return "offline";
   if (id.startsWith("noteask:")) return "memory";
+  if (id.startsWith("proposalapproval:")) return "consent";
   if (id.startsWith("notify:report:")) return view.buttons.some((button) => button.action === "pr_approve") ? "consent" : "report";
   if (row.questionId !== null || view.buttons.some((button) => /^ask(?:new)?:/.test(button.action ?? ""))) return "question";
   return "update";
@@ -211,6 +212,17 @@ export function cardOpen(ledger: Ledger, row: Pick<CardRow, "id" | "questionId">
     const qid = id.slice('prwatchapproval:'.length), q = ledger.questions.get(qid);
     return q?.status === 'open' && q.askedAt + 600000 > Date.now()
       && view.buttons.some(b => b.action === `prwatch:${qid}:confirm`);
+  }
+  if (id.startsWith("proposalapproval:")) {
+    const proposalId = id.slice("proposalapproval:".length);
+    const proposal = ledger.proposals.get(proposalId);
+    return (
+      proposal !== null &&
+      proposal.status === "pending_owner" &&
+      (proposal.expiresAt ?? 0) > Date.now() &&
+      ledger.questions.get(proposalId)?.status === "open" &&
+      view.buttons.some((b) => b.action === `proposal:${proposalId}:approve`)
+    );
   }
   if (id.startsWith("offer:")) return ledger.offers.get(id.slice("offer:".length))?.status === "offered";
   if (id.startsWith("offline:")) return ledger.offlineDispatches.get(id.slice("offline:".length))?.status === "offered";
