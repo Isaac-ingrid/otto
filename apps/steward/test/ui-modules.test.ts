@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
 import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, threadMatches, withPending, workOn } from "../ui/model.js";
+import { formatCheckpointPlainText } from "../ui/checkpoint.js";
 import { CONTROL_PLANE_I18N_KEYS, controlPlaneCounts } from "../ui/control-plane.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
@@ -27,7 +28,7 @@ const asset = async (name: string): Promise<string> => (await fetchAsset(name)).
 // design §6) — it is included here for the sink scan and the import-export check (it has no
 // imports, so that check is a no-op for it) but NOT in the i18n-completeness scan below, whose
 // own file list is separate and intentionally does not reach it.
-const SCRIPTS = ["workspace.js", "control-plane.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
+const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
 
 /** The text between the parentheses of every call to `fn(…)` (not `x.fn(…)`, not `prefixfn(…)`). */
 function callArguments(source: string, fn: string): string[] {
@@ -139,7 +140,7 @@ describe("interface copy", () => {
 
   it("covers every string the page asks for, including the data-driven ones", async () => {
     const used = new Set<string>();
-    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js"]) {
+    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js"]) {
       const source = await asset(name);
       for (const args of callArguments(source, "t")) for (const key of args.matchAll(/'([A-Za-z_:]+)'/g)) used.add(key[1]!);
       for (const attribute of source.matchAll(/data-i18n(?:-[a-z]+)?="([A-Za-z_:]+)"/g)) used.add(attribute[1]!);
@@ -561,5 +562,19 @@ describe("control plane counts", () => {
         activePrWatches: 1,
       }),
     ).toEqual({ activeAuto: 6, attentionCount: 3, residentUsed: 420, residentCap: 2400 });
+    const plain = formatCheckpointPlainText({
+      workerId: "w_1",
+      agent: "claude-code",
+      turnCount: 2,
+      toolCallCount: 5,
+      initialGoal: "Fix auth",
+      lastStep: { tool: "Edit", args: "src/auth.ts" },
+      touchedFiles: { modified: ["src/auth.ts"], read: [] },
+      commandsRun: ["pnpm test"],
+      recentNotes: ["Almost done"],
+      git: null,
+    });
+    expect(plain).toContain("Stopped at: Edit src/auth.ts");
+    expect(plain).toContain("pnpm test");
   });
 });

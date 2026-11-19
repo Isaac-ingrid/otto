@@ -11,6 +11,7 @@ import { applyStatic, getLocale, localeTag, setLocale, t, tOr } from './i18n.js'
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, trimOpenMarkup } from './format.js';
 import { modelPicker } from './model-picker.js';
 import { markup } from './markup.js';
+import { createCheckpointModal } from './checkpoint.js';
 import { controlPlaneCounts, createControlPlane } from './control-plane.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
@@ -773,6 +774,7 @@ function workerNode(thread, worker) {
   const canDiff = canInspectWorkerDiff(worker);
   const diffOpen = Boolean(state.workerDiffs.get(worker.id)?.open);
   const hasSession = worker.sessionId !== null || active;
+  const hasCheckpoint = Boolean(worker.sessionId || worker.outcome || worker.progress);
   return h('div', { class: 'worker-card' },
     h('div', { class: 'worker-title' },
       h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent === 'codex' ? '⌘' : worker.agent === 'antigravity' ? '✦' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
@@ -792,9 +794,10 @@ function workerNode(thread, worker) {
       : pr?.failure ? h('p', { class: 'worker-pr failed' }, `${t('prFailed')}: ${pr.failure}`)
         : pr?.decision === 'approved' ? h('p', { class: 'worker-pr' }, t('prPending'))
           : pr?.decision === 'declined' ? h('p', { class: 'worker-pr' }, t('prDeclined')) : null,
-    hasSession || canDiff ? h('div', { class: 'worker-actions' },
+    hasSession || canDiff || hasCheckpoint ? h('div', { class: 'worker-actions' },
       hasSession ? h('a', { href: urlFor(thread.id, worker.id), dataset: { nav: thread.id, worker: worker.id, focus: `session:${worker.id}` } }, t('rawHistory'), icon('chevron-right')) : null,
-      canDiff ? h('button', { type: 'button', 'aria-expanded': String(diffOpen), dataset: { action: 'toggle-diff', worker: worker.id, focus: `diff:${worker.id}` } }, icon('diff'), t(diffOpen ? 'hideChanges' : 'viewChanges')) : null) : null,
+      canDiff ? h('button', { type: 'button', 'aria-expanded': String(diffOpen), dataset: { action: 'toggle-diff', worker: worker.id, focus: `diff:${worker.id}` } }, icon('diff'), t(diffOpen ? 'hideChanges' : 'viewChanges')) : null,
+      hasCheckpoint ? h('button', { type: 'button', dataset: { action: 'open-checkpoint', worker: worker.id, thread: thread.id, focus: `checkpoint:${worker.id}` } }, icon('sparkle'), t('checkpointOpen')) : null) : null,
     diffOpen ? diffBodyNode(worker, false) : null);
 }
 
@@ -1558,6 +1561,9 @@ function dialogContent() {
   if (state.dialog.type === 'control-plane') {
     return { title: t('controlPlaneTitle'), body: controlPlane.render(snapshot?.controlPlaneSummary) };
   }
+  if (state.dialog.type === 'checkpoint') {
+    return { title: checkpointModal.title(), body: checkpointModal.render() };
+  }
   return { title: t('accountTitle'), body: accountSection() };
 }
 
@@ -1571,6 +1577,24 @@ const controlPlane = createControlPlane({
   serverNow,
 });
 
+const checkpointModal = createCheckpointModal({
+  request: (path, body) => request(path, body),
+  uuid,
+  toast,
+  bump: () => bumpDialog(),
+  refreshWorkspace: () => refresh(),
+  fillContinuation: (threadId, promptText) => {
+    closeDialog();
+    select(threadId);
+    const input = $('#message-input');
+    input.value = promptText;
+    state.drafts.set(scopeKey(), promptText);
+    $('#send-button').disabled = !promptText.trim();
+    resizeInput();
+    input.focus();
+  },
+});
+
 /** Rebuilds the open dialog only when what it shows changed, so a typed key or a selected command survives a refresh. */
 function renderDialog() {
   if (!state.dialog) return;
@@ -1582,6 +1606,7 @@ function renderDialog() {
     type === 'scope' ? [state.selected, snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.repos])] : null,
     type === 'diff' ? [state.diffRev, state.dialog.workerId] : null,
     type === 'control-plane' ? [controlPlane.signature(), snapshot?.controlPlaneSummary, minuteBucket()] : null,
+    type === 'checkpoint' ? [checkpointModal.signature()] : null,
     type === 'archive-confirm' ? [state.dialog.threadId, state.dialog.unmergedWorkers, [...state.archivingThreads]] : null,
     type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
@@ -1589,7 +1614,7 @@ function renderDialog() {
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
     $('#dialog').classList.toggle('diff-dialog', type === 'diff');
-    $('#dialog').classList.toggle('control-dialog', type === 'control-plane');
+    $('#dialog').classList.toggle('control-dialog', type === 'control-plane' || type === 'checkpoint');
     $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
     preservingFocus($('#dialog-body'), () => $('#dialog-body').replaceChildren(...[body].flat(Infinity).filter(Boolean)));
   });
@@ -2829,6 +2854,11 @@ document.addEventListener('click', (event) => {
     case 'refresh-diff': return void loadWorkerDiff(dataset.worker, true);
     case 'select-diff-file': return selectWorkerDiffFile(dataset.worker, dataset.path);
     case 'open-diff-dialog': return openDiffDialog(dataset.worker);
+    case 'open-checkpoint':
+      state.dialog = { type: 'checkpoint', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      checkpointModal.open(dataset.worker, dataset.thread);
+      return renderDialog();
     case 'archive-thread': return void archiveThread(dataset.thread, true, 'auto');
     case 'unarchive-thread': return void archiveThread(dataset.thread, false);
     case 'archive-confirm-keep': return void archiveThread(dataset.thread, true, 'keep');
