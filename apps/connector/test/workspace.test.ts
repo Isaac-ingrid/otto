@@ -771,7 +771,7 @@ describe("CommandError surface for the new paths", () => {
   }, 30_000);
 
   it("cleanup_worktree is reachable through handleCommand with force in args", async () => {
-    setup([reportRun({ status: "done", summary: "done" })]);
+    setup([reportRun({ status: "done", summary: "done" }, { shellBefore: "echo dirt > dirty.txt" })]);
     registerRepo();
     const workerId = "w-cmd-clean";
     workerIds.add(workerId);
@@ -779,7 +779,7 @@ describe("CommandError surface for the new paths", () => {
     await waitFor(() => settledOf(workerId), 15_000, "settled event");
     await manager.stopProcess(workerId); // idle-hot process out of the way first
     await waitFor(() => !existsSync(lockPath(stateDir, workerId)), 10_000, "lock released");
-    // dirty: the report committed nothing, but the branch is unpushed → refused without force
+    // dirty worktree → refused without force, removed with force: true
     await expect(manager.handleCommand("cmd-cw1", "cleanup_worktree", { workerId })).rejects.toBeInstanceOf(CommandError);
     await expect(manager.handleCommand("cmd-cw2", "cleanup_worktree", { workerId, force: true })).resolves.toMatchObject({
       removed: result.worktree,

@@ -26,7 +26,7 @@ import {
   type InterruptWorkerOutcome,
   type SendToWorkerInput,
   type SendToWorkerOutcome,
-  StartWorkerInput,
+  type StartWorkerInput,
   type StartWorkerOutcome,
 } from "../dispatch.ts";
 import { WorkspaceError } from "../workspace.ts";

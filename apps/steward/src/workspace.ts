@@ -29,12 +29,19 @@ export interface WorkspaceActionInput {
 }
 
 export class WorkspaceError extends Error {
+  code: string;
+  status: number;
+  details?: Record<string, unknown>;
+
   constructor(
-    public code: string,
-    public status = 400,
-    public details?: Record<string, unknown>,
+    code: string,
+    status = 400,
+    details?: Record<string, unknown>,
   ) {
     super(code);
+    this.code = code;
+    this.status = status;
+    this.details = details;
   }
 }
 
