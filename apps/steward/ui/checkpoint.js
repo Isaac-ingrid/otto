@@ -1,7 +1,10 @@
 // Worker Checkpoint, Trajectory Compaction & Skill/Memory Extraction UI (Direction 2B, Stage 3).
 // Built strictly with h() text nodes from dom.js — zero HTML sinks, zero inline styles.
 import { h, icon } from './dom.js';
+import { skillErrorKey, skillTargetI18nKey } from './control-plane.js';
 import { t, tOr } from './i18n.js';
+
+const SKILL_TARGETS = ['agents-skill', 'claude-skill', 'claude-command'];
 
 export function formatCheckpointPlainText(cp) {
   const lines = [];
@@ -20,7 +23,7 @@ export function formatCheckpointPlainText(cp) {
 }
 
 export function createCheckpointModal(deps) {
-  const { request, uuid, toast, bump, fillContinuation, refreshWorkspace } = deps;
+  const { request, uuid, toast, bump, fillContinuation, refreshWorkspace, openSkillCatalog } = deps;
 
   const state = {
     rev: 0,
@@ -32,6 +35,13 @@ export function createCheckpointModal(deps) {
     handoff: null,
     skillData: null,
     skillMarkdownDraft: '',
+    skillSlugDraft: '',
+    skillTarget: 'agents-skill',
+    skillScopeKind: 'repo',
+    skillWriting: false,
+    skillConfirmOverwrite: false,
+    skillWriteError: null,
+    skillSavedResult: null,
     selectedNotes: new Set(),
     savingNotes: false,
   };
@@ -92,6 +102,12 @@ export function createCheckpointModal(deps) {
         } else {
           state.skillData = data;
           state.skillMarkdownDraft = data.skill?.markdown ?? '';
+          state.skillSlugDraft = data.skill?.slug ?? 'extracted-workflow';
+          state.skillTarget = 'agents-skill';
+          state.skillScopeKind = data.hasWriteWorktree ? 'worktree' : 'repo';
+          state.skillConfirmOverwrite = false;
+          state.skillWriteError = null;
+          state.skillSavedResult = null;
           state.selectedNotes = new Set((data.suggestedNotes ?? []).map((_, idx) => idx));
         }
       } else if (status === 409 && data?.error === 'over_budget') {
@@ -103,6 +119,46 @@ export function createCheckpointModal(deps) {
       toast(t('ckDistillFailed'));
     } finally {
       state.distilling = null;
+      touch();
+    }
+  }
+
+  async function writeSkillToRepo() {
+    const sd = state.skillData;
+    if (!sd?.deviceId || !sd?.repoId || state.skillWriting) return;
+    const slug = state.skillSlugDraft.trim().toLowerCase();
+    if (!slug || !state.skillMarkdownDraft.trim()) return;
+    state.skillWriting = true;
+    state.skillWriteError = null;
+    touch();
+    try {
+      const scope = state.skillScopeKind === 'worktree' && sd.hasWriteWorktree && state.workerId
+        ? { kind: 'worktree', repoId: sd.repoId, workerId: state.workerId }
+        : { kind: 'repo', repoId: sd.repoId };
+      const { status, data } = await request('/app/api/repos/skills/write', {
+        id: uuid(),
+        deviceId: sd.deviceId,
+        scope,
+        target: state.skillTarget,
+        slug,
+        markdown: state.skillMarkdownDraft,
+        ...(state.skillConfirmOverwrite ? { overwrite: true } : {}),
+      });
+      if (status === 200 && data?.summary) {
+        state.skillConfirmOverwrite = false;
+        state.skillWriteError = null;
+        state.skillSavedResult = data;
+        toast(t('cpSkillSavedToast', { path: data.summary.relativePath }));
+      } else if (status === 409 && data?.error === 'already_exists') {
+        state.skillConfirmOverwrite = true;
+        state.skillWriteError = 'already_exists';
+      } else if (status !== 401) {
+        state.skillWriteError = data?.error ?? 'io_failed';
+      }
+    } catch {
+      state.skillWriteError = 'io_failed';
+    } finally {
+      state.skillWriting = false;
       touch();
     }
   }
@@ -192,10 +248,89 @@ export function createCheckpointModal(deps) {
       h('ul', { class: 'cp-pressure-list' }, items.map((item) => h('li', { class: 'cp-note-text' }, `• ${item}`))));
   }
 
+  function renderRepoWriteBox(sd) {
+    if (!sd.deviceId || !sd.repoId) return null;
+    const saved = state.skillSavedResult;
+    return h('div', { class: 'cp-card' },
+      h('span', { class: 'cp-meta' }, t('ckWriteSectionTitle'), sd.repoName ? ` · ${sd.repoName}` : ''),
+      h('div', { class: 'cp-form-grid' },
+        h('select', {
+          class: 'cp-select',
+          'aria-label': t('cpSkillSlotLabel'),
+          onchange: (e) => {
+            state.skillTarget = e.target.value;
+            state.skillConfirmOverwrite = false;
+            state.skillWriteError = null;
+            touch();
+          },
+        }, SKILL_TARGETS.map((target) =>
+          h('option', { value: target, selected: state.skillTarget === target }, t(skillTargetI18nKey(target))))),
+        sd.hasWriteWorktree
+          ? h('select', {
+            class: 'cp-select',
+            onchange: (e) => {
+              state.skillScopeKind = e.target.value;
+              state.skillConfirmOverwrite = false;
+              state.skillWriteError = null;
+              touch();
+            },
+          },
+          h('option', { value: 'worktree', selected: state.skillScopeKind === 'worktree' }, t('ckScopeWorktree')),
+          h('option', { value: 'repo', selected: state.skillScopeKind === 'repo' }, t('ckScopeRepo')))
+          : h('span', { class: 'cp-badge' }, t('ckScopeRepo')),
+        h('input', {
+          type: 'text',
+          class: 'cp-input',
+          maxlength: 64,
+          placeholder: t('cpSkillSlugPlaceholder'),
+          'aria-label': t('cpSkillSlugLabel'),
+          dataset: { focus: 'ck-skill-slug' },
+          value: state.skillSlugDraft,
+          oninput: (e) => {
+            state.skillSlugDraft = e.target.value;
+            if (state.skillConfirmOverwrite || state.skillWriteError) {
+              state.skillConfirmOverwrite = false;
+              state.skillWriteError = null;
+              touch();
+            }
+          },
+        })),
+      state.skillWriteError
+        ? h('p', { class: state.skillConfirmOverwrite ? 'cp-stale-note' : 'cp-error' }, t(skillErrorKey(state.skillWriteError)))
+        : null,
+      saved?.summary
+        ? [
+          h('p', { class: 'cp-trust-note ok' }, icon('check'), t('cpSkillSavedToast', { path: saved.summary.relativePath })),
+          saved.projectApproved === false && state.skillTarget === 'agents-skill'
+            ? h('p', { class: 'cp-trust-note' }, icon('shield'), t('cpSkillsPiUnapproved'))
+            : null,
+        ]
+        : null,
+      h('div', { class: 'cp-form-actions' },
+        h('button', {
+          type: 'button',
+          class: 'cp-primary-btn',
+          disabled: state.skillWriting,
+          onclick: () => void writeSkillToRepo(),
+        }, icon('folder'), state.skillWriting
+          ? t('ckWritingRepo')
+          : state.skillConfirmOverwrite
+            ? t('ckOverwriteConfirmBtn')
+            : t('ckWriteRepoBtn')),
+        saved && openSkillCatalog
+          ? h('button', {
+            type: 'button',
+            class: 'cp-mini-btn',
+            onclick: () => openSkillCatalog(sd.deviceId, sd.repoId),
+          }, t('ckOpenSkillCatalog'))
+          : null));
+  }
+
   function renderDistillSection() {
     const busy = Boolean(state.distilling);
     const ho = state.handoff;
     const sd = state.skillData;
+    const dlSlug = state.skillSlugDraft.trim() || sd?.skill?.slug || "extracted";
     return h('div', { class: 'cp-section' },
       h('h3', { class: 'cp-section-title' }, icon('sparkle'), t('ckDistillActions')),
       h('div', { class: 'cp-form-actions' },
@@ -238,18 +373,19 @@ export function createCheckpointModal(deps) {
         ? h('div', { class: 'cp-create-form' },
           h('span', { class: 'cp-meta' }, t('ckSkillPreviewTitle')),
           h('textarea', {
-            class: 'cp-textarea',
+            class: 'cp-textarea cp-code-textarea',
             rows: 9,
             dataset: { focus: 'ck-skill-md' },
             value: state.skillMarkdownDraft,
             oninput: (e) => { state.skillMarkdownDraft = e.target.value; },
           }, state.skillMarkdownDraft),
+          renderRepoWriteBox(sd),
           h('div', { class: 'cp-form-actions' },
             h('button', {
               type: 'button',
-              class: 'cp-primary-btn',
-              onclick: () => downloadFile(`${sd.skill?.slug || "extracted"}-SKILL.md`, state.skillMarkdownDraft),
-            }, t('ckDownloadSkill', { slug: sd.skill?.slug || "extracted" })),
+              class: 'cp-mini-btn',
+              onclick: () => downloadFile(`${dlSlug}-SKILL.md`, state.skillMarkdownDraft),
+            }, t('ckDownloadSkill', { slug: dlSlug })),
             h('button', {
               type: 'button',
               class: 'cp-mini-btn',
@@ -291,6 +427,10 @@ export function createCheckpointModal(deps) {
       state.handoff = null;
       state.skillData = null;
       state.skillMarkdownDraft = '';
+      state.skillSlugDraft = '';
+      state.skillConfirmOverwrite = false;
+      state.skillWriteError = null;
+      state.skillSavedResult = null;
       state.selectedNotes.clear();
       void loadCheckpoint(workerId);
     },

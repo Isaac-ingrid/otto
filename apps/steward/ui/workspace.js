@@ -1047,6 +1047,8 @@ function machineCard(machine) {
       : h('div', { class: 'dialog-actions' },
         !['pending', 'retry'].includes(state.directoryForms.get(machine.id)?.state)
           ? h('button', { type: 'button', class: 'button primary', disabled: !machine.online, dataset: { action: 'directory-open', machine: machine.id, focus: `directory-open:${machine.id}` } }, icon('plus'), t('addDirectory')) : null,
+        machine.repos.length > 0
+          ? h('button', { type: 'button', class: 'button', dataset: { action: 'machine-skills', machine: machine.id, focus: `machine-skills:${machine.id}` } }, icon('sparkle'), t('machineRepoSkills')) : null,
         h('button', { type: 'button', class: 'button danger', dataset: { action: 'revoke', machine: machine.id, focus: `revoke:${machine.id}` } }, t('revokeMachine'))));
 }
 
@@ -1583,6 +1585,12 @@ const checkpointModal = createCheckpointModal({
   toast,
   bump: () => bumpDialog(),
   refreshWorkspace: () => refresh(),
+  openSkillCatalog: (deviceId, repoId) => {
+    state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+    drawn.delete('dialog');
+    controlPlane.open('skills', { deviceId, repoId });
+    renderDialog();
+  },
   fillContinuation: (threadId, promptText) => {
     closeDialog();
     select(threadId);
@@ -2774,6 +2782,16 @@ document.addEventListener('click', (event) => {
       $('#message-input').focus();
       return toast(t('newTaskHint'));
     case 'control-plane': return openDialog('control-plane');
+    case 'repo-skills':
+      state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      controlPlane.open('skills');
+      return renderDialog();
+    case 'machine-skills':
+      state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      controlPlane.open('skills', { deviceId: dataset.machine });
+      return renderDialog();
     case 'machines': return openDialog('machines');
     case 'account': return openDialog('account');
     case 'scope': return openDialog('scope');

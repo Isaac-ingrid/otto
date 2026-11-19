@@ -1,8 +1,32 @@
-// Memory, Proactive Schedules, and PR Watch owner control plane (Direction 2A).
+// Memory, Proactive Schedules, PR Watch & Controlled Repository Skills owner control plane (2A + 2B).
 // Built strictly with h() text nodes from dom.js — zero HTML sinks, zero inline styles, zero LLM calls.
 import { h, icon } from './dom.js';
 import { formatClock, formatDay, formatUsd, safeUrl } from './format.js';
 import { localeTag, t, tOr } from './i18n.js';
+
+export const SKILL_ERROR_KEYS = {
+  invalid_slug: 'skErr_invalid_slug',
+  secret_detected: 'skErr_secret_detected',
+  symlink_forbidden: 'skErr_symlink_forbidden',
+  already_exists: 'skErr_already_exists',
+  sha256_conflict: 'skErr_sha256_conflict',
+  machine_offline: 'skErr_machine_offline',
+  unsupported: 'skErr_unsupported',
+  no_worktree: 'skErr_no_worktree',
+  too_large: 'skErr_too_large',
+  skill_timeout: 'skErr_skill_timeout',
+  busy: 'skErr_busy',
+};
+
+export function skillErrorKey(code) {
+  return (code && SKILL_ERROR_KEYS[code]) || 'skErr_failed';
+}
+
+export function skillTargetI18nKey(target) {
+  if (target === 'claude-skill') return 'cpSkillTarget_claude_skill';
+  if (target === 'claude-command') return 'cpSkillTarget_claude_command';
+  return 'cpSkillTarget_agents_skill';
+}
 
 export const CONTROL_PLANE_I18N_KEYS = [
   'cpLayer_active', 'cpLayer_resident', 'cpLayer_project', 'cpLayer_archive', 'cpLayer_all',
@@ -12,10 +36,15 @@ export const CONTROL_PLANE_I18N_KEYS = [
   'cpSchedStatus_active', 'cpSchedStatus_paused', 'cpSchedStatus_done', 'cpSchedStatus_cancelled',
   'cpSchedStatus_open', 'cpSchedStatus_fired',
   'cpWatchStatus_active', 'cpWatchStatus_completed', 'cpWatchStatus_cancelled', 'cpWatchStatus_expired',
+  'cpSkillTarget_agents_skill', 'cpSkillTarget_claude_skill', 'cpSkillTarget_claude_command',
+  'cpSkillGit_clean', 'cpSkillGit_modified', 'cpSkillGit_untracked', 'cpSkillGit_plain',
+  ...Object.values(SKILL_ERROR_KEYS),
+  'skErr_failed',
 ];
 
 const LAYERS = ['active', 'resident', 'project', 'archive'];
 const NOTE_KINDS = ['preference', 'convention', 'environment', 'fact'];
+const SKILL_TARGETS = ['agents-skill', 'claude-skill', 'claude-command'];
 
 export function controlPlaneCounts(summary) {
   const s = summary ?? {};
@@ -28,6 +57,8 @@ export function controlPlaneCounts(summary) {
     residentCap: s.residentCapChars ?? 2400,
   };
 }
+
+const repoCompositeKey = (r) => `${r.deviceId ?? ''}::${r.id}`;
 
 export function createControlPlane(deps) {
   const { request, uuid, toast, bump, refreshWorkspace, openThread, serverNow } = deps;
@@ -62,6 +93,24 @@ export function createControlPlane(deps) {
       showHistory: false,
       busyKey: null,
     },
+    skills: {
+      repoKey: '',
+      pendingTarget: null,
+      status: 'idle',
+      errorCode: null,
+      items: [],
+      truncated: false,
+      projectApproved: null,
+      createOpen: false,
+      newSlug: '',
+      newTarget: 'agents-skill',
+      newMarkdown: '',
+      newConfirmOverwrite: false,
+      formError: null,
+      editor: null,
+      confirmDeleteKey: null,
+      busyKey: null,
+    },
   };
   const touch = () => {
     cp.rev += 1;
@@ -73,6 +122,36 @@ export function createControlPlane(deps) {
     const day = formatDay(ts, serverNow(), localeTag(), { today: t('today'), yesterday: t('yesterday') });
     return `${day} ${formatClock(ts)}`;
   };
+
+  function selectedSkillRepo() {
+    const repos = cp.memory.repos;
+    if (!repos.length) return null;
+    return repos.find((r) => repoCompositeKey(r) === cp.skills.repoKey) ?? repos[0] ?? null;
+  }
+
+  function applyPendingSkillRepo() {
+    const repos = cp.memory.repos;
+    if (!repos.length) {
+      cp.skills.repoKey = '';
+      return;
+    }
+    const target = cp.skills.pendingTarget;
+    if (target) {
+      cp.skills.pendingTarget = null;
+      const hit = repos.find((r) =>
+        (target.deviceId && target.repoId && r.deviceId === target.deviceId && r.id === target.repoId) ||
+        (target.deviceId && !target.repoId && r.deviceId === target.deviceId) ||
+        (!target.deviceId && target.repoId && r.id === target.repoId));
+      if (hit) {
+        cp.skills.repoKey = repoCompositeKey(hit);
+        return;
+      }
+    }
+    if (!cp.skills.repoKey || !repos.some((r) => repoCompositeKey(r) === cp.skills.repoKey)) {
+      const preferred = repos.find((r) => r.online) ?? repos[0];
+      cp.skills.repoKey = preferred ? repoCompositeKey(preferred) : '';
+    }
+  }
 
   async function loadMemory() {
     cp.memory.status = 'loading';
@@ -90,7 +169,12 @@ export function createControlPlane(deps) {
         if (!cp.memory.draftRepoId && cp.memory.repos.length > 0) {
           cp.memory.draftRepoId = cp.memory.repos[0].id;
         }
+        const prevRepoKey = cp.skills.repoKey;
+        applyPendingSkillRepo();
         cp.memory.status = 'ready';
+        if (cp.tab === 'skills' && (cp.skills.status === 'idle' || cp.skills.repoKey !== prevRepoKey)) {
+          void loadRepoSkills();
+        }
       } else if (status !== 401) {
         cp.memory.status = 'error';
       }
@@ -118,6 +202,236 @@ export function createControlPlane(deps) {
       cp.schedules.status = 'error';
     }
     touch();
+  }
+
+  async function loadRepoSkills() {
+    const repo = selectedSkillRepo();
+    if (!repo || !repo.deviceId) {
+      cp.skills.status = 'idle';
+      cp.skills.items = [];
+      touch();
+      return;
+    }
+    cp.skills.repoKey = repoCompositeKey(repo);
+    if (repo.online === false) {
+      cp.skills.status = 'offline';
+      cp.skills.items = [];
+      cp.skills.errorCode = 'machine_offline';
+      touch();
+      return;
+    }
+    cp.skills.status = 'loading';
+    cp.skills.errorCode = null;
+    touch();
+    try {
+      const { status, data } = await request('/app/api/repos/skills/list', {
+        deviceId: repo.deviceId,
+        scope: { kind: 'repo', repoId: repo.id },
+      });
+      if (status === 200 && data && Array.isArray(data.skills)) {
+        cp.skills.items = data.skills;
+        cp.skills.truncated = Boolean(data.truncated);
+        cp.skills.projectApproved = typeof data.projectApproved === 'boolean' ? data.projectApproved : null;
+        cp.skills.status = 'ready';
+      } else if (status === 409 && data?.error === 'machine_offline') {
+        cp.skills.status = 'offline';
+        cp.skills.errorCode = 'machine_offline';
+      } else if (status !== 401) {
+        cp.skills.status = 'error';
+        cp.skills.errorCode = data?.error ?? 'io_failed';
+      }
+    } catch {
+      cp.skills.status = 'error';
+      cp.skills.errorCode = 'io_failed';
+    }
+    touch();
+  }
+
+  async function readRepoSkillContent(target, slug) {
+    const repo = selectedSkillRepo();
+    if (!repo?.deviceId) return null;
+    const { status, data } = await request('/app/api/repos/skills/read', {
+      deviceId: repo.deviceId,
+      scope: { kind: 'repo', repoId: repo.id },
+      target,
+      slug,
+    });
+    if (status === 200 && data?.summary && typeof data.markdown === 'string') return data;
+    if (status !== 401) toast(t(skillErrorKey(data?.error)));
+    return null;
+  }
+
+  async function openSkillEditor(item) {
+    if (cp.skills.busyKey) return;
+    const key = `read:${item.target}:${item.slug}`;
+    cp.skills.busyKey = key;
+    cp.skills.confirmDeleteKey = null;
+    touch();
+    try {
+      const detail = await readRepoSkillContent(item.target, item.slug);
+      if (detail) {
+        cp.skills.editor = {
+          target: detail.summary.target,
+          slug: detail.summary.slug,
+          sha256: detail.summary.sha256,
+          relativePath: detail.summary.relativePath,
+          markdown: detail.markdown,
+          conflict: false,
+          errorCode: null,
+        };
+      }
+    } finally {
+      cp.skills.busyKey = null;
+      touch();
+    }
+  }
+
+  async function saveEditedSkill() {
+    const ed = cp.skills.editor;
+    const repo = selectedSkillRepo();
+    if (!ed || !repo?.deviceId || cp.skills.busyKey) return;
+    cp.skills.busyKey = `save:${ed.target}:${ed.slug}`;
+    ed.errorCode = null;
+    ed.conflict = false;
+    touch();
+    try {
+      const { status, data } = await request('/app/api/repos/skills/write', {
+        id: uuid(),
+        deviceId: repo.deviceId,
+        scope: { kind: 'repo', repoId: repo.id },
+        target: ed.target,
+        slug: ed.slug,
+        markdown: ed.markdown,
+        expectedSha256: ed.sha256,
+      });
+      if (status === 200 && data?.summary) {
+        if (typeof data.projectApproved === 'boolean') cp.skills.projectApproved = data.projectApproved;
+        cp.skills.editor = null;
+        toast(t('cpSkillSavedToast', { path: data.summary.relativePath }));
+        await loadRepoSkills();
+      } else if (status === 409 && data?.error === 'sha256_conflict') {
+        ed.conflict = true;
+        ed.errorCode = 'sha256_conflict';
+      } else if (status !== 401) {
+        ed.errorCode = data?.error ?? 'io_failed';
+      }
+    } catch {
+      ed.errorCode = 'io_failed';
+    } finally {
+      cp.skills.busyKey = null;
+      touch();
+    }
+  }
+
+  async function submitNewSkill() {
+    const repo = selectedSkillRepo();
+    if (!repo?.deviceId || cp.skills.busyKey) return;
+    const slug = cp.skills.newSlug.trim().toLowerCase();
+    const markdown = cp.skills.newMarkdown;
+    if (!slug || !markdown.trim()) return;
+    cp.skills.busyKey = 'create-skill';
+    cp.skills.formError = null;
+    touch();
+    try {
+      const { status, data } = await request('/app/api/repos/skills/write', {
+        id: uuid(),
+        deviceId: repo.deviceId,
+        scope: { kind: 'repo', repoId: repo.id },
+        target: cp.skills.newTarget,
+        slug,
+        markdown,
+        ...(cp.skills.newConfirmOverwrite ? { overwrite: true } : {}),
+      });
+      if (status === 200 && data?.summary) {
+        if (typeof data.projectApproved === 'boolean') cp.skills.projectApproved = data.projectApproved;
+        cp.skills.createOpen = false;
+        cp.skills.newSlug = '';
+        cp.skills.newMarkdown = '';
+        cp.skills.newConfirmOverwrite = false;
+        cp.skills.formError = null;
+        toast(t('cpSkillSavedToast', { path: data.summary.relativePath }));
+        await loadRepoSkills();
+      } else if (status === 409 && data?.error === 'already_exists') {
+        cp.skills.newConfirmOverwrite = true;
+        cp.skills.formError = 'already_exists';
+      } else if (status !== 401) {
+        cp.skills.formError = data?.error ?? 'io_failed';
+      }
+    } catch {
+      cp.skills.formError = 'io_failed';
+    } finally {
+      cp.skills.busyKey = null;
+      touch();
+    }
+  }
+
+  async function deleteRepoSkill(item) {
+    const repo = selectedSkillRepo();
+    if (!repo?.deviceId || cp.skills.busyKey) return;
+    cp.skills.busyKey = `del:${item.target}:${item.slug}`;
+    touch();
+    try {
+      const { status, data } = await request('/app/api/repos/skills/delete', {
+        id: uuid(),
+        deviceId: repo.deviceId,
+        scope: { kind: 'repo', repoId: repo.id },
+        target: item.target,
+        slug: item.slug,
+        expectedSha256: item.sha256,
+      });
+      if (status === 200 && data?.deleted) {
+        cp.skills.confirmDeleteKey = null;
+        if (cp.skills.editor?.target === item.target && cp.skills.editor?.slug === item.slug) {
+          cp.skills.editor = null;
+        }
+        toast(t('cpSkillDeletedToast', { path: data.relativePath || item.relativePath }));
+        await loadRepoSkills();
+      } else if (status !== 401) {
+        toast(t(skillErrorKey(data?.error)));
+        if (data?.error === 'sha256_conflict') await loadRepoSkills();
+      }
+    } catch {
+      toast(t('skErr_failed'));
+    } finally {
+      cp.skills.busyKey = null;
+      touch();
+    }
+  }
+
+  async function copyOrDownloadSkill(item, mode) {
+    if (cp.skills.busyKey) return;
+    let markdown = cp.skills.editor?.target === item.target && cp.skills.editor?.slug === item.slug
+      ? cp.skills.editor.markdown
+      : null;
+    if (markdown === null) {
+      cp.skills.busyKey = `${mode}:${item.target}:${item.slug}`;
+      touch();
+      try {
+        const detail = await readRepoSkillContent(item.target, item.slug);
+        markdown = detail?.markdown ?? null;
+      } finally {
+        cp.skills.busyKey = null;
+        touch();
+      }
+    }
+    if (markdown === null) return;
+    if (mode === 'copy') {
+      try {
+        await navigator.clipboard.writeText(markdown);
+        toast(t('ckCopied'));
+      } catch {
+        toast(t('ckCopyFailed'));
+      }
+      return;
+    }
+    const filename = item.target === 'claude-command' ? `${item.slug}.md` : `${item.slug}-SKILL.md`;
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = h('a', { href: url, download: filename });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   async function mutateMemory(payload, busyKey) {
@@ -177,6 +491,11 @@ export function createControlPlane(deps) {
   function repoLabel(repoId) {
     const found = cp.memory.repos.find((r) => r.id === repoId);
     return found ? (found.machine ? `${found.name} (${found.machine})` : found.name) : repoId;
+  }
+
+  function skillRepoOptionLabel(repo) {
+    const base = repo.machine ? `${repo.name} (${repo.machine})` : repo.name;
+    return repo.online === false ? `${base} · ${t('offline')}` : base;
   }
 
   function renderMeters() {
@@ -529,12 +848,248 @@ export function createControlPlane(deps) {
         : null);
   }
 
+  function renderSkillCreateForm() {
+    if (!cp.skills.createOpen) return null;
+    const busy = Boolean(cp.skills.busyKey);
+    return h('form', {
+      class: 'cp-create-form',
+      onsubmit: (e) => {
+        e.preventDefault();
+        void submitNewSkill();
+      },
+    },
+    h('div', { class: 'cp-form-grid' },
+      h('select', {
+        class: 'cp-select',
+        onchange: (e) => {
+          cp.skills.newTarget = e.target.value;
+          cp.skills.newConfirmOverwrite = false;
+          cp.skills.formError = null;
+          touch();
+        },
+      }, SKILL_TARGETS.map((target) =>
+        h('option', { value: target, selected: cp.skills.newTarget === target }, t(skillTargetI18nKey(target))))),
+      h('input', {
+        type: 'text',
+        class: 'cp-input',
+        maxlength: 64,
+        placeholder: t('cpSkillSlugPlaceholder'),
+        'aria-label': t('cpSkillSlugLabel'),
+        dataset: { focus: 'cp-new-skill-slug' },
+        value: cp.skills.newSlug,
+        oninput: (e) => {
+          cp.skills.newSlug = e.target.value;
+          if (cp.skills.newConfirmOverwrite || cp.skills.formError) {
+            cp.skills.newConfirmOverwrite = false;
+            cp.skills.formError = null;
+            touch();
+          }
+        },
+      })),
+    h('textarea', {
+      class: 'cp-textarea cp-code-textarea',
+      rows: 9,
+      placeholder: t('cpSkillMarkdownPlaceholder'),
+      dataset: { focus: 'cp-new-skill-md' },
+      value: cp.skills.newMarkdown,
+      oninput: (e) => { cp.skills.newMarkdown = e.target.value; },
+    }, cp.skills.newMarkdown),
+    cp.skills.formError
+      ? h('p', { class: cp.skills.newConfirmOverwrite ? 'cp-stale-note' : 'cp-error' }, t(skillErrorKey(cp.skills.formError)))
+      : null,
+    h('div', { class: 'cp-form-actions' },
+      h('button', {
+        type: 'submit',
+        class: 'cp-primary-btn',
+        disabled: busy,
+      }, busy && cp.skills.busyKey === 'create-skill'
+        ? t('ckWritingRepo')
+        : cp.skills.newConfirmOverwrite
+          ? t('ckOverwriteConfirmBtn')
+          : t('cpSkillSave')),
+      h('button', {
+        type: 'button',
+        class: 'cp-mini-btn',
+        onclick: () => {
+          cp.skills.createOpen = false;
+          cp.skills.newConfirmOverwrite = false;
+          cp.skills.formError = null;
+          touch();
+        },
+      }, t('cpCancelEdit'))));
+  }
+
+  function skillCard(item) {
+    const busy = Boolean(cp.skills.busyKey);
+    const itemKey = `${item.target}:${item.slug}`;
+    const editing = cp.skills.editor?.target === item.target && cp.skills.editor?.slug === item.slug
+      ? cp.skills.editor
+      : null;
+    const confirmingDelete = cp.skills.confirmDeleteKey === itemKey;
+    const gitBadgeTone = item.gitStatus === 'clean' ? ' accent' : (item.gitStatus === 'modified' || item.gitStatus === 'untracked') ? ' warn' : '';
+
+    return h('article', { class: 'cp-card' },
+      h('div', { class: 'cp-card-head' },
+        h('div', { class: 'cp-badges' },
+          h('span', { class: 'cp-badge' }, t(skillTargetI18nKey(item.target))),
+          h('span', { class: `cp-badge${gitBadgeTone}` }, tOr(`cpSkillGit_${item.gitStatus}`, item.gitStatus)),
+          h('code', { class: 'cp-skill-path' }, item.relativePath)),
+        h('span', { class: 'cp-meta' }, `${formatStamp(item.updatedAt)} · ${item.bytes} B`)),
+      h('p', { class: 'cp-note-text' }, h('strong', null, item.name), item.description ? ` — ${item.description}` : ''),
+      editing
+        ? h('div', { class: 'cp-create-form' },
+          h('textarea', {
+            class: 'cp-textarea cp-code-textarea',
+            rows: 10,
+            dataset: { focus: `cp-edit-skill:${itemKey}` },
+            value: editing.markdown,
+            oninput: (e) => { editing.markdown = e.target.value; },
+          }, editing.markdown),
+          editing.errorCode
+            ? h('p', { class: 'cp-error' }, t(skillErrorKey(editing.errorCode)))
+            : null,
+          h('div', { class: 'cp-form-actions' },
+            h('button', {
+              type: 'button',
+              class: 'cp-primary-btn',
+              disabled: busy,
+              onclick: () => void saveEditedSkill(),
+            }, cp.skills.busyKey === `save:${itemKey}` ? t('cpSaving') : t('cpSkillSave')),
+            editing.conflict
+              ? h('button', {
+                type: 'button',
+                class: 'cp-mini-btn',
+                disabled: busy,
+                onclick: () => void openSkillEditor(item),
+              }, t('cpSkillReload'))
+              : null,
+            h('button', {
+              type: 'button',
+              class: 'cp-mini-btn',
+              disabled: busy,
+              onclick: () => { cp.skills.editor = null; touch(); },
+            }, t('cpCancelEdit'))))
+        : null,
+      h('div', { class: 'cp-card-actions' },
+        !editing
+          ? h('button', {
+            type: 'button',
+            class: 'cp-action-btn primary',
+            disabled: busy,
+            onclick: () => void openSkillEditor(item),
+          }, t('cpSkillEdit'))
+          : null,
+        h('button', {
+          type: 'button',
+          class: 'cp-action-btn',
+          disabled: busy,
+          onclick: () => void copyOrDownloadSkill(item, 'download'),
+        }, t('cpSkillDownload')),
+        h('button', {
+          type: 'button',
+          class: 'cp-action-btn',
+          disabled: busy,
+          onclick: () => void copyOrDownloadSkill(item, 'copy'),
+        }, t('cpSkillCopy')),
+        confirmingDelete
+          ? [
+            h('button', {
+              type: 'button',
+              class: 'cp-action-btn danger',
+              disabled: busy,
+              onclick: () => void deleteRepoSkill(item),
+            }, t('cpSkillDeleteConfirm')),
+            h('button', {
+              type: 'button',
+              class: 'cp-action-btn',
+              disabled: busy,
+              onclick: () => { cp.skills.confirmDeleteKey = null; touch(); },
+            }, t('cpCancelEdit')),
+          ]
+          : h('button', {
+            type: 'button',
+            class: 'cp-action-btn danger',
+            disabled: busy,
+            onclick: () => { cp.skills.confirmDeleteKey = itemKey; touch(); },
+          }, t('cpDelete'))));
+  }
+
+  function renderSkillsTab() {
+    const repos = cp.memory.repos;
+    if (!repos.length) {
+      return h('div', { class: 'cp-pane' },
+        cp.memory.status === 'loading'
+          ? h('p', { class: 'cp-empty' }, t('cpLoading'))
+          : h('p', { class: 'cp-empty' }, t('cpSkillsNoRepos')));
+    }
+    const currentRepo = selectedSkillRepo();
+    const online = currentRepo?.online !== false;
+    return h('div', { class: 'cp-pane' },
+      h('div', { class: 'cp-toolbar' },
+        h('select', {
+          class: 'cp-select',
+          'aria-label': t('cpSkillsSelectRepo'),
+          onchange: (e) => {
+            cp.skills.repoKey = e.target.value;
+            cp.skills.editor = null;
+            cp.skills.confirmDeleteKey = null;
+            cp.skills.createOpen = false;
+            void loadRepoSkills();
+          },
+        }, repos.map((r) => {
+          const key = repoCompositeKey(r);
+          return h('option', { value: key, selected: cp.skills.repoKey === key }, skillRepoOptionLabel(r));
+        })),
+        h('button', {
+          type: 'button',
+          class: 'cp-primary-btn',
+          disabled: !online,
+          onclick: () => {
+            cp.skills.createOpen = !cp.skills.createOpen;
+            cp.skills.newConfirmOverwrite = false;
+            cp.skills.formError = null;
+            if (cp.skills.createOpen && !cp.skills.newMarkdown) {
+              cp.skills.newMarkdown = t('cpSkillMarkdownPlaceholder');
+            }
+            touch();
+          },
+        }, icon('plus'), t('cpSkillsNewBtn'))),
+      cp.skills.projectApproved === true
+        ? h('p', { class: 'cp-trust-note ok' }, icon('check'), t('cpSkillsPiApproved'))
+        : cp.skills.projectApproved === false
+          ? h('p', { class: 'cp-trust-note' }, icon('shield'), t('cpSkillsPiUnapproved'))
+          : null,
+      renderSkillCreateForm(),
+      cp.skills.status === 'offline' || !online
+        ? h('div', { class: 'cp-alert cp-pressure' }, h('p', { class: 'cp-alert-title' }, icon('alert'), t('cpSkillsOfflineBanner')))
+        : cp.skills.status === 'loading' && cp.skills.items.length === 0
+          ? h('p', { class: 'cp-empty' }, t('cpLoading'))
+          : cp.skills.status === 'error'
+            ? h('p', { class: 'cp-error' }, t(skillErrorKey(cp.skills.errorCode)))
+            : cp.skills.items.length === 0
+              ? h('p', { class: 'cp-empty' }, t('cpSkillsEmpty'))
+              : [
+                h('div', { class: 'cp-list' }, cp.skills.items.map(skillCard)),
+                cp.skills.truncated ? h('p', { class: 'cp-empty' }, t('cpSkillTruncated')) : null,
+              ]);
+  }
+
   return {
-    open(initialTab = 'memory') {
-      cp.tab = initialTab === 'schedules' ? 'schedules' : 'memory';
+    open(initialTab = 'memory', initialTarget = null) {
+      cp.tab = initialTab === 'schedules' ? 'schedules' : initialTab === 'skills' ? 'skills' : 'memory';
       cp.memory.eviction = null;
+      cp.skills.editor = null;
+      cp.skills.confirmDeleteKey = null;
+      if (initialTarget) {
+        cp.skills.pendingTarget = initialTarget;
+        cp.skills.status = 'idle';
+      }
       void loadMemory();
       void loadSchedules();
+      if (cp.tab === 'skills' && cp.memory.repos.length > 0) {
+        applyPendingSkillRepo();
+        void loadRepoSkills();
+      }
     },
     signature() {
       return [cp.tab, cp.rev];
@@ -557,13 +1112,32 @@ export function createControlPlane(deps) {
               'aria-selected': String(cp.tab === 'schedules'),
               class: `cp-tab${cp.tab === 'schedules' ? ' active' : ''}`,
               onclick: () => { cp.tab = 'schedules'; touch(); },
-            }, icon('repeat'), t('cpTabSchedules'), counts.activeAuto > 0 ? h('span', { class: 'cp-tab-badge' }, String(counts.activeAuto)) : null)),
+            }, icon('repeat'), t('cpTabSchedules'), counts.activeAuto > 0 ? h('span', { class: 'cp-tab-badge' }, String(counts.activeAuto)) : null),
+            h('button', {
+              type: 'button',
+              role: 'tab',
+              'aria-selected': String(cp.tab === 'skills'),
+              class: `cp-tab${cp.tab === 'skills' ? ' active' : ''}`,
+              onclick: () => {
+                cp.tab = 'skills';
+                if (cp.skills.status === 'idle') void loadRepoSkills();
+                touch();
+              },
+            }, icon('sparkle'), t('cpTabSkills'))),
           h('button', {
             type: 'button',
             class: 'cp-mini-btn',
-            onclick: () => { void loadMemory(); void loadSchedules(); },
+            onclick: () => {
+              void loadMemory();
+              void loadSchedules();
+              if (cp.tab === 'skills') void loadRepoSkills();
+            },
           }, t('cpRefresh'))),
-        cp.tab === 'memory' ? renderMemoryTab() : renderSchedulesTab());
+        cp.tab === 'memory'
+          ? renderMemoryTab()
+          : cp.tab === 'schedules'
+            ? renderSchedulesTab()
+            : renderSkillsTab());
     },
   };
 }
