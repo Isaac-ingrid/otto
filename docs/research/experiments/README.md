@@ -31,4 +31,10 @@ model selection (`selection: launch`, `idFormat: opaque`), adds bounded Claude m
 across Steward and Connector, and provides `0013-claude-model-selection-driver.mjs` (`--preflight`,
 `--selftest`, and `--live --confirm-paid`).
 
+[Experiment 0014](0014-codex-adapter-acceptance.md) verifies `codex` (`CodexAdapter`) end-to-end —
+readonly sandbox (`-s read-only`), `-i` image attachments, explicit launch model selection + rollout
+`turn_context` observation, cold `exec resume` continuation, crash recovery, deduplicated history,
+and Web `session-model.js` parsing via `0014-codex-adapter-smoke-driver.mjs` (`--preflight`,
+`--selftest`, and `--live --confirm-paid`).
+
 No automatic acceptance, agent launch, or production write is implied by adding a record.
