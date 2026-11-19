@@ -153,6 +153,10 @@ export class ConnectorApp {
       snapshot: () => this.snapshot(),
       workersSnapshot: () => this.workersSnapshot(),
       discoverModels: agent => this.manager.refreshAgentModels(agent),
+      diffWorker: (request) => {
+        this.log?.("worker_diff_requested", { workerId: request.workerId, hasFilePath: Boolean(request.filePath) });
+        return this.manager.diffWorker(request);
+      },
       // L3 raw-history reads (§11.4): live get_entries while the process runs, the session
       // JSONL along the current branch otherwise. Logged at lifecycle level only — the
       // transcript itself never reaches the log.
@@ -238,6 +242,7 @@ export class ConnectorApp {
       lastSeq: events.nextSeq(w.workerId) - 1,
       sessionId: w.sessionId ?? "",
       lastOutcome: w.lastOutcome ?? "",
+      hasWorktree: Boolean(w.worktree),
       requestedModel: w.requestedModel ?? null,
       launchObservedModel: w.launchObservedModel ? JSON.parse(w.launchObservedModel) : null,
       lastObservedModel: w.lastObservedModel ? JSON.parse(w.lastObservedModel) : null,

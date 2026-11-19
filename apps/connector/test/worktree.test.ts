@@ -74,6 +74,32 @@ describe("WorktreeManager (connector-pi.md §8.2)", () => {
     await expect(manager.cleanup(repo, created.path)).rejects.toThrow(/uncommitted|force/);
     await expect(manager.cleanup(repo, created.path, { force: true })).resolves.toBeUndefined();
   });
+
+  it("cleanup allows clean zero-ahead write worktrees, readonly worktrees, and merged branches on local-only repos, while rejecting unpushed commits", async () => {
+    // 1. Clean write worktree with zero commits ahead of base (even without an origin remote) + deletes temp otto/* branch.
+    const zeroAhead = await manager.create({ repoPath: repo, threadId: "t-zero" });
+    await expect(
+      manager.cleanup(repo, zeroAhead.path, { base: zeroAhead.base, mode: "write", branch: zeroAhead.branch, defaultBranch: "main" }),
+    ).resolves.toBeUndefined();
+    const branchesAfterZero = await git(repo, ["branch", "--list", zeroAhead.branch]);
+    expect(branchesAfterZero.trim()).toBe("");
+
+    // 2. Write worktree with unpushed local commit is refused without force, then cleaned (including branch) when merged into defaultBranch.
+    const committed = await manager.create({ repoPath: repo, threadId: "t-commit" });
+    writeFileSync(join(committed.path, "feat.txt"), "hello\n");
+    await git(committed.path, ["add", "feat.txt"]);
+    await git(committed.path, ["commit", "-m", "feat: local commit"]);
+    await expect(
+      manager.cleanup(repo, committed.path, { base: committed.base, mode: "write", branch: committed.branch, defaultBranch: "main" }),
+    ).rejects.toThrow(/unpushed|force/);
+
+    // Merge into main -> now safe without force and deletes otto/* branch.
+    await git(repo, ["merge", "--ff-only", committed.branch]);
+    await expect(
+      manager.cleanup(repo, committed.path, { base: committed.base, mode: "write", branch: committed.branch, defaultBranch: "main" }),
+    ).resolves.toBeUndefined();
+    expect((await git(repo, ["branch", "--list", committed.branch])).trim()).toBe("");
+  });
 });
 
 describe("defaultBranch (§8.2: local default branch, no network)", () => {

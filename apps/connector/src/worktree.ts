@@ -161,26 +161,54 @@ export class WorktreeManager {
     return { path: dir, branch, base };
   }
 
-  /** cleanup_worktree (§6.1): refuses dirty or unpushed worktrees unless force.
+  /** cleanup_worktree (§6.1): refuses dirty or unpushed/unmerged worktrees unless force.
    *  `beforeRemove` (Stage 2 archive hook) runs only after clean/pushed checks pass and
    *  before `git worktree remove`, so a failing archive hook preserves the worktree. */
   async cleanup(
     repoPath: string,
     worktreePath: string,
-    opts: { force?: boolean; beforeRemove?: () => Promise<void> } = {},
+    opts: {
+      force?: boolean;
+      base?: string;
+      mode?: "write" | "readonly";
+      branch?: string | null;
+      defaultBranch?: string | null;
+      beforeRemove?: () => Promise<void>;
+    } = {},
   ): Promise<void> {
+    const headSha = (await git(worktreePath, ["rev-parse", "HEAD"]).catch(() => "")).trim();
+    let zeroAhead = false;
+    let mergedIntoDefault = false;
+    if (opts.base) {
+      const countOut = await git(worktreePath, ["rev-list", "--count", `${opts.base}..HEAD`]).catch(() => null);
+      zeroAhead = countOut?.trim() === "0";
+    }
+    if (headSha && opts.defaultBranch && opts.defaultBranch !== opts.branch) {
+      mergedIntoDefault = await git(repoPath, ["merge-base", "--is-ancestor", headSha, `refs/heads/${opts.defaultBranch}`])
+        .then(() => true)
+        .catch(() => false);
+    }
+
     if (!opts.force) {
       const dirty = (await git(worktreePath, ["status", "--porcelain"])).trim().length > 0;
-      // Unpushed = HEAD is contained by no remote-tracking branch.
-      const remoteRefs = (await git(worktreePath, ["branch", "-r", "--contains", "HEAD"])).trim();
-      if (dirty || remoteRefs.length === 0) {
-        throw new GitError("worktree has uncommitted changes or unpushed commits; pass force");
+      if (dirty) {
+        throw new GitError("worktree has uncommitted changes; pass force");
+      }
+      if (opts.mode !== "readonly" && !zeroAhead && !mergedIntoDefault) {
+        const remoteRefs = (await git(worktreePath, ["branch", "-r", "--contains", "HEAD"])).trim();
+        if (remoteRefs.length === 0) {
+          throw new GitError("worktree has uncommitted changes or unpushed commits; pass force");
+        }
       }
     }
     if (opts.beforeRemove) {
       await opts.beforeRemove();
     }
     await git(repoPath, ["worktree", "remove", "--force", worktreePath]);
+
+    if (opts.branch && opts.branch.startsWith("otto/") && (opts.force || zeroAhead || mergedIntoDefault)) {
+      await git(repoPath, ["branch", "-D", opts.branch]).catch(() => undefined);
+    }
   }
 }
 

@@ -24,9 +24,10 @@ import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath, code
 import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
 import type { ClaudeAdapter } from "./claude-adapter.ts";
 import type { CodexAdapter } from "./codex-adapter.ts";
-import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage } from "@isaac2ingrid/protocol";
+import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type WorkerDiffArgs, type WorkerDiffResult } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
+import { collectWorkerDiff } from "./worker-diff.ts";
 import { WorktreeManager, createReadonlyWorktree } from "./worktree.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -993,9 +994,14 @@ export class WorkerManager {
     const repo = this.store.getRepo(worker.repoId);
     if (!repo) throw new CommandError("not_registered_repo", `repo '${worker.repoId}' is not registered on this machine`);
     const isWriteWorktree = worker.mode === "write" && Boolean(worker.branch);
+    const repoDefaultBranch = repo.capability.kind === "git" ? repo.capability.defaultBranch : null;
     try {
       await this.worktrees.cleanup(repo.path, worker.worktree, {
         force,
+        base: worker.base ?? undefined,
+        mode: worker.mode === "readonly" ? "readonly" : "write",
+        branch: worker.branch,
+        defaultBranch: repoDefaultBranch,
         ...(isWriteWorktree && repo.hooks.archiveHook !== null
           ? {
               beforeRemove: () =>
@@ -1024,6 +1030,23 @@ export class WorkerManager {
     }
     this.store.clearWorkerWorktree(workerId);
     return { removed: worker.worktree };
+  }
+
+  /** On-demand Git diff inspection (`worker_diff` -> `worker_diff_result`). */
+  async diffWorker(args: WorkerDiffArgs): Promise<WorkerDiffResult> {
+    const worker = this.store.getWorker(args.workerId);
+    if (!worker) return { ok: false, code: "not_found" };
+    const repo = this.store.getRepo(worker.repoId);
+    if (!repo || repo.capability.kind !== "git") return { ok: false, code: "not_git_repo" };
+    const workDir = worker.worktree ?? (worker.mode === "write" ? repo.path : null);
+    if (!workDir || !worker.base) return { ok: false, code: "no_worktree" };
+    return collectWorkerDiff({
+      workDir,
+      base: worker.base,
+      filePath: args.filePath,
+      contextLines: args.contextLines,
+      extraSecrets: this.redactionSecrets(),
+    });
   }
 
   // --- pr_worker (connector-pi.md §6.1, issue #21: the consent gate's machine half) ------------------

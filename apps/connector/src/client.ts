@@ -14,9 +14,13 @@ import {
   PROTOCOL_VERSION,
   reconnectOn,
   ulid,
+  WorkerDiffMessageSchema,
   type CmdMessage,
   type DirectoryListingMessage,
   type WelcomeMessage,
+  type WorkerDiffArgs,
+  type WorkerDiffResult,
+  type WorkerDiffResultMessage,
 } from "@isaac2ingrid/protocol";
 import { CommandLog, type CommandResult } from "./commands.ts";
 import { EventLog, type StoredEvent } from "./events.ts";
@@ -45,6 +49,7 @@ export interface ClientOptions {
   handleCommand?: CommandHandler;
   workersSnapshot?: () => Array<Record<string, unknown>>;
   discoverModels?: (agent: string) => Promise<AgentModelCatalog>;
+  diffWorker?: (args: WorkerDiffArgs) => Promise<WorkerDiffResult>;
   /** Honest hello snapshot for the non-worker sections (protocol §6.1): agents, repos, limits. */
   snapshot?: () => { agents: unknown[]; repos: unknown[]; limits: { maxWorkers: number; running: number } };
   /** L3 raw-history loader (connector-pi.md §11.4): when set, `history_req` messages are
@@ -92,6 +97,7 @@ export class ConnectorClient {
   private sendQueue: StoredEvent[] = [];
   private flushTimer?: NodeJS.Timeout;
   private directoryReads = 0;
+  private diffReads = 0;
   private discoveringModels = false;
   private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
@@ -175,7 +181,7 @@ export class ConnectorClient {
           bootId: this.bootId,
           connEpoch,
           connector: { version: VERSION, os: process.platform, arch: process.arch, node: process.version },
-          capabilities: { directoryBrowse: true },
+          capabilities: { directoryBrowse: true, workerDiff: Boolean(this.options.diffWorker) },
           machine: {
             name: this.options.machineName ?? os.hostname(),
             memTotalMB: Math.round(os.totalmem() / 1_000_000),
@@ -300,6 +306,26 @@ export class ConnectorClient {
         void browseDirectory(request).then((result) => {
           if (this.ws === ws) this.send(ws, { t: "directory_listing", re: request.id, ...result } satisfies DirectoryListingMessage);
         }).finally(() => { this.directoryReads--; });
+        return;
+      }
+      case "worker_diff": {
+        const parsed = WorkerDiffMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.diffWorker) {
+          this.send(ws, { t: "worker_diff_result", re: request.id, ok: false, code: "unsupported" } satisfies WorkerDiffResultMessage);
+          return;
+        }
+        if (this.diffReads >= 4) {
+          this.send(ws, { t: "worker_diff_result", re: request.id, ok: false, code: "busy" } satisfies WorkerDiffResultMessage);
+          return;
+        }
+        this.diffReads++;
+        void this.options.diffWorker({ workerId: request.workerId, filePath: request.filePath, contextLines: request.contextLines }).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "worker_diff_result", re: request.id, ...result } satisfies WorkerDiffResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "worker_diff_result", re: request.id, ok: false, code: "diff_failed" } satisfies WorkerDiffResultMessage);
+        }).finally(() => { this.diffReads--; });
         return;
       }
       case "history_req": {
