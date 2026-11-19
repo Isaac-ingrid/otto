@@ -24,9 +24,10 @@ import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath, code
 import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
 import type { ClaudeAdapter } from "./claude-adapter.ts";
 import type { CodexAdapter } from "./codex-adapter.ts";
-import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type WorkerDiffArgs, type WorkerDiffResult } from "@isaac2ingrid/protocol";
+import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type WorkerCheckpointArgs, type WorkerCheckpointResult, type WorkerDiffArgs, type WorkerDiffResult } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
+import { collectWorkerCheckpoint } from "./worker-checkpoint.ts";
 import { collectWorkerDiff } from "./worker-diff.ts";
 import { WorktreeManager, createReadonlyWorktree } from "./worktree.ts";
 import { homedir } from "node:os";
@@ -1045,6 +1046,35 @@ export class WorkerManager {
       base: worker.base,
       filePath: args.filePath,
       contextLines: args.contextLines,
+      extraSecrets: this.redactionSecrets(),
+    });
+  }
+
+  /** On-demand deterministic checkpoint inspection (`worker_checkpoint` -> `worker_checkpoint_result`). */
+  async checkpointWorker(args: WorkerCheckpointArgs): Promise<WorkerCheckpointResult> {
+    const worker = this.store.getWorker(args.workerId);
+    if (!worker) return { ok: false, code: "not_found" };
+    let page: HistoryPage;
+    try {
+      page = await this.history(args.workerId, undefined, 2 * 1024 * 1024);
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === "no_history") return { ok: false, code: "no_history" };
+      if (code === "not_found") return { ok: false, code: "not_found" };
+      return { ok: false, code: "read_failed" };
+    }
+    const repo = this.store.getRepo(worker.repoId);
+    const workDir =
+      repo && repo.capability.kind === "git"
+        ? (worker.worktree ?? (worker.mode === "write" ? repo.path : null))
+        : null;
+    return collectWorkerCheckpoint({
+      workerId: worker.workerId,
+      agent: worker.agent ?? "unknown",
+      sessionId: worker.sessionId ?? null,
+      entries: page.entries,
+      workDir,
+      base: worker.base ?? null,
       extraSecrets: this.redactionSecrets(),
     });
   }

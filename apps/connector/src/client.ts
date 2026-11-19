@@ -14,10 +14,14 @@ import {
   PROTOCOL_VERSION,
   reconnectOn,
   ulid,
+  WorkerCheckpointMessageSchema,
   WorkerDiffMessageSchema,
   type CmdMessage,
   type DirectoryListingMessage,
   type WelcomeMessage,
+  type WorkerCheckpointArgs,
+  type WorkerCheckpointResult,
+  type WorkerCheckpointResultMessage,
   type WorkerDiffArgs,
   type WorkerDiffResult,
   type WorkerDiffResultMessage,
@@ -50,6 +54,7 @@ export interface ClientOptions {
   workersSnapshot?: () => Array<Record<string, unknown>>;
   discoverModels?: (agent: string) => Promise<AgentModelCatalog>;
   diffWorker?: (args: WorkerDiffArgs) => Promise<WorkerDiffResult>;
+  checkpointWorker?: (args: WorkerCheckpointArgs) => Promise<WorkerCheckpointResult>;
   /** Honest hello snapshot for the non-worker sections (protocol §6.1): agents, repos, limits. */
   snapshot?: () => { agents: unknown[]; repos: unknown[]; limits: { maxWorkers: number; running: number } };
   /** L3 raw-history loader (connector-pi.md §11.4): when set, `history_req` messages are
@@ -98,6 +103,7 @@ export class ConnectorClient {
   private flushTimer?: NodeJS.Timeout;
   private directoryReads = 0;
   private diffReads = 0;
+  private checkpointReads = 0;
   private discoveringModels = false;
   private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
@@ -181,7 +187,11 @@ export class ConnectorClient {
           bootId: this.bootId,
           connEpoch,
           connector: { version: VERSION, os: process.platform, arch: process.arch, node: process.version },
-          capabilities: { directoryBrowse: true, workerDiff: Boolean(this.options.diffWorker) },
+          capabilities: {
+            directoryBrowse: true,
+            workerDiff: Boolean(this.options.diffWorker),
+            workerCheckpoint: Boolean(this.options.checkpointWorker),
+          },
           machine: {
             name: this.options.machineName ?? os.hostname(),
             memTotalMB: Math.round(os.totalmem() / 1_000_000),
@@ -326,6 +336,26 @@ export class ConnectorClient {
         }).catch(() => {
           if (this.ws === ws) this.send(ws, { t: "worker_diff_result", re: request.id, ok: false, code: "diff_failed" } satisfies WorkerDiffResultMessage);
         }).finally(() => { this.diffReads--; });
+        return;
+      }
+      case "worker_checkpoint": {
+        const parsed = WorkerCheckpointMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.checkpointWorker) {
+          this.send(ws, { t: "worker_checkpoint_result", re: request.id, ok: false, code: "unsupported" } satisfies WorkerCheckpointResultMessage);
+          return;
+        }
+        if (this.checkpointReads >= 4) {
+          this.send(ws, { t: "worker_checkpoint_result", re: request.id, ok: false, code: "busy" } satisfies WorkerCheckpointResultMessage);
+          return;
+        }
+        this.checkpointReads++;
+        void this.options.checkpointWorker({ workerId: request.workerId }).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "worker_checkpoint_result", re: request.id, ...result } satisfies WorkerCheckpointResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "worker_checkpoint_result", re: request.id, ok: false, code: "read_failed" } satisfies WorkerCheckpointResultMessage);
+        }).finally(() => { this.checkpointReads--; });
         return;
       }
       case "history_req": {
