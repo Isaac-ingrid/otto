@@ -3392,6 +3392,7 @@ export function createLedger(deps: LedgerDeps) {
     workspace(opts?: { includeArchived?: boolean }) {
       return {
         archivedCount: threads.archivedCount(),
+        activePrWatches: sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_pr_watch WHERE status = 'active'`[0]!.n,
         threads: threads.list(opts).map((thread) => ({
           ...thread,
           repoIds: threads.repoIds(thread.threadId),

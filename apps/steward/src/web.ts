@@ -280,6 +280,7 @@ export interface WebDeps {
     | "browseDirectory"
     | "diffWorker"
     | "archiveThread"
+    | "controlPlane"
     | "webauthnRegisterOptions"
     | "webauthnRegisterVerify"
     | "webauthnRemove"

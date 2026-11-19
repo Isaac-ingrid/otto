@@ -840,6 +840,18 @@ export class Steward extends Agent<Env> {
         browseDirectory: (input, signal) => this.connectorProto.browseMachineDirectory(input, signal),
         diffWorker: (input, signal) => this.connectorProto.diffWorker(input, signal),
         archiveThread: (input) => this.archiveThread(input),
+        controlPlane: {
+          tx: (fn) => this.ctx.storage.transactionSync(fn),
+          listSdkSchedules: async () => {
+            const list = await this.listSchedules();
+            return list.map((s) => ({ id: s.id, time: s.time }));
+          },
+          pauseRoutine: (routineId, paused) => this.routineService.pause(routineId, paused),
+          cancelSchedule: (scheduleId) => this.routineService.cancel(scheduleId),
+          listPrWatches: () => this.prWatches.list(),
+          cancelPrWatch: (watchId) => this.prWatches.cancel(watchId),
+          onChanged: () => this.notifyWorkspaces(),
+        },
         webauthnRegisterOptions: (sid: string, rpId: string) => this.web.webauthnRegisterOptions(sid, rpId),
         webauthnRegisterVerify: (sid: string, rpId: string, origin: string, label: string, attestation: unknown) =>
           this.web.webauthnRegisterVerify(sid, rpId, origin, label, attestation),

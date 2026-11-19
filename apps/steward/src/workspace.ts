@@ -3,6 +3,7 @@
 // for the owner. Pure assembly over the ledger's views; nothing here writes, and nothing the
 // ledger keeps private (run text, wake text, worker transcripts, command ids) is exposed.
 import type { BudgetState } from "./budget.ts";
+import { buildControlPlaneSummary } from "./control-plane.ts";
 import type { Ledger } from "./ledger.ts";
 
 /** Where a message entered the conversation. New rows are all `local` (ADR-0003: the owner
@@ -351,6 +352,7 @@ export function workspaceSnapshot(input: {
     now,
     busy: view.busy,
     archivedCount: view.archivedCount,
+    controlPlaneSummary: buildControlPlaneSummary(ledger, view.activePrWatches),
     threads: view.threads.map((thread) => ({
       id: thread.threadId,
       title: thread.title,

@@ -18,6 +18,13 @@ import {
   type WorkerDiffArgs,
   type WorkerDiffPayload,
 } from "@isaac2ingrid/protocol";
+import {
+  mutateMemoryControlPlane,
+  mutateSchedulesControlPlane,
+  readMemoryControlPlane,
+  readSchedulesControlPlane,
+  type ControlPlaneDeps,
+} from "./control-plane.ts";
 import type { Ledger } from "./ledger.ts";
 import {
   WorkspaceError,
@@ -91,6 +98,7 @@ export interface WorkspaceApiDeps {
   browseDirectory?(input: MachineDirectoryBrowseInput, signal: AbortSignal): Promise<DirectoryListing>;
   diffWorker?(input: WorkerDiffRequestInput, signal: AbortSignal): Promise<WorkerDiffPayload>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
+  controlPlane?: Omit<ControlPlaneDeps, "ledger" | "budget" | "audit">;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
    *  only webauthn.ts's verifyRegistrationResponse/verifyAssertionResponse ever assert their
    *  shape — this layer validates only that the JSON body is an object with the right keys
@@ -244,11 +252,37 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     });
   }
   if (url.pathname === "/app/api/settings" && request.method === "GET" && deps.settings) return json(await deps.settings());
+  if (url.pathname === "/app/api/memory") {
+    if (request.method === "GET") {
+      try {
+        return json(readMemoryControlPlane(deps.ledger, url.searchParams));
+      } catch (error) {
+        if (error instanceof WorkspaceError) return json({ error: error.code, ...(error.details ?? {}) }, error.status);
+        throw error;
+      }
+    }
+    if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  }
+  if (url.pathname === "/app/api/schedules" && deps.controlPlane) {
+    if (request.method === "GET") {
+      return json(
+        await readSchedulesControlPlane({
+          ...deps.controlPlane,
+          ledger: deps.ledger,
+          budget: deps.budget,
+          audit: deps.audit,
+        }),
+      );
+    }
+    if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  }
   if (request.method !== "POST") return json({ error: "not_found" }, 404);
 
   const origin = request.headers.get("origin");
   const requireOrigin =
     deps.requireOrigin ||
+    url.pathname === "/app/api/memory" ||
+    url.pathname === "/app/api/schedules" ||
     url.pathname === "/app/api/settings/agent-model/refresh" ||
     url.pathname.startsWith("/app/api/machines/directories") ||
     url.pathname.startsWith("/app/api/workers/") ||
@@ -417,6 +451,34 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
           archived,
           ...(cleanupPolicy !== undefined ? { cleanupPolicy } : {}),
         }),
+      );
+    }
+    if (url.pathname === "/app/api/memory") {
+      const body = await readJson(request);
+      return json(
+        mutateMemoryControlPlane(
+          {
+            ledger: deps.ledger,
+            tx: deps.controlPlane?.tx ?? (<T>(fn: () => T) => fn()),
+            ...(deps.controlPlane?.onChanged ? { onChanged: deps.controlPlane.onChanged } : {}),
+            audit: deps.audit,
+          },
+          body,
+        ),
+      );
+    }
+    if (url.pathname === "/app/api/schedules" && deps.controlPlane) {
+      const body = await readJson(request);
+      return json(
+        await mutateSchedulesControlPlane(
+          {
+            ...deps.controlPlane,
+            ledger: deps.ledger,
+            budget: deps.budget,
+            audit: deps.audit,
+          },
+          body,
+        ),
       );
     }
     const read = /^\/app\/api\/threads\/([\w-]{1,128})\/read$/.exec(url.pathname);

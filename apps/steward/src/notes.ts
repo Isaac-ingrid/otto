@@ -209,6 +209,29 @@ export interface CommitIntent {
   /** Entries that stay true but must leave the active layer for capacity. Same placement only
    *  (same layer, same repo) — a cross-layer target is a supersession, not an eviction. */
   evicts?: string[];
+  /** Direct owner actions in Web UI are already seen by the owner; mark log rows reported. */
+  reported?: boolean;
+  /** Direct Web UI checks surface 409 capacity_exceeded interactively without parking pressure. */
+  noParkPressure?: boolean;
+}
+
+export interface NotePressureView {
+  id: number;
+  layer: "resident" | "project";
+  scopeRepoId: string | null;
+  text: string;
+  chars: number;
+  kind: NoteKind;
+  evidence: string | null;
+  supersedes: string[];
+  evicts: string[];
+}
+
+export interface NotesUsageSummary {
+  resident: { usedChars: number; capChars: number; activeCount: number; pinnedCount: number };
+  projects: Array<{ scopeRepoId: string; usedChars: number; capChars: number; activeCount: number; pinnedCount: number }>;
+  unconfirmedCount: number;
+  pressure: NotePressureView[];
 }
 
 /** Resident notes + the project notes of the repos in play (§2.1 notes.context). */
@@ -841,7 +864,7 @@ export function createNotes(deps: NotesDeps) {
         // daily pass honours them instead of score-evicting around them (finding 4) — and
         // reports both halves (issue #19, §2.4/§2.5). Low-trust sources are never worth that
         // room (steward.md §2.3) and stay refused.
-        if (draft.source === "user_said" && canFree >= overBy) {
+        if (draft.source === "user_said" && canFree >= overBy && intent.noParkPressure !== true) {
           recordPressure(
             draft,
             check.text,
@@ -878,7 +901,8 @@ export function createNotes(deps: NotesDeps) {
                 ${draft.source}, ${draft.evidence ?? null}, ${check.confirmed}, 0, ${at}, ${at}, 0, 'active')
       `;
       const note = noteById(noteId)!;
-      const changes: ChangeReport[] = [log("noted", note, draft.source)];
+      const reported = intent.reported === true;
+      const changes: ChangeReport[] = [log("noted", note, draft.source, { reported })];
 
       // The outcome follows the declared intent, not the leftover capacity (memory-trust
       // review): `supersedes` targets become historical versions (their fact is no longer
@@ -888,14 +912,14 @@ export function createNotes(deps: NotesDeps) {
           UPDATE sh_note SET layer = 'archive', status = 'superseded', supersededBy = ${noteId}, lastUsedAt = ${at}
           WHERE noteId = ${target.noteId}
         `;
-        changes.push(log("superseded", target, "supersession", { supersededBy: noteId }));
+        changes.push(log("superseded", target, "supersession", { supersededBy: noteId, reported }));
       }
       for (const target of evictTargets) {
         sql`
           UPDATE sh_note SET layer = 'archive', supersededBy = ${noteId}, lastUsedAt = ${at}
           WHERE noteId = ${target.noteId}
         `;
-        changes.push(log("evicted", target, "capacity", { supersededBy: noteId }));
+        changes.push(log("evicted", target, "capacity", { supersededBy: noteId, reported }));
       }
       return { ok: true, note, changes, bumped: false };
     });
@@ -910,6 +934,7 @@ export function createNotes(deps: NotesDeps) {
   const confirm = (
     noteId: string,
     evidence?: string,
+    opts?: { reported?: boolean },
   ): { ok: true; changes: ChangeReport[] } | { ok: false; reason: "missing" | "removed" | "superseded" | "already" } =>
     tx(() => {
       const note = noteById(noteId);
@@ -921,19 +946,22 @@ export function createNotes(deps: NotesDeps) {
         UPDATE sh_note SET confirmed = 1, confirmedBy = COALESCE(${evidence ?? null}, confirmedBy), lastUsedAt = ${now()}
         WHERE noteId = ${noteId}
       `;
-      return { ok: true as const, changes: [log("confirmed", note, evidence ? `confirmed_by:${evidence}` : "owner_confirmed")] };
+      return {
+        ok: true as const,
+        changes: [log("confirmed", note, evidence ? `confirmed_by:${evidence}` : "owner_confirmed", { reported: opts?.reported === true })],
+      };
     });
 
-  const pin = (noteId: string, pinned: boolean): { ok: boolean; changes: ChangeReport[] } =>
+  const pin = (noteId: string, pinned: boolean, opts?: { reported?: boolean }): { ok: boolean; changes: ChangeReport[] } =>
     tx(() => {
       const note = noteById(noteId);
       if (!note || note.status === "removed" || note.pinned === pinned) return { ok: note !== null, changes: [] };
       sql`UPDATE sh_note SET pinned = ${pinned ? 1 : 0} WHERE noteId = ${noteId}`;
-      return { ok: true, changes: [log(pinned ? "pinned" : "unpinned", note, null)] };
+      return { ok: true, changes: [log(pinned ? "pinned" : "unpinned", note, null, { reported: opts?.reported === true })] };
     });
 
   /** Never a hard delete (spec §10.2: entries only sink): status='removed', searchable no more. */
-  const remove = (noteId: string): { ok: boolean; changes: ChangeReport[] } =>
+  const remove = (noteId: string, opts?: { reported?: boolean }): { ok: boolean; changes: ChangeReport[] } =>
     tx(() => {
       const note = noteById(noteId);
       if (!note || note.status === "removed") return { ok: note !== null, changes: [] };
@@ -941,8 +969,70 @@ export function createNotes(deps: NotesDeps) {
         UPDATE sh_note SET status = 'removed', layer = 'archive', pinned = 0, supersededBy = NULL
         WHERE noteId = ${noteId}
       `;
-      return { ok: true, changes: [log("removed", note, "user_removed")] };
+      return { ok: true, changes: [log("removed", note, "user_removed", { reported: opts?.reported === true })] };
     });
+
+  const archiveByOwner = (
+    noteId: string,
+  ): { ok: true; changes: ChangeReport[] } | { ok: false; reason: "missing" | "inactive" | "pinned" } =>
+    tx(() => {
+      const note = noteById(noteId);
+      if (!note) return { ok: false as const, reason: "missing" as const };
+      if (note.status !== "active" || (note.layer !== "resident" && note.layer !== "project")) {
+        return { ok: false as const, reason: "inactive" as const };
+      }
+      if (note.pinned) return { ok: false as const, reason: "pinned" as const };
+      sql`UPDATE sh_note SET layer = 'archive' WHERE noteId = ${noteId}`;
+      return { ok: true as const, changes: [log("demoted", note, "owner_ui", { delivery: "reply", reported: true })] };
+    });
+
+  const dismissPressure = (pressureId: number): boolean =>
+    tx(() => {
+      sql`DELETE FROM sh_note_pressure WHERE rowid = ${pressureId}`;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    });
+
+  const usage = (): NotesUsageSummary => {
+    const resRow = sql<{ usedChars: number; activeCount: number; pinnedCount: number }>`
+      SELECT COALESCE(SUM(bytes), 0) AS usedChars, COUNT(*) AS activeCount,
+             COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) AS pinnedCount
+      FROM sh_note WHERE layer = 'resident' AND status = 'active'
+    `[0]!;
+    const projRows = sql<{ scope_repoId: string; usedChars: number; activeCount: number; pinnedCount: number }>`
+      SELECT scope_repoId, COALESCE(SUM(bytes), 0) AS usedChars, COUNT(*) AS activeCount,
+             COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) AS pinnedCount
+      FROM sh_note WHERE layer = 'project' AND status = 'active' AND scope_repoId IS NOT NULL
+      GROUP BY scope_repoId ORDER BY scope_repoId
+    `;
+    const unconfirmedCount = sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM sh_note
+      WHERE status = 'active' AND layer IN ('resident', 'project')
+        AND source IN ('worker_reported', 'inferred') AND confirmed = 0
+    `[0]!.n;
+    const pressure = sql<{
+      id: number; layer: string; scope_repoId: string; text: string; chars: number;
+      kind: string; evidence: string | null; supersedes: string | null; evicts: string | null; replaces: string | null;
+    }>`
+      SELECT rowid AS id, layer, scope_repoId, text, chars, kind, evidence, supersedes, evicts, replaces
+      FROM sh_note_pressure ORDER BY rowid
+    `.map((r) => ({
+      id: r.id,
+      layer: r.layer as "resident" | "project",
+      scopeRepoId: r.scope_repoId === "" ? null : r.scope_repoId,
+      text: r.text,
+      chars: r.chars,
+      kind: isNoteKind(r.kind) ? r.kind : "fact",
+      evidence: r.evidence,
+      supersedes: parseIds(r.supersedes ?? r.replaces),
+      evicts: parseIds(r.evicts),
+    }));
+    return {
+      resident: { usedChars: resRow.usedChars, capChars: RESIDENT_CAP, activeCount: resRow.activeCount, pinnedCount: resRow.pinnedCount },
+      projects: projRows.map((r) => ({ scopeRepoId: r.scope_repoId, usedChars: r.usedChars, capChars: PROJECT_CAP_PER_REPO, activeCount: r.activeCount, pinnedCount: r.pinnedCount })),
+      unconfirmedCount,
+      pressure,
+    };
+  };
 
   const list = (filter: { layer?: NoteLayer | "all"; scopeRepoId?: string; includeRemoved?: boolean } = {}): NoteRow[] => {
     // The tagged template interpolates only values, so every shape is spelled out; never text.
@@ -1415,6 +1505,9 @@ export function createNotes(deps: NotesDeps) {
     confirm,
     pin,
     remove,
+    archiveByOwner,
+    dismissPressure,
+    usage,
     demote: ownerArchive,
     renew: renewNote,
     get: noteById,
