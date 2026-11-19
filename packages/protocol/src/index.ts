@@ -14,3 +14,4 @@ export * from "./thread-subscription.ts";
 export * from './agent-models.ts';
 export * from "./report.ts";
 export * from "./proposal.ts";
+export * from "./checkpoint.ts";
