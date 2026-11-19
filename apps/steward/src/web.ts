@@ -279,6 +279,8 @@ export interface WebDeps {
     | "addDirectory"
     | "browseDirectory"
     | "diffWorker"
+    | "checkpointWorker"
+    | "distillWorker"
     | "archiveThread"
     | "controlPlane"
     | "webauthnRegisterOptions"

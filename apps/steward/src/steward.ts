@@ -52,6 +52,7 @@ import {
   type BudgetState,
 } from "./budget.ts";
 import { Dispatcher, parseOwnerCommand } from "./dispatch.ts";
+import { distillWorkerCheckpoint, type DistillMode, type DistillResult } from "./distiller.ts";
 import { buildSituationBrief } from "./llm/brief.ts";
 import { buildStewardExtension, type StewardExtensionContext } from "./llm/extension.ts";
 import { configuredWebSearch } from "./llm/web-search.ts";
@@ -839,6 +840,8 @@ export class Steward extends Agent<Env> {
         addDirectory: (input) => this.connectorProto.addMachineDirectory(input),
         browseDirectory: (input, signal) => this.connectorProto.browseMachineDirectory(input, signal),
         diffWorker: (input, signal) => this.connectorProto.diffWorker(input, signal),
+        checkpointWorker: (workerId, signal) => this.connectorProto.checkpointWorker(workerId, signal),
+        distillWorker: (input, signal) => this.distillWorker(input, signal),
         archiveThread: (input) => this.archiveThread(input),
         controlPlane: {
           tx: (fn) => this.ctx.storage.transactionSync(fn),
@@ -974,6 +977,7 @@ export class Steward extends Agent<Env> {
         await this.backfillRunThread(outcome.threadId);
         return outcome;
       },
+      inspectWorkerCheckpoint: (workerId) => this.connectorProto.checkpointWorker(workerId, AbortSignal.timeout(8_000)),
       notifyUser: async (input) => {
         const owner = this.ownerOpenIdSync();
         if (!owner) return;
@@ -1566,6 +1570,9 @@ export class Steward extends Agent<Env> {
         return;
       case "worker_diff_result":
         this.connectorProto.handleWorkerDiffResult(connection, message);
+        return;
+      case "worker_checkpoint_result":
+        this.connectorProto.handleWorkerCheckpointResult(connection, message);
         return;
       case "error":
         // A connector reply to something the DO itself sent. The only DO-originated requests
@@ -3182,6 +3189,42 @@ export class Steward extends Agent<Env> {
       .then(() => { this.ledger.webRequests.complete(key); }).finally(() => { this.webInputs.delete(key); });
     this.webInputs.set(key, work);
     return work;
+  }
+
+  async distillWorker(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult> {
+    await this.syncUsageQuietly();
+    return distillWorkerCheckpoint(
+      {
+        ledger: this.ledger,
+        tx: (fn) => this.ctx.storage.transactionSync(fn),
+        budget: () => this.budgetState(),
+        readCheckpoint: (workerId, sig) => this.connectorProto.checkpointWorker(workerId, sig),
+        completeText: async ({ systemPrompt, userPrompt, signal: sig }) => {
+          await this.ensureRootModel();
+          const sealed = await this.modelConfig();
+          const config = mergeModelSelection(sealed, this.modelVarsConfig);
+          const model = this.llmModels.models.getModel(config.provider, config.modelId);
+          if (!model) throw new WorkspaceError("model_not_configured", 409);
+          const reply = await this.llmModels.models.completeSimple(
+            model,
+            { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
+            { maxTokens: 1600, maxRetries: 0, timeoutMs: 30_000, signal: sig },
+          );
+          const costUsd = Math.max(0, reply.usage?.cost?.total ?? 0);
+          const tokens = Math.max(0, reply.usage?.totalTokens ?? 0);
+          if (costUsd > 0 || tokens > 0) this.ledger.budget.add({ costUsd, tokens }, Date.now());
+          if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+            throw new WorkspaceError("distill_failed", 502);
+          }
+          return reply.content
+            .filter((b): b is { type: "text"; text: string } => b.type === "text")
+            .map((b) => b.text)
+            .join("\n");
+        },
+        audit: (reason, detail) => this.logChannel(reason, detail),
+      },
+      { ...input, signal },
+    );
   }
 
   async setWorkerDiffTimeoutForTest(ms: number): Promise<void> {

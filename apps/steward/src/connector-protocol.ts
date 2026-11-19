@@ -23,10 +23,15 @@ import {
   RegisterRepoResultSchema,
   HelloMessageSchema,
   PingMessageSchema,
+  WORKER_CHECKPOINT_TIMEOUT_MS,
   WORKER_DIFF_TIMEOUT_MS,
+  WorkerCheckpointResultMessageSchema,
   WorkerDiffResultMessageSchema,
   mintToken,
   ulid,
+  type WorkerCheckpointMessage,
+  type WorkerCheckpointPayload,
+  type WorkerCheckpointResult,
   type CmdResult,
   type DirectoryBrowseResult,
   type DirectoryListing,
@@ -52,8 +57,11 @@ import type {
   WorkerDiffRequestInput,
 } from "./workspace-api.ts";
 
+import { buildOfflineCheckpointFallback } from "./distiller.ts";
+
 type DirectoryReadResult = DirectoryBrowseResult | { ok: false; code: "machine_offline" | "browse_timeout" };
 type WorkerDiffReadResult = WorkerDiffResult | { ok: false; code: "machine_offline" | "diff_timeout" };
+type WorkerCheckpointReadResult = WorkerCheckpointResult | { ok: false; code: "machine_offline" | "checkpoint_timeout" };
 
 /** The pr_worker error codes (worker-manager.ts) → the failure card's stages (review
  *  finding 3): lets the failed-cmd_result path keep the stage-specific fix text even when it
@@ -131,6 +139,12 @@ export class ConnectorProtocol {
     connectionId: string;
     finish(result: WorkerDiffReadResult): void;
   }>();
+  private workerCheckpointTimeoutMs = WORKER_CHECKPOINT_TIMEOUT_MS;
+  private readonly workerCheckpointReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: WorkerCheckpointReadResult): void;
+  }>();
 
   constructor(private readonly deps: ConnectorProtocolDeps) {}
 
@@ -139,6 +153,7 @@ export class ConnectorProtocol {
   // Tests shrink the browse/diff timeouts.
   setDirectoryBrowseTimeoutForTest(ms: number): void { this.directoryBrowseTimeoutMs = ms; }
   setWorkerDiffTimeoutForTest(ms: number): void { this.workerDiffTimeoutMs = ms; }
+  setWorkerCheckpointTimeoutForTest(ms: number): void { this.workerCheckpointTimeoutMs = ms; }
 
   handlePing(connection: Connection, raw: unknown): void {
     const parsed = PingMessageSchema.safeParse(raw);
@@ -179,6 +194,7 @@ export class ConnectorProtocol {
       connEpoch: hello.connEpoch,
       directoryBrowse: hello.capabilities?.directoryBrowse === true,
       workerDiff: hello.capabilities?.workerDiff === true,
+      workerCheckpoint: hello.capabilities?.workerCheckpoint === true,
     } satisfies ConnState);
     // hello is the machine/repo snapshot's source of truth (protocol §6.1, steward.md §2.2):
     // name, agents, limits, and the full repo list — removals included — land in the ledger.
@@ -837,6 +853,69 @@ export class ConnectorProtocol {
     pending.finish(parsed.success ? parsed.data : { ok: false, code: "diff_failed" });
   }
 
+  checkpointWorker(workerId: string, signal: AbortSignal): Promise<WorkerCheckpointPayload> {
+    const worker = this.deps.ledger.workers.get(workerId);
+    if (!worker) throw new WorkspaceError("not_found", 404);
+    const fallback = () => {
+      const fb = buildOfflineCheckpointFallback(this.deps.ledger, workerId);
+      if (!fb) throw new WorkspaceError("not_found", 404);
+      return fb;
+    };
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${worker.deviceId}`[0];
+    if (!device || device.revoked) return Promise.resolve(fallback());
+    const connection = this.deps.connFor(worker.deviceId);
+    const connectionState = connection?.state as ConnState | null;
+    if (!connection || !connectionState?.workerCheckpoint) {
+      return Promise.resolve(fallback());
+    }
+    if (this.workerCheckpointReads.size >= 32) throw new WorkspaceError("busy", 429);
+    const id = ulid();
+    return new Promise((resolve, reject) => {
+      const finish = (result: WorkerCheckpointReadResult) => {
+        if (!this.workerCheckpointReads.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        if (result.ok) {
+          resolve(result.checkpoint);
+          return;
+        }
+        if (result.code === "machine_offline" || result.code === "unsupported" || result.code === "no_history") {
+          resolve(fallback());
+          return;
+        }
+        const status = {
+          not_found: 404,
+          busy: 429,
+          checkpoint_timeout: 504,
+          read_failed: 502,
+        }[result.code];
+        reject(new WorkspaceError(result.code, status));
+      };
+      const abort = () => finish({ ok: false, code: "read_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "checkpoint_timeout" }), this.workerCheckpointTimeoutMs);
+      this.workerCheckpointReads.set(id, { deviceId: worker.deviceId, connectionId: connection.id, finish });
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(JSON.stringify({ t: "worker_checkpoint", id, workerId } satisfies WorkerCheckpointMessage));
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleWorkerCheckpointResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.workerCheckpointReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = WorkerCheckpointResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "read_failed" });
+  }
+
   // ---- Connection lifecycle cleanup hooks --------------------------------------------------------
 
   /** Cancel directory and diff reads whose connection is closing or device is going offline. */
@@ -848,6 +927,9 @@ export class ConnectorProtocol {
     for (const pending of this.workerDiffReads.values()) {
       if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
     }
+    for (const pending of this.workerCheckpointReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
+    }
   }
 
   cancelReadsForDevice(deviceId: string, result: DirectoryReadResult): void {
@@ -856,6 +938,9 @@ export class ConnectorProtocol {
       if (pending.deviceId === deviceId) pending.finish(result);
     }
     for (const pending of this.workerDiffReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.workerCheckpointReads.values()) {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
   }

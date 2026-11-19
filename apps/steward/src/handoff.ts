@@ -117,6 +117,8 @@ export interface HandoffBrief {
   /** The latest report's leftovers. */
   leftovers: string[];
   pointers: BriefPointers | null;
+  /** Present when `fromWorker` stopped/paused without writing a `report`. */
+  unreportedStop?: { outcome: string | null; lastStep: string | null };
   /** The number of further decisions/leftovers dropped by the caps below. */
   dropped: { decisions: number; leftovers: number };
 }
@@ -211,6 +213,25 @@ export function assembleBrief(source: BriefSource): HandoffBrief {
     };
   }
 
+  const hasOwnReport = source.reports.some((r) => r.workerId === source.fromWorker.workerId);
+  let unreportedStop: HandoffBrief["unreportedStop"];
+  if (!hasOwnReport && (source.fromWorker.lastOutcome || source.fromWorker.lastProgress)) {
+    let stepText: string | null = null;
+    if (source.fromWorker.lastProgress) {
+      try {
+        const p = JSON.parse(source.fromWorker.lastProgress) as { tool?: unknown; target?: unknown; phase?: unknown };
+        const label = [p.tool ?? p.phase, p.target].filter((x): x is string => typeof x === "string" && x.length > 0).join(" ");
+        if (label) stepText = oneLine(label);
+      } catch {
+        // ignore malformed progress
+      }
+    }
+    unreportedStop = {
+      outcome: source.fromWorker.lastOutcome ? oneLine(source.fromWorker.lastOutcome) : null,
+      lastStep: stepText,
+    };
+  }
+
   return {
     threadId: source.threadId,
     fromWorkerId: source.fromWorker.workerId,
@@ -220,6 +241,7 @@ export function assembleBrief(source: BriefSource): HandoffBrief {
     decisions,
     leftovers,
     pointers,
+    ...(unreportedStop ? { unreportedStop } : {}),
     dropped: { decisions: droppedDecisions, leftovers: droppedLeftovers },
   };
 }
@@ -271,6 +293,13 @@ export function renderHandoffBrief(brief: HandoffBrief): string {
     `目标：${brief.goal}`,
     `当前状态：${brief.state ?? "（还没有摘要；看下面的 git 指针和时间线自行判断）"}`,
   ];
+  if (brief.unreportedStop) {
+    const bits = [
+      brief.unreportedStop.outcome ? `结束态 ${brief.unreportedStop.outcome}` : null,
+      brief.unreportedStop.lastStep ? `最后动作 ${brief.unreportedStop.lastStep}` : null,
+    ].filter(Boolean);
+    if (bits.length > 0) lines.push(`前一棒停机现场（未完成正式汇报）：${bits.join("，")}`);
+  }
   if (brief.decisions.length > 0) {
     lines.push("关键决定（去重，含出处）：");
     lines.push(...brief.decisions.map((d) => `- ${d.text}（${d.workerId}）`));

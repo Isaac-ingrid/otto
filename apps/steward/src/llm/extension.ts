@@ -17,6 +17,7 @@ import {
   ToolTask,
   type Extension,
 } from "@earendil-works/pi-durable";
+import type { WorkerCheckpointPayload } from "@isaac2ingrid/protocol";
 import { MAX_THREAD_SUMMARY, type Ledger, type RouteCandidate } from "../ledger.ts";
 import { LOW_TRUST_SOURCES, sameClaimText, type NoteDraft, type NoteKind, type NoteSource } from "../notes.ts";
 import {
@@ -55,6 +56,7 @@ export interface StewardExtensionContext {
   sendToWorker(input: SendToWorkerInput): Promise<SendToWorkerOutcome>;
   interruptWorker(input: InterruptWorkerInput): Promise<InterruptWorkerOutcome>;
   archiveThread(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
+  inspectWorkerCheckpoint?(workerId: string): Promise<WorkerCheckpointPayload>;
   /** Verify a model-claimed provenance reference (§7.2): `user:<msgId>` must be a message
    *  this deployment actually received; `routine:`/`followup:` ids must exist (issue #20). */
   checkProvenanceRef(ref: string): Promise<boolean>;
@@ -399,6 +401,26 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           return err(`refused: ${error.code}`);
         }
         throw error;
+      }
+    },
+  });
+
+  const inspectWorkerCheckpoint = defineTool({
+    name: "inspect_worker_checkpoint",
+    description:
+      "只读获取某个 worker（尤其是已中断、暂停或掉线而未提交 report 的 worker）停机时的断点快照：包含前序执行过的命令、已改/已读文件列表、停机前最后一步工具调用与最后推理片段。机器离线时自动回退账本静态记录。",
+    parameters: Type.Object({
+      workerId: Type.String({ minLength: 1, description: "要查看断点的 worker 编号（如 w_...）" }),
+    }),
+    replay: "safe",
+    execute: async (args) => {
+      if (!ctx.inspectWorkerCheckpoint) return err("当前环境未启用断点快照读取。");
+      try {
+        const cp = await ctx.inspectWorkerCheckpoint(args.workerId);
+        return ok(JSON.stringify(cp));
+      } catch (error) {
+        if (error instanceof WorkspaceError) return err(`获取断点失败：${error.code}`);
+        return err(`获取断点失败：${error instanceof Error ? error.message : String(error)}`);
       }
     },
   });
@@ -1567,7 +1589,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     name: "otto-steward",
     tools: [
       ...(webSearch ? [webSearch] : []),
-      situation, findThreads, getThread, updateThread, archiveThread, startWorker, sendToWorker, interruptWorker,
+      situation, findThreads, getThread, updateThread, archiveThread, inspectWorkerCheckpoint, startWorker, sendToWorker, interruptWorker,
       notifyUser, askUser, answerWorker, noAction,
       createRoutine, suggestRoutine, setFollowup, listSchedules, cancelSchedule, pauseSchedule,
       createPrWatch, listPrWatches, cancelPrWatch,

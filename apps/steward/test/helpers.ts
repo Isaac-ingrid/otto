@@ -410,10 +410,14 @@ export class FakeConnector {
   directoryBrowse = false;
   /** Advertises the worker diff capability in hello (off = old connector). */
   workerDiff = false;
+  /** Advertises the worker checkpoint capability in hello (off = old connector). */
+  workerCheckpoint = false;
   /** Every directory_list request received so far. */
   readonly directoryRequests: Array<Record<string, unknown>> = [];
   /** Every worker_diff request received so far. */
   readonly workerDiffRequests: Array<Record<string, unknown>> = [];
+  /** Every worker_checkpoint request received so far. */
+  readonly workerCheckpointRequests: Array<Record<string, unknown>> = [];
   /** Every history_req the machine was asked (the full-session reads carry `format`/`since`). */
   readonly historyRequests: Array<Record<string, unknown>> = [];
   /** When set, the connector drops its connection after sending this many chunks. */
@@ -481,6 +485,7 @@ export class FakeConnector {
     const capabilities = {
       ...(this.directoryBrowse ? { directoryBrowse: true } : {}),
       ...(this.workerDiff ? { workerDiff: true } : {}),
+      ...(this.workerCheckpoint ? { workerCheckpoint: true } : {}),
     };
     return {
       bootId: this.bootId,
@@ -530,6 +535,10 @@ export class FakeConnector {
       }
       if (message.t === "worker_diff") {
         this.workerDiffRequests.push(message);
+        continue;
+      }
+      if (message.t === "worker_checkpoint") {
+        this.workerCheckpointRequests.push(message);
         continue;
       }
       if (message.t === "error") {
@@ -639,6 +648,17 @@ export class FakeConnector {
       if (this.workerDiffRequests.length >= count) return this.workerDiffRequests.slice(0, count);
       if (Date.now() - startedAt > timeoutMs) {
         throw new Error(`only ${this.workerDiffRequests.length}/${count} worker_diff requests arrived`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  async waitForWorkerCheckpointRequests(count: number, timeoutMs = 5000): Promise<Array<Record<string, unknown>>> {
+    const startedAt = Date.now();
+    for (;;) {
+      if (this.workerCheckpointRequests.length >= count) return this.workerCheckpointRequests.slice(0, count);
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(`only ${this.workerCheckpointRequests.length}/${count} worker_checkpoint requests arrived`);
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

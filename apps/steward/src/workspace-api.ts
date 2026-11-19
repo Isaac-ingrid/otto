@@ -15,9 +15,11 @@ import {
   type DirectoryBrowseArgs,
   type DirectoryListing,
   type RegisterRepoResult,
+  type WorkerCheckpointPayload,
   type WorkerDiffArgs,
   type WorkerDiffPayload,
 } from "@isaac2ingrid/protocol";
+import type { DistillMode, DistillResult } from "./distiller.ts";
 import {
   mutateMemoryControlPlane,
   mutateSchedulesControlPlane,
@@ -97,6 +99,8 @@ export interface WorkspaceApiDeps {
   addDirectory?(input: MachineDirectoryInput): Promise<MachineDirectoryResult>;
   browseDirectory?(input: MachineDirectoryBrowseInput, signal: AbortSignal): Promise<DirectoryListing>;
   diffWorker?(input: WorkerDiffRequestInput, signal: AbortSignal): Promise<WorkerDiffPayload>;
+  checkpointWorker?(workerId: string, signal: AbortSignal): Promise<WorkerCheckpointPayload>;
+  distillWorker?(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   controlPlane?: Omit<ControlPlaneDeps, "ledger" | "budget" | "audit">;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
@@ -452,6 +456,19 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
           ...(cleanupPolicy !== undefined ? { cleanupPolicy } : {}),
         }),
       );
+    }
+    const checkpointMatch = /^\/app\/api\/workers\/([\w.-]{1,128})\/checkpoint$/.exec(url.pathname);
+    if (checkpointMatch && deps.checkpointWorker) {
+      await readJson(request);
+      return json(await deps.checkpointWorker(checkpointMatch[1]!, request.signal));
+    }
+    const distillMatch = /^\/app\/api\/workers\/([\w.-]{1,128})\/distill$/.exec(url.pathname);
+    if (distillMatch && deps.distillWorker) {
+      const { id, mode } = await readJson(request);
+      if (typeof id !== "string" || !REQUEST_ID.test(id) || (mode !== "handoff" && mode !== "skill")) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      return json(await deps.distillWorker({ id, workerId: distillMatch[1]!, mode }, request.signal));
     }
     if (url.pathname === "/app/api/memory") {
       const body = await readJson(request);
