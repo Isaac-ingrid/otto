@@ -24,6 +24,8 @@
         <span class="status-divider"></span>
         <span class="running-status"><span class="status-dot gray" id="running-dot"></span><span data-i18n="running">Running</span><strong id="running-count">0</strong></span>
         <button class="status-button waiting-status all-clear" data-action="attention"><span class="status-dot amber"></span><span data-i18n="needsYou">Needs you</span><strong id="waiting-count">0</strong></button>
+        <span class="status-divider"></span>
+        <button class="status-button control-status" data-action="control-plane"><span class="status-dot gray" id="control-dot"></span><span data-i18n="controlPlaneShort">Memory &amp; Auto</span><strong id="control-count">0</strong></button>
       </div>
       <div class="topbar-end">
         <span class="spend" id="spend" hidden><span data-i18n="today">Today</span> <strong id="spend-value">$0.00</strong></span>
@@ -38,6 +40,7 @@
       <label class="search-box"><span data-icon="search"></span><input id="thread-search" type="search" data-i18n-placeholder="searchThreads" data-i18n-label="searchThreads" placeholder="Search threads" aria-label="Search threads" autocomplete="off"></label>
       <nav id="thread-list" class="thread-list" data-i18n-label="threadNavigation" aria-label="Threads by status"></nav>
       <div class="sidebar-bottom">
+        <button class="machine-heading" data-action="control-plane"><span class="eyebrow"><span data-i18n="controlPlaneShort">Memory &amp; Auto</span><span id="sidebar-control-count"></span></span><span data-icon="chevron-right"></span></button>
         <button class="machine-heading" data-action="machines"><span class="eyebrow"><span data-i18n="machines">Machines</span><span id="online-count"></span></span><span data-icon="chevron-right"></span></button>
         <div id="machine-list"></div>
         <div class="sidebar-footnote"><span id="connection" class="connection" data-state="connecting"><span class="status-dot gray"></span><span id="connection-label" data-i18n="connecting">Connecting…</span></span></div>

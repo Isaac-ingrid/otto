@@ -11,6 +11,7 @@ import { applyStatic, getLocale, localeTag, setLocale, t, tOr } from './i18n.js'
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, trimOpenMarkup } from './format.js';
 import { modelPicker } from './model-picker.js';
 import { markup } from './markup.js';
+import { controlPlaneCounts, createControlPlane } from './control-plane.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
@@ -163,6 +164,12 @@ function renderTop() {
   $('#running-dot').className = `status-dot ${summary.running ? 'green pulse' : 'gray'}`;
   $('#waiting-count').textContent = t(summary.needs === 1 ? 'decisionCountOne' : 'decisionCount', { count: summary.needs });
   $('.waiting-status').classList.toggle('all-clear', summary.needs === 0);
+  const cpCounts = controlPlaneCounts(snapshot.controlPlaneSummary);
+  $('#control-count').textContent = String(cpCounts.activeAuto);
+  $('#control-dot').className = `status-dot ${cpCounts.attentionCount > 0 ? 'amber' : cpCounts.activeAuto > 0 ? 'green' : 'gray'}`;
+  $('.control-status').title = t('controlPlaneTooltip', { used: cpCounts.residentUsed, cap: cpCounts.residentCap, auto: cpCounts.activeAuto });
+  const sidebarCp = $('#sidebar-control-count');
+  if (sidebarCp) sidebarCp.textContent = cpCounts.activeAuto > 0 ? ` · ${cpCounts.activeAuto}` : '';
   const mobile = $('#mobile-count');
   const waitingThreads = snapshot.threads.filter((thread) => thread.state === 'waiting_you').length;
   mobile.textContent = String(waitingThreads);
@@ -1548,8 +1555,21 @@ function dialogContent() {
       body: worker ? diffBodyNode(worker, true) : h('p', { class: 'diff-note' }, t('sessionMissing')),
     };
   }
+  if (state.dialog.type === 'control-plane') {
+    return { title: t('controlPlaneTitle'), body: controlPlane.render(snapshot?.controlPlaneSummary) };
+  }
   return { title: t('accountTitle'), body: accountSection() };
 }
+
+const controlPlane = createControlPlane({
+  request: (path, body) => request(path, body),
+  uuid,
+  toast,
+  bump: () => bumpDialog(),
+  refreshWorkspace: () => refresh(),
+  openThread: (threadId) => { closeDialog(); select(threadId); },
+  serverNow,
+});
 
 /** Rebuilds the open dialog only when what it shows changed, so a typed key or a selected command survives a refresh. */
 function renderDialog() {
@@ -1561,6 +1581,7 @@ function renderDialog() {
     type === 'directory' ? snapshot.machines : null,
     type === 'scope' ? [state.selected, snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.repos])] : null,
     type === 'diff' ? [state.diffRev, state.dialog.workerId] : null,
+    type === 'control-plane' ? [controlPlane.signature(), snapshot?.controlPlaneSummary, minuteBucket()] : null,
     type === 'archive-confirm' ? [state.dialog.threadId, state.dialog.unmergedWorkers, [...state.archivingThreads]] : null,
     type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
@@ -1568,6 +1589,7 @@ function renderDialog() {
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
     $('#dialog').classList.toggle('diff-dialog', type === 'diff');
+    $('#dialog').classList.toggle('control-dialog', type === 'control-plane');
     $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
     preservingFocus($('#dialog-body'), () => $('#dialog-body').replaceChildren(...[body].flat(Infinity).filter(Boolean)));
   });
@@ -1588,6 +1610,7 @@ function openDialog(type) {
   state.pushNotice = null; // a fresh visit shows the current state, not the last attempt's result
   drawn.delete('dialog');
   if (type === 'account' || type === 'machines') void loadSettings();
+  if (type === 'control-plane') controlPlane.open();
   renderDialog();
   if (type === 'machines') for (const [deviceId, form] of state.directoryForms) {
     if (form.state === 'pending') void runDirectoryRegistration(deviceId, form);
@@ -2725,6 +2748,7 @@ document.addEventListener('click', (event) => {
       select(null);
       $('#message-input').focus();
       return toast(t('newTaskHint'));
+    case 'control-plane': return openDialog('control-plane');
     case 'machines': return openDialog('machines');
     case 'account': return openDialog('account');
     case 'scope': return openDialog('scope');
