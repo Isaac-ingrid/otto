@@ -239,12 +239,66 @@ describe("WorkerManager × CodexAdapter", () => {
 
     const norm = await manager.history("w-codex-hist", undefined, 1024 * 1024);
     expect(norm.done).toBe(true);
-    expect(norm.entries.some((e) => e.role === "user" && e.text === "Inspect codebase")).toBe(true);
-    expect(norm.entries.some((e) => e.role === "assistant" && e.text === "Checked repo")).toBe(true);
+    expect(norm.entries.filter((e) => e.role === "user" && e.text === "Inspect codebase")).toHaveLength(1);
+    expect(norm.entries.filter((e) => e.role === "assistant" && e.text === "Checked repo")).toHaveLength(1);
 
     const full = await manager.history("w-codex-hist", undefined, 1024 * 1024, "full");
     expect(full.format).toBe("full");
     expect(full.done).toBe(true);
     expect(full.entries.length).toBeGreaterThan(0);
+  });
+
+  it("marks an in-flight Codex worker lost on connector restart and auto-resumes via `codex exec resume`", async () => {
+    const piScenario = writeScenario(dir, "pi-reboot", []);
+    const bootAScenario = writeCodexScenario("codex-boot-a", [[{ delayMs: 60_000 }]]);
+    manager = new WorkerManager({
+      store,
+      stateDir,
+      adapters: [fakePiAdapter(stateDir, piScenario), fakeCodexAdapter(stateDir, bootAScenario)],
+      emit: (workerId, fields) => {
+        events.push(JSON.parse(eventLog.append(workerId, fields).payload) as EmittedEvent);
+      },
+    });
+
+    await manager.handleCommand("c-boot-a", "start_worker", {
+      ...args({ prompt: "Long task interrupted by reboot", model: "gpt-5.3-codex", modelSource: "override" }),
+    });
+    await waitFor(() => eventsOf("w-codex-m1", "started").length > 0, 15_000, "codex started before crash");
+    expect(store.getWorker("w-codex-m1")).toMatchObject({
+      sessionId: "019a0000-0000-7000-8000-000000000001",
+      sessionFile: null,
+    });
+    manager.simulateCrash();
+
+    const bootBScenario = writeCodexScenario("codex-boot-b", [
+      [...codexReportSteps({ status: "done", summary: "resumed after reboot" })],
+    ]);
+    const managerB = new WorkerManager({
+      store,
+      stateDir,
+      adapters: [fakePiAdapter(stateDir, piScenario), fakeCodexAdapter(stateDir, bootBScenario)],
+      recovery: { autoResumeBackoffMs: 200 },
+      emit: (workerId, fields) => {
+        events.push(JSON.parse(eventLog.append(workerId, fields).payload) as EmittedEvent);
+      },
+    });
+    await managerB.reconcileStartup();
+    await waitFor(() => eventsOf("w-codex-m1", "lost").length > 0, 10_000, "codex lost on reboot");
+    await waitFor(() => eventsOf("w-codex-m1", "resumed").length > 0, 15_000, "codex auto-resumed");
+    await waitFor(() => eventsOf("w-codex-m1", "settled").length > 0, 15_000, "codex resumed settle");
+
+    expect(eventsOf("w-codex-m1", "resumed")[0]).toMatchObject({ reason: "connector_restart" });
+    expect(store.getWorker("w-codex-m1")).toMatchObject({ state: "idle", lastOutcome: "reported" });
+
+    const promptRecords = readFileSync(CODEX_PROMPT_LOG(), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { argv: string[] });
+    expect(promptRecords).toHaveLength(2);
+    expect(promptRecords[1]!.argv).toEqual(
+      expect.arrayContaining(["exec", "resume", "--json", "-m", "gpt-5.3-codex", "019a0000-0000-7000-8000-000000000001"]),
+    );
+    await managerB.stopProcess("w-codex-m1").catch(() => undefined);
+    managerB.stop();
   });
 });

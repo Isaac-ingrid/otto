@@ -97,6 +97,7 @@ describe("CodexAdapter invocation and capabilities", () => {
       selection: "launch",
       discovery: "suggested",
       customModelInput: true,
+      actualModelObservation: true,
       idFormat: "opaque",
     });
   });
@@ -124,12 +125,20 @@ describe("CodexAdapter invocation and capabilities", () => {
           },
         },
       ],
-    ]);
+    ], { rolloutModel: "gpt-5.3-codex-2026-11" });
 
-    const handle = await adapter.start(spec({ model: "gpt-5.3-codex" }));
+    const observedModels: string[] = [];
+    const handle = await adapter.start(
+      spec({
+        model: "gpt-5.3-codex",
+        onModelObserved: (obs) => observedModels.push(obs.id),
+      }),
+    );
     await waitFor(() => settledOf()[0], 10_000, "codex settle");
 
     expect(handle.sessionId).toBe("019a0000-0000-7000-8000-000000000001");
+    expect(handle.sessionFile).toBeUndefined();
+    expect(observedModels).toEqual(["gpt-5.3-codex-2026-11"]);
     const argv = readLog(ARGV_LOG())[0] as unknown as string[];
     expect(argv.slice(0, 4)).toEqual(["exec", "--json", "--skip-git-repo-check", "-C"]);
     expect(argv).toContain("--dangerously-bypass-approvals-and-sandbox");

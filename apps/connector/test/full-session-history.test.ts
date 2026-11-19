@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, renameSync, rmSync, truncateSync, writeFileS
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { HistoryPage } from "@isaac2ingrid/protocol";
-import { claudeSessionPath, readFullSessionHistory } from "../src/full-session-history.ts";
+import { claudeSessionPath, codexSessionPath, readFullSessionHistory } from "../src/full-session-history.ts";
 import { tmpDir } from "./helpers.ts";
 
 let dir: string;
@@ -222,5 +222,22 @@ describe("claudeSessionPath", () => {
     mkdirSync(join(config, "projects", "-srv-repo-a"), { recursive: true });
     expect(claudeSessionPath("/srv/repo-a", ID, config)).toBeNull();
     for (const bad of ["../../etc/passwd", "w-123", "", `${ID}/../x`]) expect(() => claudeSessionPath("/srv/repo-a", bad, config), bad).toThrow();
+  });
+});
+
+describe("codexSessionPath", () => {
+  const ID = "019a0000-0000-7000-8000-000000000099";
+
+  it("locates nested date-partitioned rollout-<ts>-<sessionId>.jsonl files and rejects unsafe ids", () => {
+    const codexHome = join(dir, "codex-home");
+    expect(codexSessionPath(ID, codexHome)).toBeNull();
+    const dayDir = join(codexHome, "sessions", "2026", "11", "18");
+    mkdirSync(dayDir, { recursive: true });
+    const rollout = join(dayDir, `rollout-2026-11-18T12-00-00-${ID}.jsonl`);
+    writeFileSync(rollout, "");
+    expect(codexSessionPath(ID, codexHome)).toBe(rollout);
+    for (const bad of ["../../etc/passwd", "", `${ID}/../x`]) {
+      expect(() => codexSessionPath(bad, codexHome), bad).toThrow();
+    }
   });
 });

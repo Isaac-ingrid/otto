@@ -81,9 +81,25 @@ process.stdin.on("end", async () => {
     const dir = join(codexHome, "sessions", "2026", "11", "18");
     mkdirSync(dir, { recursive: true });
     rolloutFile = join(dir, `rollout-2026-11-18T00-00-00-${sessionId}.jsonl`);
+    if (!existsSync(rolloutFile)) {
+      appendFileSync(
+        rolloutFile,
+        JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: process.cwd(), cli_version: "0.170.0" } }) + "\n",
+      );
+    }
+    const rolloutModel = startup.rolloutModel ?? "gpt-5.4";
     appendFileSync(
       rolloutFile,
-      JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: prompt } }) + "\n",
+      JSON.stringify({ type: "turn_context", payload: { model: rolloutModel, approval_policy: "never" } }) + "\n" +
+        JSON.stringify({
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>" }] },
+        }) + "\n" +
+        JSON.stringify({
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: prompt }] },
+        }) + "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: prompt } }) + "\n",
     );
   }
 
@@ -104,7 +120,11 @@ process.stdin.on("end", async () => {
           JSON.stringify({
             type: "event_msg",
             payload: { type: "agent_message", message: step.emit.item.text },
-          }) + "\n",
+          }) + "\n" +
+            JSON.stringify({
+              type: "response_item",
+              payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: step.emit.item.text }] },
+            }) + "\n",
         );
       }
       if (step.emit.type === "turn.completed" || step.emit.type === "turn.failed" || step.emit.type === "error") {

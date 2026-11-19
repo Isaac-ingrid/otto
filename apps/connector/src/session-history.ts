@@ -212,9 +212,40 @@ export function normalizeCodexEntries(records: CodexTranscriptRecord[], opts: No
   return { entries: out, cursor, done: true };
 }
 
+function isCodexSyntheticContext(text: string): boolean {
+  const t = text.trimStart();
+  return t.startsWith("<environment_context>") || t.startsWith("<permissions instructions>") || t.startsWith("<user_instructions>");
+}
+
+function summarizeCodexCmd(cmd: unknown): string | undefined {
+  if (typeof cmd === "string" && cmd.length > 0) return cmd.slice(0, HISTORY_TOOL_ARGS_MAX_CHARS);
+  if (Array.isArray(cmd)) {
+    if (cmd.length === 3 && typeof cmd[1] === "string" && /^-[a-z]*c[a-z]*$/i.test(cmd[1]) && typeof cmd[2] === "string") {
+      return cmd[2].slice(0, HISTORY_TOOL_ARGS_MAX_CHARS);
+    }
+    const joined = cmd.filter((p): p is string => typeof p === "string" && p.length > 0).join(" ");
+    return joined ? joined.slice(0, HISTORY_TOOL_ARGS_MAX_CHARS) : undefined;
+  }
+  return undefined;
+}
+
+function summarizeCodexArgs(rawArgs: unknown): string | undefined {
+  if (typeof rawArgs === "string") {
+    try {
+      return summarizeCodexArgs(JSON.parse(rawArgs));
+    } catch {
+      const line = rawArgs.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+      return line ? line.slice(0, HISTORY_TOOL_ARGS_MAX_CHARS) : undefined;
+    }
+  }
+  if (typeof rawArgs !== "object" || rawArgs === null) return undefined;
+  const obj = rawArgs as Record<string, unknown>;
+  return summarizeCodexCmd(obj.command ?? obj.cmd) ?? summarizeArgs(obj);
+}
+
 /**
  * Parses a Codex rollout JSONL file (`response_item` / `event_msg` / `agent_message` / `user_message`)
- * into a normalized HistoryPage.
+ * into a normalized HistoryPage, deduplicating twin `response_item` + `event_msg` utterances per turn.
  */
 export function readCodexSessionHistory(sessionFile: string, opts: NormalizeOptions = {}): HistoryPage {
   let text: string;
@@ -227,6 +258,27 @@ export function readCodexSessionHistory(sessionFile: string, opts: NormalizeOpti
   const completeLines = text.endsWith("\n") ? rawLines : rawLines.slice(0, -1);
   const records: CodexTranscriptRecord[] = [];
   let idx = 0;
+  let lastUserInTurn: string | null = null;
+  let lastAssistantInTurn: string | null = null;
+
+  const pushUser = (id: string, msg: string) => {
+    if (!msg || isCodexSyntheticContext(msg) || lastUserInTurn === msg) return;
+    lastUserInTurn = msg;
+    lastAssistantInTurn = null;
+    records.push({ id, role: "user", text: msg });
+  };
+  const pushAssistant = (id: string, msg: string) => {
+    if (!msg || lastAssistantInTurn === msg) return;
+    lastAssistantInTurn = msg;
+    lastUserInTurn = null;
+    records.push({ id, role: "assistant", text: msg });
+  };
+  const pushTool = (id: string, name: string, args?: string) => {
+    lastUserInTurn = null;
+    lastAssistantInTurn = null;
+    records.push({ id, role: "assistant", text: "", tools: [{ name, ...(args ? { args } : {}) }] });
+  };
+
   for (const rawLine of completeLines) {
     const trimmed = rawLine.endsWith("\r") ? rawLine.slice(0, -1).trim() : rawLine.trim();
     if (!trimmed) continue;
@@ -238,38 +290,33 @@ export function readCodexSessionHistory(sessionFile: string, opts: NormalizeOpti
     }
     idx += 1;
     const id = typeof parsed.id === "string" && parsed.id.length > 0 ? parsed.id : `codex-line-${idx}`;
+    if (parsed.type === "turn_context") {
+      lastUserInTurn = null;
+      lastAssistantInTurn = null;
+      continue;
+    }
     if (parsed.type === "response_item" && typeof parsed.payload === "object" && parsed.payload !== null) {
       const payload = parsed.payload as Record<string, unknown>;
       if (payload.type === "message" && (payload.role === "user" || payload.role === "assistant")) {
         const content = Array.isArray(payload.content) ? (payload.content as Array<Record<string, unknown>>) : [];
-        const textPart = content
-          .map((c) => (typeof c.text === "string" ? c.text : ""))
-          .filter(Boolean)
-          .join("");
-        if (textPart) records.push({ id, role: payload.role, text: textPart });
+        const textPart = content.map((c) => (typeof c.text === "string" ? c.text : "")).filter(Boolean).join("");
+        if (payload.role === "user") pushUser(id, textPart);
+        else pushAssistant(id, textPart);
       } else if (payload.type === "function_call" && typeof payload.name === "string") {
-        let argSummary: string | undefined;
-        if (typeof payload.arguments === "string") {
-          try {
-            argSummary = summarizeArgs(JSON.parse(payload.arguments));
-          } catch {
-            argSummary = payload.arguments.slice(0, HISTORY_TOOL_ARGS_MAX_CHARS);
-          }
-        }
-        records.push({
-          id,
-          role: "assistant",
-          text: "",
-          tools: [{ name: payload.name, ...(argSummary ? { args: argSummary } : {}) }],
-        });
+        pushTool(id, payload.name, summarizeCodexArgs(payload.arguments));
+      } else if (payload.type === "custom_tool_call" && typeof payload.name === "string") {
+        pushTool(id, payload.name, summarizeCodexArgs(payload.input));
+      } else if (payload.type === "local_shell_call") {
+        const action = typeof payload.action === "object" && payload.action !== null ? (payload.action as Record<string, unknown>) : undefined;
+        pushTool(id, "Bash", summarizeCodexCmd(action?.command ?? payload.command));
+      } else if (payload.type === "web_search_call") {
+        const action = typeof payload.action === "object" && payload.action !== null ? (payload.action as Record<string, unknown>) : undefined;
+        pushTool(id, "WebSearch", typeof action?.query === "string" ? action.query.slice(0, HISTORY_TOOL_ARGS_MAX_CHARS) : undefined);
       }
     } else if (parsed.type === "event_msg" && typeof parsed.payload === "object" && parsed.payload !== null) {
       const payload = parsed.payload as Record<string, unknown>;
-      if (payload.type === "user_message" && typeof payload.message === "string") {
-        records.push({ id, role: "user", text: payload.message });
-      } else if (payload.type === "agent_message" && typeof payload.message === "string") {
-        records.push({ id, role: "assistant", text: payload.message });
-      }
+      if (payload.type === "user_message" && typeof payload.message === "string") pushUser(id, payload.message);
+      else if (payload.type === "agent_message" && typeof payload.message === "string") pushAssistant(id, payload.message);
     }
   }
   return normalizeCodexEntries(records, opts);

@@ -31,7 +31,16 @@ import { adjudicate, type RunWindow } from "./adjudication.ts";
 import { claudeSessionPath } from "./full-session-history.ts";
 import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, WORKER_SYSTEM_PROMPT } from "./install.ts";
-import { resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
+import { resolveExecutableLaunch, splitCommandLine, type LaunchResolution } from "./pi-launch.ts";
+
+export const CLAUDE_COMMAND_ENV = "OTTO_CLAUDE_COMMAND";
+
+export function claudeCommandFromEnv(env: Record<string, string | undefined> = process.env): string[] | undefined {
+  const raw = env[CLAUDE_COMMAND_ENV];
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  const argv = splitCommandLine(raw).filter((part) => part.length > 0);
+  return argv.length > 0 ? argv : undefined;
+}
 import {
   normalizeClaudeEntries,
   readClaudeSessionHistory,
@@ -219,7 +228,10 @@ export class ClaudeAdapter implements AgentAdapter {
    *  `.cmd` shim on Windows, which Node cannot spawn without a shell). An explicit `command`
    *  option (tests, embedders) is never rewritten. */
   get launchResolution(): LaunchResolution {
-    this.launch = this.launch ?? this.options.launch ?? resolveExecutableLaunch(this.options.command ?? ["claude"]);
+    this.launch =
+      this.launch ??
+      this.options.launch ??
+      resolveExecutableLaunch(this.options.command ?? claudeCommandFromEnv() ?? ["claude"]);
     return this.launch;
   }
 
@@ -894,12 +906,17 @@ function readProposalsAuditFile(path: string): ProposalPayload[] {
   }
 }
 
-export function detectClaude(command: string[] = ["claude"], timeoutMs = 5000): { installed: boolean; version?: string } {
+export function detectClaude(
+  command: string[] = claudeCommandFromEnv() ?? ["claude"],
+  timeoutMs = 5000,
+): { installed: boolean; version?: string } {
   try {
     // Same Windows shim resolution as a real run: `spawnSync("claude")` cannot start the
     // npm `.cmd` shim, which would report "not installed" on a machine that has it.
-    const [file, ...rest] = resolveExecutableLaunch(command).argv;
-    const result = spawnSync(file!, [...rest, "--version"], { timeout: timeoutMs, encoding: "utf8" });
+    const resolved = resolveExecutableLaunch(command);
+    if (resolved.error || !resolved.argv[0]) return { installed: false };
+    const [file, ...rest] = resolved.argv;
+    const result = spawnSync(file, [...rest, "--version"], { timeout: timeoutMs, encoding: "utf8" });
     if (result.status !== 0 || result.error) return { installed: false };
     const version = String(result.stdout ?? "").trim().split("\n")[0] ?? "";
     return { installed: true, version: version.length > 0 ? version : undefined };

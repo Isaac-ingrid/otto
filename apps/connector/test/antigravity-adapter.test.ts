@@ -553,14 +553,14 @@ describe("images, errors, model observations, and binary detection", () => {
     );
     expect(detectAntigravity([process.execPath, legacyBin]).installed).toBe(false);
 
-    const adapters = defaultAdapters(stateDir, missing, FAKE_AGY());
+    const adapters = defaultAdapters(stateDir, missing, FAKE_AGY(), null, missing);
     expect(adapters.map((a) => a.kind)).toEqual(["pi", "antigravity"]);
     expect(adapters[1]!.version).toBe("1.5.3 (Antigravity CLI)");
 
     // When both Claude Code and Antigravity CLI are installed, both are advertised alongside pi.
     const fakeClaude = join(dir, "fake-claude-ver.mjs");
     writeFileSync(fakeClaude, "console.log('1.0.42 (Claude Code)');\n");
-    const allThree = defaultAdapters(stateDir, [process.execPath, fakeClaude], FAKE_AGY());
+    const allThree = defaultAdapters(stateDir, [process.execPath, fakeClaude], FAKE_AGY(), null, missing);
     expect(allThree.map((a) => a.kind)).toEqual(["pi", "claude-code", "antigravity"]);
   });
 });

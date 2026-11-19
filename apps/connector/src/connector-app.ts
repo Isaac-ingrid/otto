@@ -17,8 +17,8 @@ import type { StallWatchdogOptions } from "./watchdog.ts";
 import { CommandError, WorkerManager, type RecoveryOptions } from "./worker-manager.ts";
 import type { AgentAdapter } from "./agent.ts";
 import { PiAdapter } from "./pi-adapter.ts";
-import { ClaudeAdapter, detectClaude } from "./claude-adapter.ts";
-import { CodexAdapter, detectCodex } from "./codex-adapter.ts";
+import { ClaudeAdapter, claudeCommandFromEnv, detectClaude } from "./claude-adapter.ts";
+import { CodexAdapter, codexCommandFromEnv, detectCodex } from "./codex-adapter.ts";
 import { AntigravityAdapter, agyCommandFromEnv, detectAntigravity } from "./antigravity-adapter.ts";
 import { VERSION } from "./version.ts";
 import type { PrExec } from "./pr.ts";
@@ -66,10 +66,10 @@ export function maxWorkersFromMemory(): number {
  *  Antigravity CLI when their binaries are installed on the machine. */
 export function defaultAdapters(
   stateDir: string,
-  claudeCommand: string[] = ["claude"],
+  claudeCommand: string[] = claudeCommandFromEnv() ?? ["claude"],
   agyCommand: string[] = agyCommandFromEnv() ?? ["agy"],
   agyApiKeyConfig?: AntigravityApiKeyConfig | null,
-  codexCommand: string[] = ["codex"],
+  codexCommand: string[] = codexCommandFromEnv() ?? ["codex"],
 ): AgentAdapter[] {
   const adapters: AgentAdapter[] = [new PiAdapter({ stateDir })];
   const claude = detectClaude(claudeCommand);

@@ -29,7 +29,7 @@
 //                          lock is held by this process and the daemon runs as its child, so a
 //                          crash is restarted with backoff (decision 12) — what the Windows
 //                          logon launcher starts, since a Run value cannot restart anything.
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,6 +74,8 @@ import {
   normalizeAgySettingsModel,
   writeIsolatedAgySettings,
 } from "./antigravity-adapter.ts";
+import { CLAUDE_COMMAND_ENV, claudeCommandFromEnv, detectClaude } from "./claude-adapter.ts";
+import { CODEX_COMMAND_ENV, codexCommandFromEnv, detectCodex } from "./codex-adapter.ts";
 import {
   computeHooksApprovalDigest,
   HookConfigError,
@@ -519,6 +521,64 @@ function readStoredAgyAuthNote(dir: string): string {
   }
 }
 
+/** Fast, zero-subprocess launchability check for optional agent CLIs in `otto status` (`otto doctor`
+ *  runs the slower `--version` / `acp --help` probes). Avoids spawning 3–4 heavy agent CLIs on every
+ *  status read or under parallel test load. */
+function findPosixExecutableOnPath(name: string): string | null {
+  const pathEnv = process.env.PATH ?? DEFAULT_PATH;
+  for (const rawDir of pathEnv.split(":")) {
+    const clean = rawDir.trim();
+    if (!clean) continue;
+    const candidate = join(clean, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (!statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      // not in this PATH entry
+    }
+  }
+  return null;
+}
+
+function describeOptionalAgentLaunch(
+  defaultName: string,
+  override: string[] | undefined,
+  envName: string,
+  extraNote = "",
+): string {
+  const launch = resolveExecutableLaunch(override ?? [defaultName]);
+  if (launch.error) {
+    return override ? `NOT SPAWNABLE (${envName}=${override.join(" ")} — ${launch.error})` : "not installed";
+  }
+  const head = launch.argv[0];
+  if (!head) {
+    return override ? `NOT SPAWNABLE (${envName}=${override.join(" ")})` : "not installed";
+  }
+  if (/[\\/]/.test(head)) {
+    try {
+      if (process.platform === "win32") {
+        if (existsSync(head) && !statSync(head).isDirectory()) {
+          return `installed (${launch.source} — ${launch.detail ?? head}${extraNote})`;
+        }
+      } else {
+        accessSync(head, constants.X_OK);
+        if (!statSync(head).isDirectory()) {
+          return `installed (${launch.source} — ${launch.detail ?? head}${extraNote})`;
+        }
+      }
+    } catch {
+      // fall through
+    }
+    return override ? `NOT SPAWNABLE (${envName}=${override.join(" ")})` : "not installed";
+  }
+  if (process.platform === "win32") {
+    return override ? `NOT SPAWNABLE (${envName}=${override.join(" ")})` : "not installed";
+  }
+  const found = findPosixExecutableOnPath(head);
+  if (found) return `installed (${launch.source} — ${found}${extraNote})`;
+  return override ? `NOT SPAWNABLE (${envName}=${override.join(" ")})` : "not installed";
+}
+
 /** `otto doctor`: pairing, service, proxy, and reachability of the steward — direct vs via
  *  the configured proxy — with the next action spelled out. Exits non-zero when no path
  *  to the steward works. */
@@ -542,6 +602,34 @@ async function doctorCommand(): Promise<void> {
   if (!piCheck.ok) {
     healthy = false;
     if (!pi.error) console.log(`                    ${PI_COMMAND_ENV} paths with a space need inner quotes: "C:\\Program Files\\nodejs\\node.exe" <launcher.js> …`);
+  }
+
+  const claudeOverride = claudeCommandFromEnv();
+  const claude = detectClaude(claudeOverride ?? ["claude"]);
+  if (claude.installed) {
+    const claudeLaunch = resolveExecutableLaunch(claudeOverride ?? ["claude"]);
+    console.log(
+      `claude:             ok — ${claude.version ?? "installed"} (${claudeLaunch.source}${claudeLaunch.detail ? ` — ${claudeLaunch.detail}` : ""})`,
+    );
+  } else if (claudeOverride) {
+    healthy = false;
+    console.log(`claude:             FAIL — ${CLAUDE_COMMAND_ENV} is set (${claudeOverride.join(" ")}) but \`claude --version\` failed`);
+  } else {
+    console.log("claude:             not installed (optional)");
+  }
+
+  const codexOverride = codexCommandFromEnv();
+  const codex = detectCodex(codexOverride ?? ["codex"]);
+  if (codex.installed) {
+    const codexLaunch = resolveExecutableLaunch(codexOverride ?? ["codex"]);
+    console.log(
+      `codex:              ok — ${codex.version ?? "installed"} (${codexLaunch.source}${codexLaunch.detail ? ` — ${codexLaunch.detail}` : ""})`,
+    );
+  } else if (codexOverride) {
+    healthy = false;
+    console.log(`codex:              FAIL — ${CODEX_COMMAND_ENV} is set (${codexOverride.join(" ")}) but \`codex --version\` failed`);
+  } else {
+    console.log("codex:              not installed (optional)");
   }
 
   const agyOverride = agyCommandFromEnv();
@@ -691,19 +779,11 @@ async function statusCommand(): Promise<void> {
     if (!pi.error) console.log(`          ${PI_COMMAND_ENV} paths that contain a space need quotes around them: "C:\\Program Files\\nodejs\\node.exe" <launcher.js> …`);
   }
 
-  const agyOverride = agyCommandFromEnv();
-  const agy = detectAntigravity(agyOverride ?? ["agy"]);
-  if (agy.installed) {
-    const agyLaunch = resolveExecutableLaunch(agyOverride ?? ["agy"]);
-    const authNote = readStoredAgyAuthNote(dir);
-    console.log(
-      `agy:      ${agy.version ?? "installed"} (${agyLaunch.source}${agyLaunch.detail ? ` — ${agyLaunch.detail}` : ""}${authNote})`,
-    );
-  } else if (agyOverride) {
-    console.log(`agy:      NOT SPAWNABLE (${AGY_COMMAND_ENV}=${agyOverride.join(" ")})`);
-  } else {
-    console.log("agy:      not installed");
-  }
+  console.log(`claude:   ${describeOptionalAgentLaunch("claude", claudeCommandFromEnv(), CLAUDE_COMMAND_ENV)}`);
+  console.log(`codex:    ${describeOptionalAgentLaunch("codex", codexCommandFromEnv(), CODEX_COMMAND_ENV)}`);
+  console.log(
+    `agy:      ${describeOptionalAgentLaunch("agy", agyCommandFromEnv(), AGY_COMMAND_ENV, readStoredAgyAuthNote(dir))}`,
+  );
 
   const dbPath = join(dir, "connector.sqlite");
   if (!existsSync(dbPath)) {

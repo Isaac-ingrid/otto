@@ -399,11 +399,11 @@ describe("detectClaude / defaultAdapters (hello.agents advertises only what is i
     expect(found).toMatchObject({ installed: true, version: "1.0.42 (Claude Code)" });
     expect(detectClaude(missing).installed).toBe(false);
 
-    const adapters = defaultAdapters(stateDir, [process.execPath, fakeBin], missing);
+    const adapters = defaultAdapters(stateDir, [process.execPath, fakeBin], missing, null, missing);
     expect(adapters.map((a) => a.kind)).toEqual(["pi", "claude-code"]);
     expect(adapters[1]!.version).toBe("1.0.42 (Claude Code)");
     // Not installed → hello.agents carries pi only.
-    expect(defaultAdapters(stateDir, missing, missing).map((a) => a.kind)).toEqual([
+    expect(defaultAdapters(stateDir, missing, missing, null, missing).map((a) => a.kind)).toEqual([
       "pi",
     ]);
   });

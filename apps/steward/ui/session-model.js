@@ -211,15 +211,111 @@ function claudeEntry(record) {
   }
 }
 
+const CODEX_TYPES = new Set([
+  'session_meta', 'turn_context', 'response_item', 'event_msg', 'compacted',
+  'thread.started', 'turn.started', 'turn.completed', 'turn.failed', 'item.started', 'item.completed',
+]);
+
+function parseJsonMaybe(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function codexPartsOf(content, role) {
+  if (typeof content === 'string') return content === '' ? [] : [{ t: 'text', role, text: content }];
+  if (!Array.isArray(content)) return content === undefined || content === null ? [] : [raw('content', content)];
+  const blocks = [];
+  for (const part of content) {
+    if (typeof part === 'string') blocks.push({ t: 'text', role, text: part });
+    else if (!isObject(part)) blocks.push(raw('content', part));
+    else if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') {
+      blocks.push({ t: 'text', role, text: asText(part.text) });
+    } else if (part.type === 'input_image' || part.type === 'image') {
+      const url = asText(part.image_url);
+      const dataMatch = url.match(/^data:([^;]+);base64,([A-Za-z0-9+/=]+)$/);
+      if (dataMatch) blocks.push({ t: 'image', image: { mime: dataMatch[1], data: dataMatch[2] } });
+      else if (part.data || part.source) blocks.push({ t: 'image', image: imageOf(part) });
+      else blocks.push(meta('info', 'image', url));
+    } else blocks.push(raw(asText(part.type) || 'content', part));
+  }
+  return blocks;
+}
+
+function codexModelOf(record) {
+  if (typeof record.model === 'string') return record.model;
+  const payload = isObject(record.payload) ? record.payload : null;
+  return payload && typeof payload.model === 'string' ? payload.model : '';
+}
+
 /**
  * One recorded entry, ready to draw. `id`/`parentId` place it in the agent's conversation tree
  * (null for entries outside it, like pi's file header); `agent` says which format it was.
  */
+function codexEntry(record) {
+  const payload = isObject(record.payload) ? record.payload : {};
+  switch (record.type) {
+    case 'session_meta':
+      return [meta('session', asText(payload.cwd), [asText(payload.cli_version) ? `codex ${asText(payload.cli_version)}` : '', asText(payload.id)].filter(Boolean).join(' · '))];
+    case 'turn_context': {
+      const sandbox = isObject(payload.sandbox_policy) ? asText(payload.sandbox_policy.type) : asText(payload.sandbox_policy);
+      return [meta('model', [asText(payload.model), asText(payload.effort)].filter(Boolean).join(' · '), [sandbox ? `sandbox: ${sandbox}` : '', asText(payload.approval_policy) ? `approval: ${asText(payload.approval_policy)}` : ''].filter(Boolean).join(' · '))];
+    }
+    case 'compacted':
+      return [meta('compaction', '', asText(payload.message) || asText(record.summary))];
+    case 'response_item': {
+      if (payload.type === 'message') {
+        const role = asText(payload.role);
+        if (role === 'developer' || role === 'system') return [meta('system', role, codexPartsOf(payload.content, 'user').map((b) => b.text ?? pretty(b)).join('\n'))];
+        const blocks = codexPartsOf(payload.content, role === 'user' ? 'user' : 'assistant');
+        return blocks.length > 0 ? blocks : [raw('message', record)];
+      }
+      if (payload.type === 'reasoning') {
+        const summary = Array.isArray(payload.summary) ? payload.summary.map((s) => (isObject(s) ? asText(s.text) : asText(s))).filter(Boolean).join('\n') : asText(payload.text);
+        return [{ t: 'thinking', text: summary, redacted: summary === '' && typeof payload.encrypted_content === 'string' && payload.encrypted_content !== '' }];
+      }
+      if (payload.type === 'function_call') return [{ t: 'tool_call', callId: asText(payload.call_id) || asText(payload.id), name: asText(payload.name), input: parseJsonMaybe(payload.arguments) }];
+      if (payload.type === 'custom_tool_call') return [{ t: 'tool_call', callId: asText(payload.call_id) || asText(payload.id), name: asText(payload.name), input: payload.input }];
+      if (payload.type === 'local_shell_call') {
+        const action = isObject(payload.action) ? payload.action : {};
+        const cmd = Array.isArray(action.command) ? action.command.map(asText).filter(Boolean).join(' ') : asText(action.command);
+        return [{ t: 'tool_call', callId: asText(payload.call_id) || asText(payload.id), name: 'shell', input: cmd ? { command: cmd } : action }];
+      }
+      if (payload.type === 'web_search_call') return [{ t: 'tool_call', callId: asText(payload.id), name: 'web_search', input: isObject(payload.action) ? payload.action : payload }];
+      if (payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') return [toolResult(asText(payload.call_id), '', payload.output, false)];
+      return [raw(asText(payload.type) || 'response_item', record)];
+    }
+    case 'event_msg': {
+      if (payload.type === 'user_message') return asText(payload.message) ? [{ t: 'text', role: 'user', text: asText(payload.message) }] : [raw('user_message', record)];
+      if (payload.type === 'agent_message') return asText(payload.message) ? [{ t: 'text', role: 'assistant', text: asText(payload.message) }] : [raw('agent_message', record)];
+      if (payload.type === 'agent_reasoning') return [{ t: 'thinking', text: asText(payload.text), redacted: false }];
+      if (payload.type === 'token_count') {
+        const total = isObject(payload.info) && isObject(payload.info.total_token_usage) ? payload.info.total_token_usage.total_tokens : null;
+        return [meta('usage', Number.isFinite(total) ? `${total} tokens` : 'tokens')];
+      }
+      if (payload.type === 'turn_aborted' || payload.type === 'error') return [meta('error', asText(payload.reason) || 'error', asText(payload.message))];
+      return [meta('info', asText(payload.type) || 'event', payload.message ? asText(payload.message) : '')];
+    }
+    case 'thread.started':
+      return [meta('session', asText(record.thread_id))];
+    case 'turn.started':
+      return [meta('info', 'turn.started')];
+    case 'turn.completed': {
+      const u = isObject(record.usage) ? record.usage : {};
+      const total = (Number.isFinite(u.input_tokens) ? u.input_tokens : 0) + (Number.isFinite(u.output_tokens) ? u.output_tokens : 0);
+      return [meta('usage', total > 0 ? `${total} tokens` : 'turn.completed')];
+    }
+    case 'turn.failed':
+      return [meta('error', 'turn.failed', isObject(record.error) ? asText(record.error.message) : asText(record.message))];
+    default:
+      return [raw(asText(record.type) || 'entry', record)];
+  }
+}
+
 export function describeRecord(record) {
   if (!isObject(record)) return { id: null, parentId: null, at: null, agent: 'unknown', sidechain: false, model: '', blocks: [raw('entry', record)] };
   const type = asText(record.type);
-  const agent = PI_TYPES.has(type) ? 'pi' : typeof record.uuid === 'string' || ['user', 'assistant', 'system', 'summary'].includes(type) ? 'claude' : 'unknown';
-  const id = type === 'session' ? null : asText(record.id) || asText(record.uuid) || null;
+  const agent = PI_TYPES.has(type) ? 'pi' : CODEX_TYPES.has(type) ? 'codex' : typeof record.uuid === 'string' || ['user', 'assistant', 'system', 'summary'].includes(type) ? 'claude' : 'unknown';
+  const id = type === 'session' || type === 'session_meta' ? null : asText(record.id) || asText(record.uuid) || null;
   const parent = record.parentId ?? record.parentUuid;
   const at = Date.parse(asText(record.timestamp));
   const message = isObject(record.message) ? record.message : {};
@@ -229,8 +325,8 @@ export function describeRecord(record) {
     at: Number.isFinite(at) ? at : null,
     agent,
     sidechain: record.isSidechain === true,
-    model: asText(message.model),
-    blocks: agent === 'pi' ? piEntry(record) : agent === 'claude' ? claudeEntry(record) : [raw(type || 'entry', record)],
+    model: agent === 'codex' ? codexModelOf(record) : asText(message.model),
+    blocks: agent === 'pi' ? piEntry(record) : agent === 'claude' ? claudeEntry(record) : agent === 'codex' ? codexEntry(record) : [raw(type || 'entry', record)],
   };
 }
 
@@ -271,11 +367,17 @@ export function placeOf(node, branch) {
 
 // ---- showing values -----------------------------------------------------------------------------------------
 
-const SUMMARY_KEYS = ['command', 'path', 'file_path', 'filePath', 'pattern', 'query', 'url', 'description', 'prompt'];
+const SUMMARY_KEYS = ['command', 'cmd', 'path', 'file_path', 'filePath', 'pattern', 'query', 'url', 'description', 'prompt'];
 
 /** One line for a tool call's heading: the argument that says what it is about. */
 export function callSummary(input, max = 140) {
   if (!isObject(input)) return typeof input === 'string' ? firstLine(input, max) : '';
+  if (Array.isArray(input.command)) {
+    const cmd = input.command.length === 3 && typeof input.command[1] === 'string' && /^-[a-z]*c[a-z]*$/i.test(input.command[1]) && typeof input.command[2] === 'string'
+      ? input.command[2]
+      : input.command.filter((p) => typeof p === 'string' && p !== '').join(' ');
+    if (cmd) return firstLine(cmd, max);
+  }
   for (const key of SUMMARY_KEYS) {
     if (typeof input[key] === 'string' && input[key] !== '') return firstLine(input[key], max);
   }

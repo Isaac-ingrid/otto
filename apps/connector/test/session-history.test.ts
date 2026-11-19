@@ -9,8 +9,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   normalizeClaudeEntries,
+  normalizeCodexEntries,
   normalizeSessionEntries,
   readClaudeSessionHistory,
+  readCodexSessionHistory,
   readSessionHistory,
 } from "../src/session-history.ts";
 
@@ -273,5 +275,42 @@ describe("readClaudeSessionHistory & normalizeClaudeEntries (Claude Code JSONL t
     expect(budgeted.entries).toHaveLength(1);
     const tail = normalizeClaudeEntries(records, { since: budgeted.cursor! });
     expect(tail.entries.map((e) => e.id)).toEqual(["a-1a", "a-1b", "a-final"]);
+  });
+});
+
+describe("readCodexSessionHistory & normalizeCodexEntries (Codex CLI rollout JSONL)", () => {
+  it("deduplicates twin response_item + event_msg utterances, skips synthetic context, summarizes tools, and paginates", () => {
+    const path = join(dir, "codex-rollout.jsonl");
+    const lines = [
+      { type: "session_meta", payload: { id: "019a-1", cwd: "/work" } },
+      { type: "turn_context", payload: { model: "gpt-5.4" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>\n<cwd>/work</cwd>\n</environment_context>" }] } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Run tests and fix bug" }] } },
+      { type: "event_msg", payload: { type: "user_message", message: "Run tests and fix bug" } },
+      { type: "response_item", payload: { type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["bash", "-lc", "pnpm test"] }) } },
+      { type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", input: "*** Begin Patch\n*** Update File: src/app.ts" } },
+      { type: "event_msg", payload: { type: "agent_message", message: "Tests fixed and green." } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Tests fixed and green." }] } },
+      { type: "turn_context", payload: { model: "gpt-5.4" } },
+      { type: "event_msg", payload: { type: "user_message", message: "Run tests and fix bug" } },
+    ];
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n" + '{"type":"event_msg","payload":{"type":"agent_m');
+
+    const page = readCodexSessionHistory(path);
+    expect(page.done).toBe(true);
+    expect(page.entries).toEqual([
+      { id: "codex-line-4", role: "user", text: "Run tests and fix bug" },
+      { id: "codex-line-6", role: "assistant", text: "", tools: [{ name: "shell", args: "pnpm test" }] },
+      { id: "codex-line-7", role: "assistant", text: "", tools: [{ name: "apply_patch", args: "*** Begin Patch" }] },
+      { id: "codex-line-8", role: "assistant", text: "Tests fixed and green." },
+      { id: "codex-line-11", role: "user", text: "Run tests and fix bug" },
+    ]);
+    expect(readCodexSessionHistory(path, { since: "codex-line-7" }).entries.map((e) => e.id)).toEqual([
+      "codex-line-8",
+      "codex-line-11",
+    ]);
+    const small = normalizeCodexEntries([{ id: "c1", role: "user", text: "hello" }, { id: "c2", role: "assistant", text: "world" }], { maxBytes: 45 });
+    expect(small.done).toBe(false);
+    expect(small.cursor).toBe("c1");
   });
 });

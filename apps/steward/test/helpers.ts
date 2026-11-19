@@ -448,8 +448,28 @@ export class FakeConnector {
   helloOverrides(): Record<string, unknown> {
     const caps = (kind: string) =>
       kind === "claude-code" || kind === "antigravity"
-        ? { steer: false, followUp: false, interrupt: true, resume: true, history: false, images: kind === "antigravity", structuredReport: true, readonly: false }
-        : { steer: true, followUp: true, interrupt: true, resume: true, history: true, images: true, structuredReport: true, readonly: true };
+        ? {
+            steer: false,
+            followUp: false,
+            interrupt: true,
+            resume: true,
+            history: kind === "claude-code",
+            images: kind === "antigravity",
+            structuredReport: true,
+            readonly: false,
+          }
+        : kind === "codex"
+          ? {
+              steer: false,
+              followUp: false,
+              interrupt: true,
+              resume: true,
+              history: true,
+              images: true,
+              structuredReport: true,
+              readonly: true,
+            }
+          : { steer: true, followUp: true, interrupt: true, resume: true, history: true, images: true, structuredReport: true, readonly: true };
     return {
       bootId: this.bootId,
       ...(this.directoryBrowse ? { capabilities: { directoryBrowse: true } } : {}),

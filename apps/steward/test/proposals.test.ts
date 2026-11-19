@@ -1016,4 +1016,55 @@ describe("Stage 4 (Plan A v2): cross-machine `readonly_probe` Needs you owner co
     macA.close();
     linuxClaudeOnly.close();
   });
+
+  it("dispatches approved cross-machine readonly_probe proposals to a Codex-only machine via readonly=true", async () => {
+    await configureAndBind();
+    const macA = await pairFakeConnector("mac-codex-src", {
+      autorun: false,
+      agents: ["pi"],
+      repos: [{ repoId: "/srv/front", name: "front" }],
+    });
+    const codexBox = await pairFakeConnector("linux-codex-only", {
+      autorun: false,
+      agents: ["codex"],
+      repos: [{ repoId: "/srv/infra", name: "infra" }],
+    });
+    await macA.connect();
+    await codexBox.connect();
+
+    const t = await ownerStub().dispatchForTest({ newTitle: "Codex 跨机探针", prompt: "Check infra", repoRef: "front" });
+    if (t.kind !== "dispatched") throw new Error("expected dispatch");
+    await macA.waitForCmds(1);
+
+    await macA.emit("proposal", t.workerId, {
+      kind: "readonly_probe",
+      targetRepoRef: "infra",
+      prompt: "Inspect infra schema",
+      reason: "Verify column types",
+      proposalKey: "codex-xmachine-1",
+    });
+    await waitWhileOutboundPending();
+
+    const prop = (await waitUntil(async () =>
+      (await ownerStub().debugSnapshot()).proposals.find((p) => p.proposalKey === "codex-xmachine-1"),
+    ))!;
+    expect(prop.status).toBe("pending_owner");
+    const cardRow = (await ownerStub().outboundRows(30)).find((r) => r.id === `proposalapproval:${prop.id}`)!;
+
+    await clickApiAction(String(cardRow.providerMsgId), `proposal:${prop.id}:approve`);
+    await waitWhileOutboundPending();
+    await codexBox.waitForCmds(1);
+
+    expect(codexBox.cmds[0]).toMatchObject({
+      kind: "start_worker",
+      args: {
+        repoId: "/srv/infra",
+        mode: "readonly",
+        agent: "codex",
+      },
+    });
+
+    macA.close();
+    codexBox.close();
+  });
 });

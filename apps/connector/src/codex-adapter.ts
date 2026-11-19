@@ -26,7 +26,7 @@ import { codexSessionPath } from "./full-session-history.ts";
 import { installClaudeAssets, WORKER_SYSTEM_PROMPT } from "./install.ts";
 import { appendCapped } from "./logger.ts";
 import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
-import { resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
+import { resolveExecutableLaunch, splitCommandLine, type LaunchResolution } from "./pi-launch.ts";
 import { redactText } from "./redact.ts";
 import {
   normalizeCodexEntries,
@@ -38,6 +38,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+
+export const CODEX_COMMAND_ENV = "OTTO_CODEX_COMMAND";
+
+export function codexCommandFromEnv(env: Record<string, string | undefined> = process.env): string[] | undefined {
+  const raw = env[CODEX_COMMAND_ENV];
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  const argv = splitCommandLine(raw).filter((part) => part.length > 0);
+  return argv.length > 0 ? argv : undefined;
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -113,6 +122,7 @@ interface WorkerRuntime {
   process: CodexProcess;
   cwd: string;
   sessionId: string | null;
+  observedModel: string | null;
   reportFile: string;
   proposalsFile: string;
   imageTempDir: string;
@@ -135,7 +145,7 @@ export class CodexAdapter implements AgentAdapter {
       selection: "launch",
       discovery: "suggested",
       customModelInput: true,
-      actualModelObservation: false,
+      actualModelObservation: true,
       thinkingSelection: false,
       idFormat: "opaque",
     },
@@ -175,7 +185,10 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   get launchResolution(): LaunchResolution {
-    this.launch = this.launch ?? this.options.launch ?? resolveExecutableLaunch(this.options.command ?? ["codex"]);
+    this.launch =
+      this.launch ??
+      this.options.launch ??
+      resolveExecutableLaunch(this.options.command ?? codexCommandFromEnv() ?? ["codex"]);
     return this.launch;
   }
 
@@ -305,6 +318,7 @@ export class CodexAdapter implements AgentAdapter {
       process: proc,
       cwd: spec.cwd,
       sessionId: initialSessionId,
+      observedModel: null,
       reportFile: mcp.reportFile,
       proposalsFile: mcp.proposalsFile,
       imageTempDir,
@@ -341,14 +355,16 @@ export class CodexAdapter implements AgentAdapter {
       }
       runtime.sessionId = sessionId;
       this.knownSessionIds.set(spec.workerId, sessionId);
-      const sessionPath = this.resolveSessionPath(sessionId) ?? undefined;
-      spec.onSession?.(sessionPath ?? null, null);
+      // Keep `sessionFile` unset on WorkerHandle (matching ClaudeAdapter / AntigravityAdapter):
+      // `WorkerManager` reserves `worker.sessionFile` for pi's tree-structured session tail
+      // inspector (`inspectSessionTail`), whereas Codex manages its own rollout JSONL under
+      // `<codexHome>/sessions/...` addressed by `sessionId` via `resolveSessionPath`.
       const handle: WorkerHandle = {
         workerId: spec.workerId,
         sessionId,
-        ...(sessionPath ? { sessionFile: sessionPath } : {}),
         cwd: spec.cwd,
       };
+      this.observeModelFromRollout(runtime, spec);
       setImmediate(() => this.flushBuffered(runtime));
       return handle;
     } catch (err) {
@@ -505,6 +521,39 @@ export class CodexAdapter implements AgentAdapter {
     return runtime;
   }
 
+  private observeModel(runtime: WorkerRuntime, spec: StartSpec, modelId: unknown): void {
+    if (typeof modelId !== "string" || modelId.trim() === "" || runtime.observedModel === modelId) return;
+    const observation = AgentModelObservationSchema.safeParse({ id: modelId, source: "init", observedAt: Date.now() });
+    if (observation.success) {
+      runtime.observedModel = modelId;
+      spec.onModelObserved?.(observation.data);
+    }
+  }
+
+  private observeModelFromRollout(runtime: WorkerRuntime, spec: StartSpec): void {
+    if (runtime.observedModel) return;
+    const rolloutPath = this.resolveSessionPath(runtime.sessionId);
+    if (!rolloutPath || !existsSync(rolloutPath)) return;
+    try {
+      const lines = readFileSync(rolloutPath, "utf8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const trimmed = lines[i]?.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as { type?: unknown; payload?: Record<string, unknown> | null };
+          if ((parsed.type === "turn_context" || parsed.type === "session_meta") && parsed.payload && typeof parsed.payload.model === "string") {
+            this.observeModel(runtime, spec, parsed.payload.model);
+            return;
+          }
+        } catch {
+          // ignore partial line
+        }
+      }
+    } catch {
+      // best-effort rollout observation
+    }
+  }
+
   // --- codex exec --json JSONL → RawAdapterEvent --------------------------------------------
 
   private onStreamEvent(runtime: WorkerRuntime, spec: StartSpec, record: Record<string, unknown>): void {
@@ -515,20 +564,15 @@ export class CodexAdapter implements AgentAdapter {
           runtime.sessionId = record.thread_id;
           this.knownSessionIds.set(runtime.workerId, record.thread_id);
         }
-        if (typeof record.model === "string") {
-          const observation = AgentModelObservationSchema.safeParse({
-            id: record.model,
-            source: "init",
-            observedAt: Date.now(),
-          });
-          if (observation.success) spec.onModelObserved?.(observation.data);
-        }
+        this.observeModel(runtime, spec, record.model);
         return;
       }
       case "turn.started": {
         if (!runtime.window.open) runtime.window = { open: true, aborted: false };
         runtime.turn += 1;
         runtime.pendingText = "";
+        this.observeModel(runtime, spec, record.model);
+        this.observeModelFromRollout(runtime, spec);
         this.emit({ type: "progress", workerId: runtime.workerId, phase: "thinking", turn: runtime.turn });
         return;
       }
@@ -658,6 +702,7 @@ export class CodexAdapter implements AgentAdapter {
           runtime.window.lastAssistant = { stopReason: "stop", text: runtime.pendingText };
         }
         runtime.resultSeen = true;
+        this.observeModelFromRollout(runtime, spec);
         void this.settle(runtime, record);
         return;
       }
@@ -680,6 +725,7 @@ export class CodexAdapter implements AgentAdapter {
           text: runtime.pendingText,
         };
         runtime.resultSeen = true;
+        this.observeModelFromRollout(runtime, spec);
         void this.settle(runtime, record);
         return;
       }
@@ -950,10 +996,15 @@ function readProposalsAuditFile(path: string): ProposalPayload[] {
   }
 }
 
-export function detectCodex(command: string[] = ["codex"], timeoutMs = 5000): { installed: boolean; version?: string } {
+export function detectCodex(
+  command: string[] = codexCommandFromEnv() ?? ["codex"],
+  timeoutMs = 5000,
+): { installed: boolean; version?: string } {
   try {
-    const [file, ...rest] = resolveExecutableLaunch(command).argv;
-    const result = spawnSync(file!, [...rest, "--version"], { timeout: timeoutMs, encoding: "utf8" });
+    const resolved = resolveExecutableLaunch(command);
+    if (resolved.error || !resolved.argv[0]) return { installed: false };
+    const [file, ...rest] = resolved.argv;
+    const result = spawnSync(file, [...rest, "--version"], { timeout: timeoutMs, encoding: "utf8" });
     if (result.status !== 0 || result.error) return { installed: false };
     const version = String(result.stdout ?? "").trim().split("\n")[0] ?? "";
     return { installed: true, version: version.length > 0 ? version : undefined };

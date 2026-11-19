@@ -247,3 +247,39 @@ describe("showing values", () => {
     ]) expect(imageSrc(bad as never), JSON.stringify(bad)).toBeNull();
   });
 });
+
+describe("reading Codex CLI rollout and stream records", () => {
+  it("parses session_meta, turn_context, response_item messages/reasoning/tools, and event_msg records", () => {
+    expect(describeRecord({ type: "session_meta", payload: { id: "019a-1", cwd: "/srv/app", cli_version: "0.170.0" } })).toMatchObject({
+      id: null,
+      agent: "codex",
+      blocks: [{ t: "meta", kind: "session", title: "/srv/app", detail: "codex 0.170.0 · 019a-1" }],
+    });
+    expect(describeRecord({ type: "turn_context", payload: { model: "gpt-5.4", effort: "high", approval_policy: "never", sandbox_policy: { type: "read-only" } } })).toMatchObject({
+      agent: "codex",
+      model: "gpt-5.4",
+      blocks: [{ t: "meta", kind: "model", title: "gpt-5.4 · high", detail: "sandbox: read-only · approval: never" }],
+    });
+    expect(describeRecord({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Check tests" }] } })).toMatchObject({
+      agent: "codex",
+      blocks: [{ t: "text", role: "user", text: "Check tests" }],
+    });
+    expect(describeRecord({ type: "response_item", payload: { type: "reasoning", summary: [{ type: "summary_text", text: "Inspecting Vitest config" }] } })).toMatchObject({
+      agent: "codex",
+      blocks: [{ t: "thinking", text: "Inspecting Vitest config", redacted: false }],
+    });
+    expect(describeRecord({ type: "response_item", payload: { type: "function_call", call_id: "fc-1", name: "shell", arguments: '{"command":["bash","-lc","pnpm test"]}' } })).toMatchObject({
+      agent: "codex",
+      blocks: [{ t: "tool_call", callId: "fc-1", name: "shell", input: { command: ["bash", "-lc", "pnpm test"] } }],
+    });
+    expect(callSummary({ command: ["bash", "-lc", "pnpm test"] })).toBe("pnpm test");
+    expect(describeRecord({ type: "response_item", payload: { type: "function_call_output", call_id: "fc-1", output: "PASS" } })).toMatchObject({
+      agent: "codex",
+      blocks: [{ t: "tool_result", callId: "fc-1", text: "PASS", error: false }],
+    });
+    expect(describeRecord({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 1280 } } } })).toMatchObject({
+      agent: "codex",
+      blocks: [{ t: "meta", kind: "usage", title: "1280 tokens" }],
+    });
+  });
+});
