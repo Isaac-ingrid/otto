@@ -13,11 +13,15 @@ import {
   DirectoryListMessageSchema,
   PROTOCOL_VERSION,
   reconnectOn,
+  RepoSkillOpMessageSchema,
   ulid,
   WorkerCheckpointMessageSchema,
   WorkerDiffMessageSchema,
   type CmdMessage,
   type DirectoryListingMessage,
+  type RepoSkillOpArgs,
+  type RepoSkillResult,
+  type RepoSkillResultMessage,
   type WelcomeMessage,
   type WorkerCheckpointArgs,
   type WorkerCheckpointResult,
@@ -55,6 +59,7 @@ export interface ClientOptions {
   discoverModels?: (agent: string) => Promise<AgentModelCatalog>;
   diffWorker?: (args: WorkerDiffArgs) => Promise<WorkerDiffResult>;
   checkpointWorker?: (args: WorkerCheckpointArgs) => Promise<WorkerCheckpointResult>;
+  repoSkillOp?: (op: RepoSkillOpArgs) => Promise<RepoSkillResult>;
   /** Honest hello snapshot for the non-worker sections (protocol §6.1): agents, repos, limits. */
   snapshot?: () => { agents: unknown[]; repos: unknown[]; limits: { maxWorkers: number; running: number } };
   /** L3 raw-history loader (connector-pi.md §11.4): when set, `history_req` messages are
@@ -104,6 +109,7 @@ export class ConnectorClient {
   private directoryReads = 0;
   private diffReads = 0;
   private checkpointReads = 0;
+  private repoSkillOps = 0;
   private discoveringModels = false;
   private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
@@ -191,6 +197,7 @@ export class ConnectorClient {
             directoryBrowse: true,
             workerDiff: Boolean(this.options.diffWorker),
             workerCheckpoint: Boolean(this.options.checkpointWorker),
+            repoSkills: Boolean(this.options.repoSkillOp),
           },
           machine: {
             name: this.options.machineName ?? os.hostname(),
@@ -356,6 +363,26 @@ export class ConnectorClient {
         }).catch(() => {
           if (this.ws === ws) this.send(ws, { t: "worker_checkpoint_result", re: request.id, ok: false, code: "read_failed" } satisfies WorkerCheckpointResultMessage);
         }).finally(() => { this.checkpointReads--; });
+        return;
+      }
+      case "repo_skill_op": {
+        const parsed = RepoSkillOpMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.repoSkillOp) {
+          this.send(ws, { t: "repo_skill_result", re: request.id, ok: false, code: "unsupported" } satisfies RepoSkillResultMessage);
+          return;
+        }
+        if (this.repoSkillOps >= 4) {
+          this.send(ws, { t: "repo_skill_result", re: request.id, ok: false, code: "busy" } satisfies RepoSkillResultMessage);
+          return;
+        }
+        this.repoSkillOps++;
+        void this.options.repoSkillOp(request.op).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "repo_skill_result", re: request.id, ...result } satisfies RepoSkillResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "repo_skill_result", re: request.id, ok: false, code: "io_failed" } satisfies RepoSkillResultMessage);
+        }).finally(() => { this.repoSkillOps--; });
         return;
       }
       case "history_req": {

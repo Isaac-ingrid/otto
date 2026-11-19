@@ -24,8 +24,9 @@ import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath, code
 import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
 import type { ClaudeAdapter } from "./claude-adapter.ts";
 import type { CodexAdapter } from "./codex-adapter.ts";
-import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type WorkerCheckpointArgs, type WorkerCheckpointResult, type WorkerDiffArgs, type WorkerDiffResult } from "@isaac2ingrid/protocol";
+import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type RepoSkillOpArgs, type RepoSkillResult, type WorkerCheckpointArgs, type WorkerCheckpointResult, type WorkerDiffArgs, type WorkerDiffResult } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
+import { executeRepoSkillOp } from "./repo-skills.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
 import { collectWorkerCheckpoint } from "./worker-checkpoint.ts";
 import { collectWorkerDiff } from "./worker-diff.ts";
@@ -1075,6 +1076,26 @@ export class WorkerManager {
       entries: page.entries,
       workDir,
       base: worker.base ?? null,
+      extraSecrets: this.redactionSecrets(),
+    });
+  }
+
+  /** Controlled repository skill catalog & single-file Markdown sync (`repo_skill_op` -> `repo_skill_result`). */
+  async repoSkillOp(op: RepoSkillOpArgs): Promise<RepoSkillResult> {
+    const repo = this.store.getRepo(op.scope.repoId);
+    if (!repo) return { ok: false, code: "not_registered_repo" };
+    let rootDir = repo.path;
+    if (op.scope.kind === "worktree") {
+      const worker = this.store.getWorker(op.scope.workerId);
+      if (!worker || worker.repoId !== repo.repoId) return { ok: false, code: "not_found" };
+      if (worker.mode !== "write" || !worker.worktree) return { ok: false, code: "no_worktree" };
+      rootDir = worker.worktree;
+    }
+    return executeRepoSkillOp({
+      rootDir,
+      isGitRepo: repo.capability.kind === "git",
+      projectApproved: repo.approved === true,
+      op,
       extraSecrets: this.redactionSecrets(),
     });
   }

@@ -161,6 +161,10 @@ export class ConnectorApp {
         this.log?.("worker_checkpoint_requested", { workerId: request.workerId });
         return this.manager.checkpointWorker(request);
       },
+      repoSkillOp: (op) => {
+        this.log?.("repo_skill_op_requested", { action: op.action, repoId: op.scope.repoId });
+        return this.manager.repoSkillOp(op);
+      },
       // L3 raw-history reads (§11.4): live get_entries while the process runs, the session
       // JSONL along the current branch otherwise. Logged at lifecycle level only — the
       // transcript itself never reaches the log.
