@@ -11,6 +11,7 @@
  *   HOST          bind address (default 0.0.0.0)
  *   .dev.vars     SERVER_KEY / LOGIN_PASSWORD / STEWARD_MODEL / DAILY_BUDGET_USD ...
  */
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -29,7 +30,9 @@ installGlobals();
 // connect to Cloudflare from a mainland-China host, which turns working calls into ETIMEDOUT.
 configureTcpEgress();
 
-const appDir = resolve(import.meta.dirname, "..");
+const appDir = existsSync(resolve(import.meta.dirname, "../package.json"))
+  ? resolve(import.meta.dirname, "..")
+  : resolve(import.meta.dirname, "../..");
 const cwd = process.env.OTTO_CONFIG_DIR ?? resolve(appDir, "../..");
 
 const dbPath = resolve(process.env.OTTO_DB_PATH ?? resolve(appDir, "data/steward.sqlite"));
