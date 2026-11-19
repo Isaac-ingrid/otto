@@ -17,8 +17,9 @@ import {
   ToolTask,
   type Extension,
 } from "@earendil-works/pi-durable";
-import type { WorkerCheckpointPayload } from "@isaac2ingrid/protocol";
+import type { RepoSkillData, WorkerCheckpointPayload } from "@isaac2ingrid/protocol";
 import { MAX_THREAD_SUMMARY, type Ledger, type RouteCandidate } from "../ledger.ts";
+import { escapeMarkers } from "../wake-text.ts";
 import { LOW_TRUST_SOURCES, sameClaimText, type NoteDraft, type NoteKind, type NoteSource } from "../notes.ts";
 import {
   titleOf,
@@ -57,6 +58,7 @@ export interface StewardExtensionContext {
   interruptWorker(input: InterruptWorkerInput): Promise<InterruptWorkerOutcome>;
   archiveThread(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   inspectWorkerCheckpoint?(workerId: string): Promise<WorkerCheckpointPayload>;
+  listRepoSkills?(deviceId: string, repoId: string): Promise<RepoSkillData>;
   /** Verify a model-claimed provenance reference (§7.2): `user:<msgId>` must be a message
    *  this deployment actually received; `routine:`/`followup:` ids must exist (issue #20). */
   checkProvenanceRef(ref: string): Promise<boolean>;
@@ -421,6 +423,69 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       } catch (error) {
         if (error instanceof WorkspaceError) return err(`获取断点失败：${error.code}`);
         return err(`获取断点失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  });
+
+  const sanitizeSkillMeta = (raw: string): string =>
+    escapeMarkers(
+      raw
+        .replace(/\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+        .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}\b/g, "[REDACTED]")
+        .replace(/\bxox[baprs]-[A-Za-z0-9-]{12,}\b/g, "[REDACTED]")
+        .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED]")
+        .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED]")
+        .replace(/\bAQ\.[A-Za-z0-9._-]{20,}\b/g, "[REDACTED]"),
+    );
+
+  const listRepoSkills = defineTool({
+    name: "list_repo_skills",
+    description:
+      "只读列出某个已登记仓库现有的受控技能与命令文件元数据（包含槽位、slug、相对路径、名称、简介、本地信任状态与 Git 状态；不含正文且绝不写入或删除任何文件）。需要写入或编辑技能时请引导用户在 Web 工作台的断点弹窗或控制面「仓库技能」页操作。",
+    parameters: Type.Object({
+      repoRef: Type.String({ minLength: 1, description: "仓库名或 repoId（如 repo-a / /srv/repo-a）" }),
+      machineHint: Type.Optional(Type.String({ description: "多台机器存在同名仓库时指定的机器名（可省）" })),
+    }),
+    replay: "safe",
+    execute: async (args) => {
+      if (!ctx.listRepoSkills) return err("当前环境未启用仓库技能目录查询。");
+      const ref = args.repoRef.trim();
+      const rawMatches = ctx.ledger.repos.machinesHaving(ref);
+      if (rawMatches.length === 0) return err(`未找到已登记仓库「${ref}」。`);
+      const hint = args.machineHint?.trim().toLowerCase();
+      const candidates = rawMatches
+        .map((m) => ({ ...m, machine: ctx.ledger.machines.get(m.deviceId) }))
+        .filter((m) => !hint || m.deviceId.toLowerCase() === hint || m.machine?.name.toLowerCase() === hint);
+      if (candidates.length === 0) {
+        return err(`机器「${args.machineHint}」上未找到仓库「${ref}」。`);
+      }
+      candidates.sort((a, b) => Number(Boolean(b.machine?.online)) - Number(Boolean(a.machine?.online)));
+      const picked = candidates[0]!;
+      try {
+        const data = await ctx.listRepoSkills(picked.deviceId, picked.repoId);
+        if (data.action !== "list") return err("读取仓库技能失败：返回格式不匹配。");
+        return ok(
+          JSON.stringify({
+            repoId: picked.repoId,
+            repoName: picked.repoName,
+            machineName: picked.machine?.name ?? picked.deviceId,
+            ...(data.projectApproved !== undefined ? { projectApproved: data.projectApproved } : {}),
+            ...(data.truncated ? { truncated: true } : {}),
+            skills: data.skills.map((s) => ({
+              target: s.target,
+              slug: s.slug,
+              relativePath: s.relativePath,
+              name: sanitizeSkillMeta(s.name),
+              description: sanitizeSkillMeta(s.description),
+              gitStatus: s.gitStatus,
+              bytes: s.bytes,
+              updatedAt: s.updatedAt,
+            })),
+          }),
+        );
+      } catch (error) {
+        if (error instanceof WorkspaceError) return err(`读取仓库技能失败：${error.code}`);
+        return err(`读取仓库技能失败：${error instanceof Error ? error.message : String(error)}`);
       }
     },
   });
@@ -1589,7 +1654,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     name: "otto-steward",
     tools: [
       ...(webSearch ? [webSearch] : []),
-      situation, findThreads, getThread, updateThread, archiveThread, inspectWorkerCheckpoint, startWorker, sendToWorker, interruptWorker,
+      situation, findThreads, getThread, updateThread, archiveThread, inspectWorkerCheckpoint, listRepoSkills, startWorker, sendToWorker, interruptWorker,
       notifyUser, askUser, answerWorker, noAction,
       createRoutine, suggestRoutine, setFollowup, listSchedules, cancelSchedule, pauseSchedule,
       createPrWatch, listPrWatches, cancelPrWatch,

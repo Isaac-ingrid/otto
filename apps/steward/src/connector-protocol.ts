@@ -23,12 +23,18 @@ import {
   RegisterRepoResultSchema,
   HelloMessageSchema,
   PingMessageSchema,
+  REPO_SKILL_TIMEOUT_MS,
+  RepoSkillResultMessageSchema,
   WORKER_CHECKPOINT_TIMEOUT_MS,
   WORKER_DIFF_TIMEOUT_MS,
   WorkerCheckpointResultMessageSchema,
   WorkerDiffResultMessageSchema,
   mintToken,
   ulid,
+  type RepoSkillData,
+  type RepoSkillOpArgs,
+  type RepoSkillOpMessage,
+  type RepoSkillResult,
   type WorkerCheckpointMessage,
   type WorkerCheckpointPayload,
   type WorkerCheckpointResult,
@@ -62,6 +68,7 @@ import { buildOfflineCheckpointFallback } from "./distiller.ts";
 type DirectoryReadResult = DirectoryBrowseResult | { ok: false; code: "machine_offline" | "browse_timeout" };
 type WorkerDiffReadResult = WorkerDiffResult | { ok: false; code: "machine_offline" | "diff_timeout" };
 type WorkerCheckpointReadResult = WorkerCheckpointResult | { ok: false; code: "machine_offline" | "checkpoint_timeout" };
+type RepoSkillReadResult = RepoSkillResult | { ok: false; code: "machine_offline" | "skill_timeout" };
 
 /** The pr_worker error codes (worker-manager.ts) → the failure card's stages (review
  *  finding 3): lets the failed-cmd_result path keep the stage-specific fix text even when it
@@ -145,6 +152,12 @@ export class ConnectorProtocol {
     connectionId: string;
     finish(result: WorkerCheckpointReadResult): void;
   }>();
+  private repoSkillTimeoutMs = REPO_SKILL_TIMEOUT_MS;
+  private readonly repoSkillReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: RepoSkillReadResult): void;
+  }>();
 
   constructor(private readonly deps: ConnectorProtocolDeps) {}
 
@@ -154,6 +167,7 @@ export class ConnectorProtocol {
   setDirectoryBrowseTimeoutForTest(ms: number): void { this.directoryBrowseTimeoutMs = ms; }
   setWorkerDiffTimeoutForTest(ms: number): void { this.workerDiffTimeoutMs = ms; }
   setWorkerCheckpointTimeoutForTest(ms: number): void { this.workerCheckpointTimeoutMs = ms; }
+  setRepoSkillTimeoutForTest(ms: number): void { this.repoSkillTimeoutMs = ms; }
 
   handlePing(connection: Connection, raw: unknown): void {
     const parsed = PingMessageSchema.safeParse(raw);
@@ -195,6 +209,7 @@ export class ConnectorProtocol {
       directoryBrowse: hello.capabilities?.directoryBrowse === true,
       workerDiff: hello.capabilities?.workerDiff === true,
       workerCheckpoint: hello.capabilities?.workerCheckpoint === true,
+      repoSkills: hello.capabilities?.repoSkills === true,
     } satisfies ConnState);
     // hello is the machine/repo snapshot's source of truth (protocol §6.1, steward.md §2.2):
     // name, agents, limits, and the full repo list — removals included — land in the ledger.
@@ -916,6 +931,82 @@ export class ConnectorProtocol {
     pending.finish(parsed.success ? parsed.data : { ok: false, code: "read_failed" });
   }
 
+  repoSkillOp(deviceId: string, op: RepoSkillOpArgs, signal: AbortSignal): Promise<RepoSkillData> {
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${deviceId}`[0];
+    if (!device || device.revoked) throw new WorkspaceError("not_found", 404);
+    const repo = this.deps.ledger.repos.get(op.scope.repoId, deviceId);
+    if (!repo) throw new WorkspaceError("not_registered_repo", 404);
+    if (op.scope.kind === "worktree") {
+      const worker = this.deps.ledger.workers.get(op.scope.workerId);
+      if (!worker || worker.deviceId !== deviceId || worker.repoId !== op.scope.repoId) {
+        throw new WorkspaceError("not_found", 404);
+      }
+      if (worker.mode !== "write" || worker.worktreeStatus === "cleaned" || worker.worktreeStatus === "none") {
+        throw new WorkspaceError("no_worktree", 409);
+      }
+    }
+    const connection = this.deps.connFor(deviceId);
+    if (!connection) throw new WorkspaceError("machine_offline", 409);
+    const connectionState = connection.state as ConnState | null;
+    if (!connectionState?.repoSkills) throw new WorkspaceError("unsupported", 409);
+    if (this.repoSkillReads.size >= 16) throw new WorkspaceError("busy", 429);
+    const id = ulid();
+    return new Promise((resolve, reject) => {
+      const finish = (result: RepoSkillReadResult) => {
+        if (!this.repoSkillReads.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        if (result.ok) {
+          resolve(result.data);
+          return;
+        }
+        const status = {
+          not_found: 404,
+          not_registered_repo: 404,
+          invalid_slug: 400,
+          secret_detected: 400,
+          symlink_forbidden: 403,
+          no_worktree: 409,
+          already_exists: 409,
+          sha256_conflict: 409,
+          unsupported: 409,
+          machine_offline: 409,
+          too_large: 413,
+          busy: 429,
+          skill_timeout: 504,
+          io_failed: 502,
+        }[result.code];
+        const details =
+          "existingSha256" in result && typeof result.existingSha256 === "string"
+            ? { existingSha256: result.existingSha256 }
+            : undefined;
+        reject(new WorkspaceError(result.code, status, details));
+      };
+      const abort = () => finish({ ok: false, code: "io_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "skill_timeout" }), this.repoSkillTimeoutMs);
+      this.repoSkillReads.set(id, { deviceId, connectionId: connection.id, finish });
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(JSON.stringify({ t: "repo_skill_op", id, op } satisfies RepoSkillOpMessage));
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleRepoSkillResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.repoSkillReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = RepoSkillResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "io_failed" });
+  }
+
   // ---- Connection lifecycle cleanup hooks --------------------------------------------------------
 
   /** Cancel directory and diff reads whose connection is closing or device is going offline. */
@@ -930,6 +1021,9 @@ export class ConnectorProtocol {
     for (const pending of this.workerCheckpointReads.values()) {
       if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
     }
+    for (const pending of this.repoSkillReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
+    }
   }
 
   cancelReadsForDevice(deviceId: string, result: DirectoryReadResult): void {
@@ -941,6 +1035,9 @@ export class ConnectorProtocol {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
     for (const pending of this.workerCheckpointReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.repoSkillReads.values()) {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
   }

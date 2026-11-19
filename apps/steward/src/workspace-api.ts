@@ -10,11 +10,16 @@ import {
   AgentModelIdSchema,
   DirectoryBrowseArgsSchema,
   isSafeRelativeGitPath,
+  isValidSkillSlug,
+  REPO_SKILL_MAX_BYTES,
   RegisterRepoArgsSchema,
+  RepoSkillOpArgsSchema,
   WorkerDiffArgsSchema,
   type DirectoryBrowseArgs,
   type DirectoryListing,
   type RegisterRepoResult,
+  type RepoSkillData,
+  type RepoSkillOpArgs,
   type WorkerCheckpointPayload,
   type WorkerDiffArgs,
   type WorkerDiffPayload,
@@ -101,6 +106,7 @@ export interface WorkspaceApiDeps {
   diffWorker?(input: WorkerDiffRequestInput, signal: AbortSignal): Promise<WorkerDiffPayload>;
   checkpointWorker?(workerId: string, signal: AbortSignal): Promise<WorkerCheckpointPayload>;
   distillWorker?(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult>;
+  repoSkillOp?(input: { deviceId: string; op: RepoSkillOpArgs }, signal: AbortSignal): Promise<RepoSkillData>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   controlPlane?: Omit<ControlPlaneDeps, "ledger" | "budget" | "audit">;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
@@ -289,6 +295,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     url.pathname === "/app/api/schedules" ||
     url.pathname === "/app/api/settings/agent-model/refresh" ||
     url.pathname.startsWith("/app/api/machines/directories") ||
+    url.pathname.startsWith("/app/api/repos/skills/") ||
     url.pathname.startsWith("/app/api/workers/") ||
     /^\/app\/api\/threads\/[\w-]{1,128}\/archive$/.test(url.pathname) ||
     url.pathname.startsWith("/app/api/push/");
@@ -469,6 +476,112 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
         throw new WorkspaceError("bad_request", 400);
       }
       return json(await deps.distillWorker({ id, workerId: distillMatch[1]!, mode }, request.signal));
+    }
+    const skillRouteMatch = /^\/app\/api\/repos\/skills\/(list|read|write|delete)$/.exec(url.pathname);
+    if (skillRouteMatch && deps.repoSkillOp) {
+      const action = skillRouteMatch[1]! as "list" | "read" | "write" | "delete";
+      const body = await readJson(request);
+      const { deviceId } = body;
+      if (typeof deviceId !== "string" || !/^[\w-]{1,128}$/.test(deviceId)) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      if (action !== "list") {
+        if (typeof body.slug !== "string" || !isValidSkillSlug(body.slug)) {
+          throw new WorkspaceError("invalid_slug", 400);
+        }
+      }
+      if (action === "write") {
+        if (typeof body.markdown !== "string" || body.markdown.trim().length === 0) {
+          throw new WorkspaceError("bad_request", 400);
+        }
+        if (new TextEncoder().encode(body.markdown).byteLength > REPO_SKILL_MAX_BYTES) {
+          throw new WorkspaceError("too_large", 413);
+        }
+      }
+      if (action === "list" || action === "read") {
+        const parsedOp = RepoSkillOpArgsSchema.safeParse(
+          action === "list"
+            ? { action: "list", scope: body.scope }
+            : { action: "read", scope: body.scope, target: body.target, slug: body.slug },
+        );
+        if (!parsedOp.success) throw new WorkspaceError("bad_request", 400);
+        const data = await deps.repoSkillOp({ deviceId, op: parsedOp.data }, request.signal);
+        if (action === "list" && data.action === "list") {
+          return json({
+            skills: data.skills,
+            ...(data.truncated ? { truncated: true } : {}),
+            ...(data.projectApproved !== undefined ? { projectApproved: data.projectApproved } : {}),
+          });
+        }
+        if (action === "read" && data.action === "read") {
+          return json({ summary: data.summary, markdown: data.markdown });
+        }
+        throw new WorkspaceError("io_failed", 502);
+      }
+      const { id } = body;
+      if (typeof id !== "string" || !REQUEST_ID.test(id)) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      const parsedMutOp = RepoSkillOpArgsSchema.safeParse(
+        action === "write"
+          ? {
+              action: "write",
+              scope: body.scope,
+              target: body.target,
+              slug: body.slug,
+              markdown: body.markdown,
+              ...(body.overwrite !== undefined ? { overwrite: body.overwrite } : {}),
+              ...(body.expectedSha256 !== undefined ? { expectedSha256: body.expectedSha256 } : {}),
+            }
+          : {
+              action: "delete",
+              scope: body.scope,
+              target: body.target,
+              slug: body.slug,
+              expectedSha256: body.expectedSha256,
+            },
+      );
+      if (!parsedMutOp.success) throw new WorkspaceError("bad_request", 400);
+      const key = `skill-${action}:${id}`;
+      const reqSig = JSON.stringify({ deviceId, op: parsedMutOp.data });
+      const previous = deps.ledger.webRequests.get(key);
+      if (previous) {
+        const parsedPrev = JSON.parse(previous.payload) as { req?: string; res?: unknown };
+        if (parsedPrev.req !== reqSig) throw new WorkspaceError("id_conflict", 409);
+        if (previous.status === "done" && parsedPrev.res !== undefined) return json(parsedPrev.res);
+      }
+      const data = await deps.repoSkillOp({ deviceId, op: parsedMutOp.data }, request.signal);
+      const tx = deps.controlPlane?.tx ?? (<T>(fn: () => T) => fn());
+      if (action === "write" && parsedMutOp.data.action === "write" && data.action === "write") {
+        const res = {
+          ok: true,
+          id,
+          summary: data.summary,
+          ...(data.projectApproved !== undefined ? { projectApproved: data.projectApproved } : {}),
+        };
+        tx(() => {
+          deps.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+          deps.ledger.webRequests.complete(key);
+        });
+        deps.audit(
+          "web_repo_skill_written",
+          `${deviceId}:${parsedMutOp.data.scope.repoId}:${parsedMutOp.data.target}:${parsedMutOp.data.slug}:${data.summary.sha256.slice(0, 12)}`,
+        );
+        return json(res);
+      }
+      if (action === "delete" && parsedMutOp.data.action === "delete" && data.action === "delete") {
+        const res = { ok: true, id, deleted: true, relativePath: data.relativePath };
+        tx(() => {
+          deps.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+          deps.ledger.webRequests.complete(key);
+        });
+        deps.audit(
+          "web_repo_skill_deleted",
+          `${deviceId}:${parsedMutOp.data.scope.repoId}:${parsedMutOp.data.target}:${parsedMutOp.data.slug}`,
+        );
+        return json(res);
+      }
+      throw new WorkspaceError("io_failed", 502);
     }
     if (url.pathname === "/app/api/memory") {
       const body = await readJson(request);

@@ -40,6 +40,10 @@ const PROBE_PATHS = [
   "/api/login-link",
   "/app/api/memory",
   "/app/api/schedules",
+  "/app/api/repos/skills/list",
+  "/app/api/repos/skills/read",
+  "/app/api/repos/skills/write",
+  "/app/api/repos/skills/delete",
   "/app/api/workers/w_probe/checkpoint",
   "/app/api/workers/w_probe/distill",
   "/app/unknown", // unknown app pages are not a login-gated route index

@@ -62,7 +62,14 @@ export function buildControlPlaneSummary(ledger: Ledger, activePrWatches: number
 export interface MemoryViewResult {
   notes: NoteRow[];
   usage: NotesUsageSummary;
-  repos: Array<{ id: string; name: string; machine: string | null }>;
+  repos: Array<{
+    id: string;
+    name: string;
+    machine: string | null;
+    deviceId: string;
+    online: boolean;
+    capabilityKind: "git" | "plain";
+  }>;
 }
 
 export function readMemoryControlPlane(ledger: Ledger, searchParams: URLSearchParams): MemoryViewResult {
@@ -98,6 +105,9 @@ export function readMemoryControlPlane(ledger: Ledger, searchParams: URLSearchPa
     id: r.repoId,
     name: r.name,
     machine: machineNames.get(r.deviceId) ?? r.deviceId,
+    deviceId: r.deviceId,
+    online: r.online,
+    capabilityKind: r.capabilityKind,
   }));
   return { notes, usage: ledger.notes.usage(), repos };
 }

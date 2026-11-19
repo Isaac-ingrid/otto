@@ -25,7 +25,10 @@ export interface DistilledHandoff {
 export interface DistilledSkill {
   mode: "skill";
   workerId: string;
+  deviceId: string;
   repoId: string | null;
+  repoName: string | null;
+  hasWriteWorktree: boolean;
   skill: {
     slug: string;
     name: string;
@@ -229,10 +232,16 @@ export async function distillWorkerCheckpoint(
       }))
       .filter((n) => n.text.length > 0)
       .slice(0, 3);
+    const repoSummary = worker.repoId ? deps.ledger.repos.get(worker.repoId, worker.deviceId) : null;
+    const hasWriteWorktree =
+      worker.mode === "write" && worker.worktreeStatus !== "cleaned" && worker.worktreeStatus !== "none";
     result = {
       mode: "skill",
       workerId: input.workerId,
+      deviceId: worker.deviceId,
       repoId: worker.repoId,
+      repoName: repoSummary?.name ?? null,
+      hasWriteWorktree,
       skill: { slug, name, description, markdown },
       suggestedNotes,
     };

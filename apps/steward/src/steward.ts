@@ -842,6 +842,7 @@ export class Steward extends Agent<Env> {
         diffWorker: (input, signal) => this.connectorProto.diffWorker(input, signal),
         checkpointWorker: (workerId, signal) => this.connectorProto.checkpointWorker(workerId, signal),
         distillWorker: (input, signal) => this.distillWorker(input, signal),
+        repoSkillOp: ({ deviceId, op }, signal) => this.connectorProto.repoSkillOp(deviceId, op, signal),
         archiveThread: (input) => this.archiveThread(input),
         controlPlane: {
           tx: (fn) => this.ctx.storage.transactionSync(fn),
@@ -978,6 +979,8 @@ export class Steward extends Agent<Env> {
         return outcome;
       },
       inspectWorkerCheckpoint: (workerId) => this.connectorProto.checkpointWorker(workerId, AbortSignal.timeout(8_000)),
+      listRepoSkills: (deviceId, repoId) =>
+        this.connectorProto.repoSkillOp(deviceId, { action: "list", scope: { kind: "repo", repoId } }, AbortSignal.timeout(8_000)),
       notifyUser: async (input) => {
         const owner = this.ownerOpenIdSync();
         if (!owner) return;
@@ -1573,6 +1576,9 @@ export class Steward extends Agent<Env> {
         return;
       case "worker_checkpoint_result":
         this.connectorProto.handleWorkerCheckpointResult(connection, message);
+        return;
+      case "repo_skill_result":
+        this.connectorProto.handleRepoSkillResult(connection, message);
         return;
       case "error":
         // A connector reply to something the DO itself sent. The only DO-originated requests
