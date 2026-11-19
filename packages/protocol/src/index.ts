@@ -15,3 +15,4 @@ export * from './agent-models.ts';
 export * from "./report.ts";
 export * from "./proposal.ts";
 export * from "./checkpoint.ts";
+export * from "./repo-skills.ts";

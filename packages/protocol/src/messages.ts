@@ -80,6 +80,7 @@ export const HelloMessageSchema = z.object({
     directoryBrowse: z.boolean().optional(),
     workerDiff: z.boolean().optional(),
     workerCheckpoint: z.boolean().optional(),
+    repoSkills: z.boolean().optional(),
   }).optional(),
   machine: z.object({ name: z.string(), memTotalMB: z.number(), memFreeMB: z.number() }),
   agents: z.array(AgentCapabilitySchema),
