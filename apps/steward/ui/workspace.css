@@ -969,3 +969,4 @@ dialog::backdrop { background: rgba(3,6,4,.72); backdrop-filter: blur(3px); }
 .archive-worker-list { margin: 10px 0 14px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .archive-worker-item { padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--inset); font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
 .archive-worker-item code { font-family: var(--mono); color: var(--ink-strong); }
+input.masked-secret { -webkit-text-security: disc; }

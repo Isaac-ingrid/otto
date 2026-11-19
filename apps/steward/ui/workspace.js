@@ -1274,7 +1274,9 @@ function providerSection() {
   const busy = state.dialog.saving || state.dialog.testing;
   const draftStatusKey = `modelDraft_${state.dialog.saveError?.status ?? 'verification_failed'}`;
   const link = (url, label) => h('a', { class: 'provider-link', href: url, target: '_blank', rel: 'noopener noreferrer' }, label, icon('external'));
-  return h('form', { id: 'model-form', class: 'model-form provider-form' },
+  const canMaskText = Boolean(globalThis.CSS?.supports?.('-webkit-text-security', 'disc'));
+  const hideKey = !state.dialog.showKey;
+  return h('form', { id: 'model-form', class: 'model-form provider-form', autocomplete: 'off' },
     h('div', { class: 'provider-intro' },
       h('p', { class: 'dialog-copy' }, t('providerConnectHelp')),
       provider?.info ? link(provider.info.consoleUrl, t('providerConsole')) : null),
@@ -1289,7 +1291,15 @@ function providerSection() {
     h('div', { class: 'provider-key-label' }, h('label', { for: 'model-key' }, t('modelKeyLabel')),
       provider?.info ? link(provider.info.keysUrl, t('providerGetKey')) : null),
     h('div', { class: 'key-input-row' },
-      h('input', { id: 'model-key', type: state.dialog.showKey ? 'text' : 'password', autocomplete: 'off', spellcheck: 'false', required: !keyed, placeholder: t(keyed ? 'modelKeyKeep' : 'modelKeyPlaceholder'), value: draft.apiKey, dataset: { focus: 'model-key' } }),
+      h('input', {
+        id: 'model-key', name: 'provider-api-key',
+        type: hideKey && !canMaskText ? 'password' : 'text',
+        class: hideKey && canMaskText ? 'masked-secret' : null,
+        autocomplete: canMaskText ? 'off' : 'new-password',
+        autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false',
+        'data-1p-ignore': 'true', 'data-lpignore': 'true', 'data-form-type': 'other',
+        required: !keyed, placeholder: t(keyed ? 'modelKeyKeep' : 'modelKeyPlaceholder'), value: draft.apiKey, dataset: { focus: 'model-key' },
+      }),
       h('button', { type: 'button', class: 'button quiet', dataset: { action: 'toggle-key' }, 'aria-pressed': String(Boolean(state.dialog.showKey)) }, t(state.dialog.showKey ? 'keyHide' : 'keyShow'))),
     h('p', { class: 'dialog-hint' }, t('modelHelp')),
     !provider?.id?.endsWith('-compatible') ? h('div', { class: 'provider-endpoint' }, h('span', null, t('providerEndpoint')),
