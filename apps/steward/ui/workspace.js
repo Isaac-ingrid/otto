@@ -14,7 +14,7 @@ import { markup } from './markup.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
-  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, attentionFor, canAnswerCard, groupByDay, groupThreads, isActiveWorker, messagesFor, modelAfterProviderChange, modelRejectionKey, thinkingAdjusted, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, withPending, workOn,
+  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, attentionFor, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, isActiveWorker, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, withPending, workOn,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -59,7 +59,10 @@ const state = {
   modelDraftNotice: null, // lifecycle feedback belongs inside the settings modal, not behind it
   stopping: false, // a stop request is in flight (ADR-0017): the button stays put and disabled
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
-
+  showArchived: false,
+  archivingThreads: new Set(),
+  workerDiffs: new Map(),
+  diffRev: 0,
 };
 
 // ---- small pieces ---------------------------------------------------------------------------------
@@ -68,9 +71,9 @@ const threadById = (id) => state.snapshot?.threads.find((thread) => thread.id ==
 const serverNow = () => Date.now() + state.skew;
 const dayLabel = (ts) => formatDay(ts, serverNow(), localeTag(), { today: t('today'), yesterday: t('yesterday') });
 const ago = (ts) => formatRelative(ts, serverNow(), localeTag(), t('justNow'));
-const stateLabel = (value) => t({ waiting_you: 'needsYou', running: 'running', idle: 'idle' }[value] ?? 'idle');
-const stateColor = (value) => ({ waiting_you: 'amber', running: 'green', idle: 'gray' }[value] ?? 'gray');
-const stateClass = (value) => ({ waiting_you: 'waiting', running: 'running', idle: 'idle' }[value] ?? 'idle');
+const stateLabel = (value) => t({ waiting_you: 'needsYou', running: 'running', idle: 'idle', archived: 'archived' }[value] ?? 'idle');
+const stateColor = (value) => ({ waiting_you: 'amber', running: 'green', idle: 'gray', archived: 'gray' }[value] ?? 'gray');
+const stateClass = (value) => ({ waiting_you: 'waiting', running: 'running', idle: 'idle', archived: 'archived' }[value] ?? 'idle');
 const working = () => state.snapshot.busy || [...state.pending.values()].some((entry) => entry.status === 'sending');
 
 /**
@@ -181,14 +184,21 @@ function renderConnection() {
 function renderSidebar() {
   const snapshot = state.snapshot;
   const list = $('#thread-list');
-  const rows = snapshot.threads.map((thread) => [thread.id, thread.title, thread.state, thread.unread, thread.lastActivityAt, thread.machine, thread.workers.map((worker) => worker.agent), previewOf(thread, snapshot.messages)]);
-  redraw('threads', [getLocale(), state.filter, state.selected, rows, minuteBucket()], () => preservingFocus(list, () => {
+  const archivedCount = snapshot.archivedCount ?? 0;
+  const rows = snapshot.threads.map((thread) => [thread.id, thread.title, thread.state, Boolean(thread.archived), thread.unread, thread.lastActivityAt, thread.machine, thread.workers.map((worker) => worker.agent), previewOf(thread, snapshot.messages)]);
+  redraw('threads', [getLocale(), state.filter, state.selected, state.showArchived, archivedCount, rows, minuteBucket()], () => preservingFocus(list, () => {
     const groups = groupThreads(snapshot.threads, state.filter);
+    const archivedToggle = archivedCount > 0 || state.showArchived
+      ? h('div', { class: 'archived-toggle-wrap' }, h('button', {
+        type: 'button', class: 'archived-toggle', 'aria-pressed': String(state.showArchived),
+        dataset: { action: 'toggle-archived', focus: 'toggle-archived' },
+      }, h('span', null, icon('archive'), ' ', t('showArchived', { count: archivedCount })), icon(state.showArchived ? 'chevron-down' : 'chevron-right')))
+      : null;
     if (groups.length === 0) {
       const searching = state.filter.trim() !== '';
-      list.replaceChildren(h('div', { class: 'empty-state' }, icon(searching ? 'search' : 'layers'),
+      list.replaceChildren(...[h('div', { class: 'empty-state' }, icon(searching ? 'search' : 'layers'),
         h('strong', null, t(searching ? 'noResults' : 'noThreads')), h('p', null, t(searching ? 'searchHint' : 'noThreadsHelp')),
-        searching ? h('button', { type: 'button', class: 'button', dataset: { action: 'clear-search' } }, t('clearSearch')) : null));
+        searching ? h('button', { type: 'button', class: 'button', dataset: { action: 'clear-search' } }, t('clearSearch')) : null), archivedToggle].filter(Boolean));
       return;
     }
     list.replaceChildren(...groups.map((group) => h('section', { class: 'thread-group' },
@@ -203,7 +213,7 @@ function renderSidebar() {
         h('div', { class: 'thread-title' }, h('span', null, thread.title), thread.unread ? h('span', { class: 'unread', 'aria-label': t('unread') }) : null),
         h('div', { class: 'thread-preview' }, previewOf(thread, snapshot.messages)),
         h('div', { class: 'thread-meta' }, h('span', { title: meta }, meta), h('span', null, ago(thread.lastActivityAt))));
-      }))));
+      }))), ...(archivedToggle ? [archivedToggle] : []));
   }));
   $('.all-conversation').classList.toggle('active', !state.selected);
   if (state.selected) $('.all-conversation').removeAttribute('aria-current');
@@ -263,7 +273,7 @@ function renderFeed(stick) {
   const snapshot = state.snapshot;
   const feed = $('#feed');
   const thread = state.selected ? threadById(state.selected) : null;
-  const titles = snapshot.threads.map((entry) => [entry.id, entry.title, entry.state]);
+  const titles = snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, Boolean(entry.archived)]);
   const live = state.live && (!state.selected || state.live.threadId === state.selected) ? state.live : null;
   redraw('feed', [getLocale(), state.selected, snapshot.messages, snapshot.busy, state.stopping, [...state.pending.values()], [...state.busyCards], titles, dayKey(serverNow()), live?.text], () => {
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
@@ -274,8 +284,11 @@ function renderFeed(stick) {
       ? [thread.repos.join(', '), [...new Set(thread.workers.map((worker) => worker.agent))].join(', '), thread.machine].filter(Boolean).join(' · ')
       : '';
     $('#conversation-subtitle').hidden = !$('#conversation-subtitle').textContent;
-    document.querySelector('.heading-line .state-badge')?.remove();
-    if (thread) $('.heading-line').append(stateBadge(thread.state));
+    for (const badge of document.querySelectorAll('.heading-line .state-badge')) badge.remove();
+    if (thread) {
+      $('.heading-line').append(stateBadge(thread.state));
+      if (thread.archived) $('.heading-line').append(stateBadge('archived'));
+    }
     const banner = $('#scope-banner');
     banner.hidden = !thread;
     banner.replaceChildren(...(thread ? [h('span', null, t('scopeNotice')), h('button', { type: 'button', dataset: { action: 'all' } }, `${t('backToAll')} ↗`)] : []));
@@ -519,6 +532,219 @@ function attentionNode(item) {
     inFeed ? h('button', { type: 'button', class: 'context-link', dataset: { jump: item.id } }, t('showInChat')) : null);
 }
 
+function bumpDiff() {
+  state.diffRev += 1;
+  if (state.snapshot) renderContext();
+  if (state.dialog?.type === 'diff') bumpDialog();
+}
+
+function ensureDiffEntry(workerId) {
+  let entry = state.workerDiffs.get(workerId);
+  if (!entry) {
+    entry = { open: false, status: 'idle', data: null, byFile: new Map(), selectedFile: null, filePatches: new Map(), error: null };
+    state.workerDiffs.set(workerId, entry);
+  }
+  return entry;
+}
+
+async function loadWorkerFileDiff(workerId, filePath) {
+  const entry = ensureDiffEntry(workerId);
+  const existing = entry.filePatches.get(filePath);
+  if (existing?.status === 'loading' || existing?.status === 'ready') return;
+  entry.filePatches.set(filePath, { status: 'loading', patch: '', truncated: false, error: null });
+  bumpDiff();
+  try {
+    const { status, data } = await request(`/app/api/workers/${encodeURIComponent(workerId)}/diff`, { filePath });
+    if (status === 200 && data) {
+      entry.filePatches.set(filePath, { status: 'ready', patch: data.patch ?? '', truncated: Boolean(data.patchTruncated), error: null });
+    } else {
+      entry.filePatches.set(filePath, { status: 'error', patch: '', truncated: false, error: data?.error ?? 'diff_failed' });
+    }
+  } catch {
+    entry.filePatches.set(filePath, { status: 'error', patch: '', truncated: false, error: 'diff_failed' });
+  }
+  bumpDiff();
+}
+
+async function loadWorkerDiff(workerId, force = false) {
+  const worker = findWorker(workerId);
+  if (!worker || worker.worktreeStatus === 'cleaned') return;
+  const entry = ensureDiffEntry(workerId);
+  if (entry.status === 'loading' || (!force && entry.status === 'ready')) return;
+  entry.status = 'loading';
+  entry.error = null;
+  if (force) entry.filePatches.clear();
+  bumpDiff();
+  try {
+    const { status, data } = await request(`/app/api/workers/${encodeURIComponent(workerId)}/diff`, {});
+    if (status === 200 && data && Array.isArray(data.files)) {
+      entry.status = 'ready';
+      entry.data = data;
+      entry.byFile = splitPatchByFile(data.patch);
+      if (entry.selectedFile && !data.files.some((f) => f.path === entry.selectedFile)) entry.selectedFile = null;
+      if (!entry.selectedFile && data.patchTruncated && data.files.length > 0 && !data.files[0].binary) {
+        entry.selectedFile = data.files[0].path;
+        void loadWorkerFileDiff(workerId, entry.selectedFile);
+      }
+    } else {
+      entry.status = 'error';
+      entry.error = data?.error ?? 'diff_failed';
+    }
+  } catch {
+    entry.status = 'error';
+    entry.error = 'diff_failed';
+  }
+  bumpDiff();
+}
+
+function toggleWorkerDiff(workerId) {
+  const entry = ensureDiffEntry(workerId);
+  entry.open = !entry.open;
+  if (entry.open && entry.status === 'idle') void loadWorkerDiff(workerId);
+  bumpDiff();
+}
+
+function selectWorkerDiffFile(workerId, filePath) {
+  const entry = ensureDiffEntry(workerId);
+  entry.selectedFile = filePath || null;
+  if (entry.selectedFile && entry.data) {
+    const meta = entry.data.files.find((f) => f.path === entry.selectedFile);
+    if (!meta?.binary && (entry.data.patchTruncated || !entry.byFile.has(entry.selectedFile))) {
+      void loadWorkerFileDiff(workerId, entry.selectedFile);
+    }
+  }
+  bumpDiff();
+}
+
+function openDiffDialog(workerId) {
+  const entry = ensureDiffEntry(workerId);
+  if (entry.status === 'idle') void loadWorkerDiff(workerId);
+  state.dialog = { type: 'diff', rev: 0, workerId, returnFocus: `expand-diff:${workerId}` };
+  drawn.delete('dialog');
+  renderDialog();
+}
+
+async function archiveThread(threadId, archived, cleanupPolicy = 'auto') {
+  if (!threadId || state.archivingThreads.has(threadId)) return;
+  state.archivingThreads.add(threadId);
+  renderContext();
+  if (state.dialog?.type === 'archive-confirm') bumpDialog();
+  try {
+    const body = archived ? { id: uuid(), archived: true, cleanupPolicy } : { id: uuid(), archived: false };
+    const { status, data } = await request(`/app/api/threads/${encodeURIComponent(threadId)}/archive`, body);
+    if (status === 200 && data) {
+      if (state.dialog?.type === 'archive-confirm') closeDialog();
+      if (!archived) toast(t('threadUnarchivedDone'));
+      else if (data.queuedWorkers?.length) toast(t('threadArchivedQueued'));
+      else if (data.cleanedWorkers?.length) toast(t('threadArchivedCleaned'));
+      else toast(t('threadArchivedDone'));
+      await refresh();
+      return;
+    }
+    if (status === 409 && data?.error === 'thread_active') {
+      toast(t('archiveActiveHint'));
+      await refresh();
+      return;
+    }
+    if (status === 409 && data?.error === 'worktree_unmerged') {
+      state.dialog = { type: 'archive-confirm', rev: 0, threadId, unmergedWorkers: Array.isArray(data.unmergedWorkers) ? data.unmergedWorkers : [] };
+      drawn.delete('dialog');
+      renderDialog();
+      return;
+    }
+    if (status !== 401) toast(t('actionFailed'));
+  } catch {
+    toast(t('actionFailed'));
+  } finally {
+    state.archivingThreads.delete(threadId);
+    if (state.snapshot) renderContext();
+    if (state.dialog?.type === 'archive-confirm') bumpDialog();
+  }
+}
+
+function diffPatchNode(patch, truncated, maxLines) {
+  const parsed = parseDiffLines(patch, maxLines);
+  return [
+    h('div', { class: 'diff-patch', tabindex: '0' }, parsed.lines.map((line) => h('div', { class: `diff-line diff-${line.kind}` },
+      h('span', { class: 'diff-ln' }, line.oldLine ?? ''),
+      h('span', { class: 'diff-ln' }, line.newLine ?? ''),
+      h('span', { class: 'diff-code' }, line.text)))),
+    parsed.truncated ? h('p', { class: 'diff-note' }, t('diffLinesTruncated', { shown: parsed.lines.length, total: parsed.totalLines })) : null,
+    truncated ? h('p', { class: 'diff-note' }, t('diffPatchTruncated')) : null,
+  ];
+}
+
+function diffBodyNode(worker, inDialog = false) {
+  if (worker.worktreeStatus === 'cleaned') {
+    const files = worker.git?.changedFiles ?? [];
+    return h('div', { class: 'worker-diff-drawer' },
+      h('p', { class: 'diff-note' }, t('diffWorktreeCleanedHint')),
+      files.length ? h('div', { class: 'diff-file-list' }, files.map((path) => h('div', { class: 'diff-file-btn' }, h('span', { class: 'diff-file-path', title: path }, path)))) : null);
+  }
+  const entry = ensureDiffEntry(worker.id);
+  if (entry.status === 'loading' || entry.status === 'idle') return h('div', { class: 'worker-diff-drawer' }, h('p', { class: 'diff-note', role: 'status' }, t('diffLoading')));
+  if (entry.status === 'error' || !entry.data) {
+    return h('div', { class: 'worker-diff-drawer' },
+      h('p', { class: 'diff-error', role: 'alert' }, t(diffErrorKey(entry.error))),
+      h('div', { class: 'diff-toolbar-actions' }, h('button', { type: 'button', class: 'button quiet', dataset: { action: 'refresh-diff', worker: worker.id, focus: `refresh-diff:${worker.id}` } }, t('refreshDiff'))));
+  }
+  const data = entry.data;
+  const maxLines = inDialog ? 2500 : 1000;
+  let patchView = null;
+  if (!data.files.length && !data.patch) patchView = h('p', { class: 'diff-note' }, t('diffEmpty', { base: data.base }));
+  else if (!entry.selectedFile) {
+    patchView = data.patchTruncated && !data.patch ? h('p', { class: 'diff-note' }, t('diffSelectFileHint')) : diffPatchNode(data.patch, data.patchTruncated, maxLines);
+  } else {
+    const meta = data.files.find((f) => f.path === entry.selectedFile);
+    const cached = !data.patchTruncated ? entry.byFile.get(entry.selectedFile) : null;
+    const single = entry.filePatches.get(entry.selectedFile);
+    if (meta?.binary) patchView = h('p', { class: 'diff-note' }, t('diffBinaryFile'));
+    else if (cached) patchView = diffPatchNode(cached, false, maxLines);
+    else if (!single || single.status === 'loading') patchView = h('p', { class: 'diff-note', role: 'status' }, t('diffFileLoading'));
+    else if (single.status === 'error') patchView = h('p', { class: 'diff-error', role: 'alert' }, t(diffErrorKey(single.error)));
+    else patchView = single.patch ? diffPatchNode(single.patch, single.truncated, maxLines) : h('p', { class: 'diff-note' }, t('diffNoFilePatch'));
+  }
+  return h('div', { class: 'worker-diff-drawer' },
+    h('div', { class: 'diff-toolbar' },
+      h('span', null, t('diffBaseBranch', { base: data.base, branch: data.branch })),
+      h('div', { class: 'diff-toolbar-actions' },
+        h('button', { type: 'button', class: 'button quiet', dataset: { action: 'refresh-diff', worker: worker.id, focus: `refresh-diff:${worker.id}` } }, t('refreshDiff')),
+        !inDialog ? h('button', { type: 'button', class: 'button quiet', dataset: { action: 'open-diff-dialog', worker: worker.id, focus: `expand-diff:${worker.id}` } }, t('expandDiff')) : null)),
+    data.commits.length ? h('ul', { class: 'diff-commits' }, data.commits.slice(0, 5).map((c) => h('li', null, h('code', null, c.sha), c.subject))) : null,
+    data.files.length ? h('div', { class: 'diff-file-list', role: 'listbox' },
+      !data.patchTruncated && data.files.length > 1 ? h('button', {
+        type: 'button', class: 'diff-file-btn', role: 'option', 'aria-selected': String(!entry.selectedFile),
+        dataset: { action: 'select-diff-file', worker: worker.id, path: '', focus: `diff-file:${worker.id}:all` },
+      }, h('span', { class: 'diff-file-path' }, t('diffAllFiles', { count: data.files.length }))) : null,
+      data.files.map((file) => h('button', {
+        type: 'button', class: 'diff-file-btn', role: 'option', 'aria-selected': String(entry.selectedFile === file.path),
+        dataset: { action: 'select-diff-file', worker: worker.id, path: file.path, focus: `diff-file:${worker.id}:${file.path}` },
+      },
+      h('span', { class: `diff-file-status status-${file.status}` }, file.status),
+      h('span', { class: 'diff-file-path', title: file.oldPath ? `${file.oldPath} → ${file.path}` : file.path }, file.oldPath ? `${file.oldPath} → ${file.path}` : file.path),
+      file.binary ? null : h('span', null, h('span', { class: 'git-stat-add' }, `+${file.insertions}`), ' ', h('span', { class: 'git-stat-del' }, `−${file.deletions}`))))) : null,
+    data.filesTruncated ? h('p', { class: 'diff-note' }, t('diffFilesTruncated')) : null,
+    patchView);
+}
+
+function archiveConfirmSection() {
+  const { threadId, unmergedWorkers = [] } = state.dialog;
+  const busy = state.archivingThreads.has(threadId);
+  return h('div', { class: 'archive-confirm' },
+    h('p', { class: 'dialog-copy' }, t('archiveConfirmBody')),
+    h('ul', { class: 'archive-worker-list' }, unmergedWorkers.map((item) => {
+      const meta = [];
+      if (item.ahead > 0) meta.push(t('gitAhead', { count: item.ahead }));
+      if (item.dirty > 0) meta.push(t('gitDirty', { count: item.dirty }));
+      if (item.cleanupBlocked) meta.push(t('archiveWorkerBlocked'));
+      return h('li', { class: 'archive-worker-item' }, h('code', null, item.branch || item.workerId), meta.length ? h('span', { class: 'muted-copy' }, meta.join(' · ')) : null);
+    })),
+    h('div', { class: 'dialog-actions' },
+      h('button', { type: 'button', class: 'button primary', disabled: busy, dataset: { action: 'archive-confirm-keep', thread: threadId, focus: 'archive-keep' } }, t('archiveKeepAction')),
+      h('button', { type: 'button', class: 'button danger', disabled: busy, dataset: { action: 'archive-confirm-force', thread: threadId, focus: 'archive-force' } }, t('archiveForceAction')),
+      h('button', { type: 'button', class: 'button', disabled: busy, dataset: { action: 'close-dialog', focus: 'archive-cancel' } }, t('actionCancel'))));
+}
+
 function workerNode(thread, worker) {
   const active = isActiveWorker(worker);
   const progress = worker.progress ? [worker.progress.phase, worker.progress.tool, worker.progress.target].filter(Boolean).join(' ') : '';
@@ -528,11 +754,18 @@ function workerNode(thread, worker) {
     if (worker.git.ahead > 0) parts.push(t('gitAhead', { count: worker.git.ahead }));
     parts.push(t(worker.git.pushed ? 'gitPushed' : 'gitLocal'));
     if (worker.git.dirty > 0) parts.push(t('gitDirty', { count: worker.git.dirty }));
+    if (worker.git.filesChanged > 0 || worker.git.insertions > 0 || worker.git.deletions > 0) {
+      parts.push(t('gitDiffSummary', { files: worker.git.filesChanged ?? 0, ins: worker.git.insertions ?? 0, del: worker.git.deletions ?? 0 }));
+    }
     facts.push(parts.join(' · '));
   }
   if (worker.contextPercent !== null && worker.contextPercent !== undefined) facts.push(t('context', { percent: worker.contextPercent }));
   const outcome = worker.outcome ? tOr(`outcome_${worker.outcome}`, worker.outcome) : '';
   const pr = worker.pr;
+  const worktreeKey = WORKTREE_STATUS_KEYS[worker.worktreeStatus];
+  const canDiff = canInspectWorkerDiff(worker);
+  const diffOpen = Boolean(state.workerDiffs.get(worker.id)?.open);
+  const hasSession = worker.sessionId !== null || active;
   return h('div', { class: 'worker-card' },
     h('div', { class: 'worker-title' },
       h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent === 'codex' ? '⌘' : worker.agent === 'antigravity' ? '✦' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
@@ -542,7 +775,9 @@ function workerNode(thread, worker) {
     h('div', { class: 'worker-facts' }, t('agentModelObserved', { model: worker.lastObservedModel?.id ?? t('agentModelUnknown') }),
       worker.lastObservedModel ? h('small', { title: new Date(worker.lastObservedModel.observedAt).toISOString() }, ` · ${worker.lastObservedModel.source} · ${ago(worker.lastObservedModel.observedAt)}`) : null),
     worker.launchObservedModel && worker.launchObservedModel.id !== worker.lastObservedModel?.id ? h('div', { class: 'worker-facts' }, t('agentModelLaunch', { model: worker.launchObservedModel.id })) : null,
-    worker.branch ? h('code', null, worker.branch) : null,
+    worker.branch || worktreeKey ? h('div', { class: 'thread-badge-row' },
+      worker.branch ? h('code', null, worker.branch) : null,
+      worktreeKey ? h('span', { class: `worktree-badge ${worker.worktreeStatus}` }, t(worktreeKey)) : null) : null,
     progress ? h('div', { class: 'worker-facts' }, t('progress', { what: progress })) : null,
     outcome ? h('div', { class: 'worker-facts' }, outcome) : null,
     facts.length ? h('div', { class: 'worker-facts' }, facts.join(' · ')) : null,
@@ -550,22 +785,24 @@ function workerNode(thread, worker) {
       : pr?.failure ? h('p', { class: 'worker-pr failed' }, `${t('prFailed')}: ${pr.failure}`)
         : pr?.decision === 'approved' ? h('p', { class: 'worker-pr' }, t('prPending'))
           : pr?.decision === 'declined' ? h('p', { class: 'worker-pr' }, t('prDeclined')) : null,
-    worker.sessionId !== null || active
-      ? h('div', { class: 'worker-actions' }, h('a', { href: urlFor(thread.id, worker.id), dataset: { nav: thread.id, worker: worker.id, focus: `session:${worker.id}` } }, t('rawHistory'), icon('chevron-right'))) : null);
+    hasSession || canDiff ? h('div', { class: 'worker-actions' },
+      hasSession ? h('a', { href: urlFor(thread.id, worker.id), dataset: { nav: thread.id, worker: worker.id, focus: `session:${worker.id}` } }, t('rawHistory'), icon('chevron-right')) : null,
+      canDiff ? h('button', { type: 'button', 'aria-expanded': String(diffOpen), dataset: { action: 'toggle-diff', worker: worker.id, focus: `diff:${worker.id}` } }, icon('diff'), t(diffOpen ? 'hideChanges' : 'viewChanges')) : null) : null,
+    diffOpen ? diffBodyNode(worker, false) : null);
 }
 
 function renderContext() {
   const snapshot = state.snapshot;
   const panel = $('#context-panel');
   const thread = state.selected ? threadById(state.selected) : null;
-  const signature = [getLocale(), state.selected, thread ?? snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.machine, entry.workers.map((worker) => [worker.agent, worker.state])]),
+  const signature = [getLocale(), state.selected, state.diffRev, [...state.archivingThreads], thread ?? snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.machine, entry.workers.map((worker) => [worker.agent, worker.state])]),
     snapshot.attention, snapshot.activity, snapshot.messages.map((message) => message.id), [...state.busyCards], minuteBucket()];
   redraw('context', signature, () => {
     const top = panel.scrollTop;
     const close = h('button', { type: 'button', class: 'icon-button close-context', dataset: { action: 'close-details', focus: 'close-details' }, 'aria-label': t('closeDetails') }, icon('close'));
     const sections = [];
     if (!thread) {
-      const running = snapshot.threads.filter((entry) => entry.state === 'running');
+      const running = snapshot.threads.filter((entry) => !entry.archived && entry.state === 'running');
       sections.push(
         h('header', { class: 'context-header' }, h('h2', null, t('workspace')), h('span', { class: 'overline' }, dayLabel(serverNow())), close),
         h('section', { class: 'context-section' },
@@ -585,12 +822,21 @@ function renderContext() {
       const workers = [...thread.workers].reverse();
       const previousSummary = panel.querySelector('details[data-summary-thread]');
       const summaryOpen = previousSummary?.dataset.summaryThread === thread.id && previousSummary.open;
+      const archiving = state.archivingThreads.has(thread.id);
+      const hasActive = thread.state === 'running' || thread.workers.some(isActiveWorker);
       sections.push(
         h('header', { class: 'context-header' }, h('h2', null, t('threadDetails')), close),
         h('section', { class: 'context-section' },
-          h('h2', { class: 'thread-detail-title' }, thread.title), stateBadge(thread.state),
+          h('h2', { class: 'thread-detail-title' }, thread.title),
+          h('div', { class: 'thread-badge-row' }, stateBadge(thread.state), thread.archived ? stateBadge('archived') : null),
           thread.goal && thread.goal !== thread.summary ? h('p', { class: 'detail-goal' }, `${t('goal')}: ${thread.goal}`) : null,
-          thread.repos.length ? h('div', { class: 'repo-label' }, icon('folder'), thread.repos.join(', ')) : null),
+          thread.repos.length ? h('div', { class: 'repo-label' }, icon('folder'), thread.repos.join(', ')) : null,
+          h('div', { class: 'thread-archive-actions' }, h('button', {
+            type: 'button', class: 'button quiet',
+            disabled: archiving || (!thread.archived && hasActive) ? true : null,
+            title: !thread.archived && hasActive ? t('archiveActiveHint') : null,
+            dataset: { action: thread.archived ? 'unarchive-thread' : 'archive-thread', thread: thread.id, focus: `archive:${thread.id}` },
+          }, icon('archive'), t(thread.archived ? (archiving ? 'unarchivingThread' : 'unarchiveThread') : (archiving ? 'archivingThread' : 'archiveThread'))))),
         waiting.length ? h('section', { class: 'context-section' }, h('h3', { class: 'section-title' }, t('needsYou'), h('strong', null, t(waiting.length === 1 ? 'decisionCountOne' : 'decisionCount', { count: waiting.length }))), waiting.map(attentionNode)) : null,
         h('section', { class: 'context-section' },
           h('h3', { class: 'section-title' }, t(workers.length ? 'agent' : 'execution'), h('span', null, workers.length ? '' : t('noWorkers'))),
@@ -1284,6 +1530,14 @@ function dialogContent() {
       ],
     };
   }
+  if (state.dialog.type === 'archive-confirm') return { title: t('archiveConfirmTitle'), body: archiveConfirmSection() };
+  if (state.dialog.type === 'diff') {
+    const worker = findWorker(state.dialog.workerId);
+    return {
+      title: t('diffDialogTitle', { branch: worker?.branch ?? state.dialog.workerId }),
+      body: worker ? diffBodyNode(worker, true) : h('p', { class: 'diff-note' }, t('sessionMissing')),
+    };
+  }
   return { title: t('accountTitle'), body: accountSection() };
 }
 
@@ -1296,11 +1550,14 @@ function renderDialog() {
     type === 'machines' ? [state.settings, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, snapshot.machines, snapshot.threads.map((entry) => [entry.id, entry.state, entry.workers.map((worker) => [worker.state, worker.machine])]), minuteBucket()] : null,
     type === 'directory' ? snapshot.machines : null,
     type === 'scope' ? [state.selected, snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.repos])] : null,
+    type === 'diff' ? [state.diffRev, state.dialog.workerId] : null,
+    type === 'archive-confirm' ? [state.dialog.threadId, state.dialog.unmergedWorkers, [...state.archivingThreads]] : null,
     type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
     const { title, body } = dialogContent();
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
+    $('#dialog').classList.toggle('diff-dialog', type === 'diff');
     $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
     preservingFocus($('#dialog-body'), () => $('#dialog-body').replaceChildren(...[body].flat(Infinity).filter(Boolean)));
   });
@@ -1448,7 +1705,7 @@ async function refresh() {
   try {
     do {
       refreshAgain = false;
-      const { status, data } = await request('/app/api/workspace');
+      const { status, data } = await request(state.showArchived ? '/app/api/workspace?includeArchived=1' : '/app/api/workspace');
       if (status === 401) return;
       if (status !== 200 || !data) throw new Error(`workspace ${status}`);
       if (state.fatal === 'unreachable') state.fatal = null;
@@ -2530,6 +2787,18 @@ document.addEventListener('click', (event) => {
       securityState().confirm = null;
       return bumpDialog();
     case 'passkey-remove-yes': return void removePasskey(dataset.passkey);
+    case 'toggle-archived':
+      state.showArchived = !state.showArchived;
+      renderSidebar();
+      return void refresh();
+    case 'toggle-diff': return toggleWorkerDiff(dataset.worker);
+    case 'refresh-diff': return void loadWorkerDiff(dataset.worker, true);
+    case 'select-diff-file': return selectWorkerDiffFile(dataset.worker, dataset.path);
+    case 'open-diff-dialog': return openDiffDialog(dataset.worker);
+    case 'archive-thread': return void archiveThread(dataset.thread, true, 'auto');
+    case 'unarchive-thread': return void archiveThread(dataset.thread, false);
+    case 'archive-confirm-keep': return void archiveThread(dataset.thread, true, 'keep');
+    case 'archive-confirm-force': return void archiveThread(dataset.thread, true, 'force');
   }
 });
 

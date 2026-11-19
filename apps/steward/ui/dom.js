@@ -62,6 +62,8 @@ const ICONS = {
   memory: [['path', { d: 'M9 3a4 4 0 0 0-4 4v1a3 3 0 0 0-1 5 3.5 3.5 0 0 0 3 5.5A3 3 0 0 0 12 20V4a3 3 0 0 0-3-1Z' }], ['path', { d: 'M15 3a4 4 0 0 1 4 4v1a3 3 0 0 1 1 5 3.5 3.5 0 0 1-3 5.5A3 3 0 0 1 12 20' }]],
   repeat: [['path', { d: 'M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3' }]],
   sparkle: [['path', { d: 'M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6' }]],
+  archive: [['rect', { x: 3, y: 4, width: 18, height: 4, rx: 1 }], ['path', { d: 'M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4' }]],
+  diff: [['path', { d: 'M9 7v6M6 10h6M13 16h5M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z' }]],
 };
 
 export function icon(name) {

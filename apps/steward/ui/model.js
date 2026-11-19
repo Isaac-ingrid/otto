@@ -22,12 +22,16 @@ export function threadMatches(thread, query) {
   return haystack.filter(Boolean).join('\n').toLowerCase().includes(needle);
 }
 
-/** Threads grouped for the sidebar: waiting on the owner first, then running, then idle. */
+/** Threads grouped for the sidebar: waiting on the owner first, then running, then idle, then archived. */
 export function groupThreads(threads, query) {
   const shown = threads.filter((thread) => threadMatches(thread, query));
-  return THREAD_STATE_ORDER
-    .map((state) => ({ state, threads: shown.filter((thread) => thread.state === state) }))
+  const active = shown.filter((thread) => !thread.archived);
+  const archived = shown.filter((thread) => Boolean(thread.archived));
+  const groups = THREAD_STATE_ORDER
+    .map((state) => ({ state, threads: active.filter((thread) => thread.state === state) }))
     .filter((group) => group.threads.length > 0);
+  if (archived.length > 0) groups.push({ state: 'archived', threads: archived });
+  return groups;
 }
 
 /** Messages belonging to a thread, or everything when no thread is selected. */
@@ -67,7 +71,7 @@ export function summarize(snapshot) {
   return {
     machinesTotal: machines.length,
     machinesOnline: machines.filter((machine) => machine.online).length,
-    running: snapshot.threads.filter((thread) => thread.state === 'running').length,
+    running: snapshot.threads.filter((thread) => !thread.archived && thread.state === 'running').length,
     needs: snapshot.attention.length,
   };
 }
@@ -149,4 +153,102 @@ export function modelRejectionKey(testError) {
 /** Only configured providers belong in the chat's model menu. */
 export function availableChatModels(settings) {
   return (settings?.providers ?? []).filter((provider) => settings.keyedProviders.includes(provider.id));
+}
+
+export const DIFF_ERROR_KEYS = {
+  machine_offline: 'diffErr_machine_offline',
+  no_worktree: 'diffErr_no_worktree',
+  not_git_repo: 'diffErr_not_git_repo',
+  unsupported: 'diffErr_unsupported',
+  diff_timeout: 'diffErr_diff_timeout',
+  busy: 'diffErr_busy',
+};
+
+export const WORKTREE_STATUS_KEYS = {
+  cleaning: 'worktreeCleaning',
+  cleaned: 'worktreeCleaned',
+  cleanup_blocked: 'worktreeBlocked',
+};
+
+export function diffErrorKey(code) {
+  return DIFF_ERROR_KEYS[code] ?? 'diffErr_failed';
+}
+
+export function canInspectWorkerDiff(worker) {
+  return Boolean(worker?.branch || worker?.git || (worker?.worktreeStatus && worker.worktreeStatus !== 'none'));
+}
+
+function unquoteGitPath(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed.startsWith('"') || !trimmed.endsWith('"')) return trimmed;
+  const inner = trimmed.slice(1, -1);
+  const bytes = [];
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] === '\\' && i + 1 < inner.length) {
+      const oct = inner.slice(i + 1, i + 4);
+      if (/^[0-7]{3}$/.test(oct)) { bytes.push(parseInt(oct, 8)); i += 3; continue; }
+      const esc = { n: 10, t: 9, r: 13, '"': 34, '\\': 92 }[inner[i + 1]];
+      bytes.push(esc ?? inner.charCodeAt(i + 1));
+      i += 1;
+    } else {
+      for (const byte of new TextEncoder().encode(inner[i])) bytes.push(byte);
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/** Splits a multi-file unified git patch into a Map of file path -> file patch text. */
+export function splitPatchByFile(patch) {
+  const map = new Map();
+  if (!patch) return map;
+  for (const chunk of String(patch).split(/(?=^diff --git )/m)) {
+    if (!chunk.startsWith('diff --git ')) continue;
+    let aPath = null;
+    let bPath = null;
+    for (const line of chunk.split('\n')) {
+      if (line.startsWith('@@ ')) break;
+      if (line.startsWith('--- ') && line !== '--- /dev/null') aPath = unquoteGitPath(line.slice(4)).replace(/^a\//, '');
+      else if (line.startsWith('+++ ') && line !== '+++ /dev/null') bPath = unquoteGitPath(line.slice(4)).replace(/^b\//, '');
+    }
+    const headerMatch = !bPath && !aPath ? /^diff --git a\/(.+?) b\/(.+)$/m.exec(chunk) : null;
+    const key = bPath ?? aPath ?? (headerMatch ? unquoteGitPath(headerMatch[2]) : null);
+    if (key) map.set(key, chunk.trimEnd());
+  }
+  return map;
+}
+
+/** Parses unified diff text into plain line descriptors for safe DOM rendering without HTML sinks. */
+export function parseDiffLines(patch, maxLines = 1200) {
+  const text = String(patch ?? '').replace(/\n$/, '');
+  if (!text) return { lines: [], truncated: false, totalLines: 0 };
+  const rawLines = text.split('\n');
+  const lines = [];
+  let oldCursor = 0;
+  let newCursor = 0;
+  let inHunk = false;
+  const limit = Math.min(rawLines.length, maxLines);
+  for (let i = 0; i < limit; i++) {
+    const line = rawLines[i];
+    if (line.startsWith('diff --git ')) {
+      inHunk = false;
+      lines.push({ kind: 'meta', text: line, oldLine: null, newLine: null });
+      continue;
+    }
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      oldCursor = Number(hunk[1]);
+      newCursor = Number(hunk[2]);
+      inHunk = true;
+      lines.push({ kind: 'hunk', text: line, oldLine: null, newLine: null });
+    } else if (!inHunk || line.startsWith('\\')) {
+      lines.push({ kind: 'meta', text: line, oldLine: null, newLine: null });
+    } else if (line.startsWith('+')) {
+      lines.push({ kind: 'add', text: line, oldLine: null, newLine: newCursor++ });
+    } else if (line.startsWith('-')) {
+      lines.push({ kind: 'del', text: line, oldLine: oldCursor++, newLine: null });
+    } else {
+      lines.push({ kind: 'context', text: line, oldLine: oldCursor++, newLine: newCursor++ });
+    }
+  }
+  return { lines, truncated: rawLines.length > maxLines, totalLines: rawLines.length };
 }

@@ -7,7 +7,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
-import { ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, canAnswerCard, groupByDay, groupThreads, messagesFor, modelAfterProviderChange, modelRejectionKey, thinkingAdjusted, thinkingAfterModelChange, availableChatModels, initialSetupStep, previewOf, summarize, threadMatches, withPending, workOn } from "../ui/model.js";
+import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, threadMatches, withPending, workOn } from "../ui/model.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -150,7 +150,7 @@ describe("interface copy", () => {
     for (const state of ["connecting", "live", "reconnecting", "disconnected"]) used.add(state);
     // The session viewer labels the bookkeeping entries an agent writes by kind (session-model.js).
     for (const kind of ["session", "model", "thinking_level", "compaction", "branch_summary", "custom", "label", "session_info", "usage", "context_edit", "system", "summary", "info", "error"]) used.add(`svMeta_${kind}`);
-    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat()]) used.add(key);
+    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS)]) used.add(key);
     expect(used.size).toBeGreaterThan(60);
     expect([...used].filter((key) => !(key in STRINGS))).toEqual([]);
   });
@@ -472,5 +472,75 @@ describe("thread frames", () => {
   it("asks for a snapshot when a state frame names a worker the page has never seen", () => {
     const thread = { id: "t_1", state: "running", workers: [{ id: "w1", state: "running" }] };
     expect(applyThreadState(thread, { state: "running", openQuestions: 0, workers: [{ workerId: "w2", state: "running" }] }).unknownWorkers).toBe(true);
+  });
+});
+
+describe("worker diff and thread archive views", () => {
+  it("places archived threads in a trailing group and omits them from running counts", () => {
+    const threads = [
+      { id: "t_idle", title: "Idle", state: "idle", archived: false, repos: [], workers: [] },
+      { id: "t_arch", title: "Old", state: "idle", archived: true, repos: [], workers: [] },
+      { id: "t_run_arch", title: "Stale", state: "running", archived: true, repos: [], workers: [] },
+    ];
+    expect(groupThreads(threads, "").map((g) => [g.state, g.threads.map((t: { id: string }) => t.id)])).toEqual([
+      ["idle", ["t_idle"]],
+      ["archived", ["t_arch", "t_run_arch"]],
+    ]);
+    expect(summarize({ machines: [], threads, attention: [] }).running).toBe(0);
+  });
+
+  it("splits multi-file unified diffs including added, deleted and UTF-8 quoted paths", () => {
+    const patch = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1 +1,2 @@",
+      " const a = 1;",
+      "+const b = 2;",
+      "diff --git a/old.ts b/old.ts",
+      "deleted file mode 100644",
+      "--- a/old.ts",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-gone",
+      String.raw`diff --git "a/docs/\344\270\255\346\226\207.md" "b/docs/\344\270\255\346\226\207.md"`,
+      '--- /dev/null',
+      String.raw`+++ "b/docs/\344\270\255\346\226\207.md"`,
+      "@@ -0,0 +1 @@",
+      "+# 标题",
+    ].join("\n");
+    const byFile = splitPatchByFile(patch);
+    expect([...byFile.keys()]).toEqual(["src/a.ts", "old.ts", "docs/中文.md"]);
+    expect(byFile.get("docs/中文.md")).toContain("+# 标题");
+  });
+
+  it("parses diff line kinds and line numbers without misclassifying file headers", () => {
+    const raw = [
+      "diff --git a/x.ts b/x.ts",
+      "--- a/x.ts",
+      "+++ b/x.ts",
+      "@@ -10,2 +10,3 @@",
+      " keep",
+      "-old",
+      "+new1",
+      "+new2",
+    ].join("\n");
+    const parsed = parseDiffLines(raw, 100);
+    expect(parsed.truncated).toBe(false);
+    expect(parsed.lines.map((l) => [l.kind, l.oldLine, l.newLine])).toEqual([
+      ["meta", null, null],
+      ["meta", null, null],
+      ["meta", null, null],
+      ["hunk", null, null],
+      ["context", 10, 10],
+      ["del", 11, null],
+      ["add", null, 11],
+      ["add", null, 12],
+    ]);
+    expect(parseDiffLines(raw, 3)).toMatchObject({ truncated: true, totalLines: 8 });
+    expect(canInspectWorkerDiff({ branch: "otto/w1", git: null, worktreeStatus: "active" })).toBe(true);
+    expect(canInspectWorkerDiff({ branch: null, git: null, worktreeStatus: "none" })).toBe(false);
+    expect(diffErrorKey("machine_offline")).toBe("diffErr_machine_offline");
+    expect(diffErrorKey("unexpected")).toBe("diffErr_failed");
   });
 });
