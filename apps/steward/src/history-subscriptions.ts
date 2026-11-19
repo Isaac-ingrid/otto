@@ -44,6 +44,7 @@ export interface ConnState {
   keyId: string;
   connEpoch?: number;
   directoryBrowse?: boolean;
+  workerDiff?: boolean;
   /** Set on a browser connection by `subscribe` (issue #84, §6.8): the one worker session
    *  view it currently has open, and the only `workerId` it may send `worker_cmd` to. */
   viewingWorkerId?: string;

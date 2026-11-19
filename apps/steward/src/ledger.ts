@@ -107,6 +107,8 @@ export interface ThreadRow {
   createdAt: number;
 }
 
+export type WorktreeStatus = "active" | "cleaning" | "cleaned" | "cleanup_blocked" | "none";
+
 export interface WorkerRow {
   workerId: string;
   threadId: string;
@@ -115,6 +117,7 @@ export interface WorkerRow {
   agent: string;
   mode: string;
   state: string;
+  worktreeStatus?: WorktreeStatus;
   requestedModel?: string | null;
   modelSource?: 'agent-default' | 'task-default' | 'override';
   launchObservedModel?: AgentModelObservation | null;
@@ -555,6 +558,8 @@ export interface NewWorkerInput {
   parentWorker?: string;
   workerRelation?: "relay" | "sibling";
   proposalDepth?: number;
+  /** Whether the connector will create an isolated git worktree (`write` or `readonly` with `base`). */
+  hasWorktree?: boolean;
 }
 
 /** One event row lifted out of the protocol layer's `event_inbox`. */
@@ -599,6 +604,14 @@ const viewMachine = (r: Record<string, unknown>): MachineRow => ({
   reliability: jsonOrNull<MachineReliability>(r.reliability as string | null),
 });
 
+const VALID_WORKTREE_STATUS = new Set<WorktreeStatus>([
+  "active",
+  "cleaning",
+  "cleaned",
+  "cleanup_blocked",
+  "none",
+]);
+
 const viewWorker = (r: Record<string, unknown>): WorkerRow => ({
   workerId: r.workerId as string,
   threadId: r.threadId as string,
@@ -611,6 +624,9 @@ const viewWorker = (r: Record<string, unknown>): WorkerRow => ({
   lastObservedModel: jsonOrNull<AgentModelObservation>(r.lastObservedModel as string | null),
   mode: r.mode as string,
   state: r.state as string,
+  worktreeStatus: VALID_WORKTREE_STATUS.has(r.worktreeStatus as WorktreeStatus)
+    ? (r.worktreeStatus as WorktreeStatus)
+    : "active",
   unreachable: !!r.unreachable,
   sessionId: (r.sessionId as string | null) ?? null,
   branch: (r.branch as string | null) ?? null,
@@ -951,10 +967,29 @@ export function createLedger(deps: LedgerDeps) {
       const row = sql<Record<string, unknown>>`SELECT * FROM sh_thread WHERE threadId = ${threadId}`[0];
       return row ? threadFromRow(row) : null;
     },
-    list(): ThreadRow[] {
-      return sql<Record<string, unknown>>`
-        SELECT * FROM sh_thread WHERE archived = 0 ORDER BY lastActivityAt DESC, threadId
-      `.map(threadFromRow);
+    list(opts?: { includeArchived?: boolean }): ThreadRow[] {
+      const rows = opts?.includeArchived
+        ? sql<Record<string, unknown>>`
+            SELECT * FROM sh_thread ORDER BY lastActivityAt DESC, threadId
+          `
+        : sql<Record<string, unknown>>`
+            SELECT * FROM sh_thread WHERE archived = 0 ORDER BY lastActivityAt DESC, threadId
+          `;
+      return rows.map(threadFromRow);
+    },
+    archivedCount(): number {
+      return sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_thread WHERE archived = 1`[0]!.n;
+    },
+    setArchived(threadId: string, archived: boolean): boolean {
+      const flag = archived ? 1 : 0;
+      sql`
+        UPDATE sh_thread
+        SET archived = ${flag},
+            unread = CASE WHEN ${flag} = 1 THEN 0 ELSE unread END,
+            lastActivityAt = ${now()}
+        WHERE threadId = ${threadId}
+      `;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
     },
     repoIds(threadId: string): string[] {
       return sql<{ repoId: string }>`SELECT repoId FROM sh_thread_repo WHERE threadId = ${threadId}`.map((r) => r.repoId);
@@ -1143,25 +1178,49 @@ export function createLedger(deps: LedgerDeps) {
     },
   };
 
+  const hasSurvivingBranch = (worker: WorkerRow): boolean => {
+    if (!worker.branch) return false;
+    if (worker.worktreeStatus !== "cleaned" && worker.worktreeStatus !== "cleaning") return true;
+    const latestGit = reports.latestForWorker(worker.workerId)?.git ?? null;
+    const pushed = latestGit?.pushed === true || prConsent.branchState(worker.workerId).url !== null;
+    return pushed && (latestGit?.ahead ?? 0) > 0;
+  };
+
   const workers = {
     register(input: NewWorkerInput): WorkerRow {
       const ts = now();
       const workerRelation = input.workerRelation ?? "relay";
       const proposalDepth = input.proposalDepth ?? (workerRelation === "sibling" ? 1 : 0);
+      const repoCap = input.repoId ? repos.get(input.repoId, input.deviceId)?.capabilityKind : null;
+      const initialWorktreeStatus: WorktreeStatus =
+        repoCap === "plain" || !input.repoId
+          ? "none"
+          : input.hasWorktree !== undefined
+            ? input.hasWorktree
+              ? "active"
+              : "none"
+            : input.mode === "readonly"
+              ? "none"
+              : "active";
       sql`
         INSERT INTO sh_worker (
-          workerId, threadId, deviceId, repoId, agent, mode, state, cmdId, parentWorker,
+          workerId, threadId, deviceId, repoId, agent, mode, state, worktreeStatus, cmdId, parentWorker,
           workerRelation, proposalDepth, createdAt, updatedAt, requestedModel, modelSource
         )
         VALUES (
           ${input.workerId}, ${input.threadId}, ${input.deviceId}, ${input.repoId ?? null},
-          ${input.agent}, ${input.mode}, 'starting', ${input.cmdId ?? null}, ${input.parentWorker ?? null},
+          ${input.agent}, ${input.mode}, 'starting', ${initialWorktreeStatus}, ${input.cmdId ?? null}, ${input.parentWorker ?? null},
           ${workerRelation}, ${proposalDepth}, ${ts}, ${ts}, ${input.requestedModel ?? null}, ${input.modelSource ?? 'agent-default'}
         )
       `;
       // A fresh run of this id: any deferred reap-reconcile verdict is void.
       sql`DELETE FROM sh_reap_pending WHERE workerId = ${input.workerId}`;
       return workers.get(input.workerId)!;
+    },
+    hasSurvivingBranch,
+    setWorktreeStatus(workerId: string, status: WorktreeStatus): boolean {
+      sql`UPDATE sh_worker SET worktreeStatus = ${status}, updatedAt = ${now()} WHERE workerId = ${workerId}`;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
     },
     get(workerId: string): WorkerRow | null {
       const row = sql<Record<string, unknown>>`SELECT * FROM sh_worker WHERE workerId = ${workerId}`[0];
@@ -1182,23 +1241,23 @@ export function createLedger(deps: LedgerDeps) {
       `[0];
       return row ? viewWorker(row) : null;
     },
-    /** The Thread's most recent main-chain (`relay`) worker that actually has a branch — the relay
+    /** The Thread's most recent main-chain (`relay`) worker that actually has a surviving branch — the relay
      *  base when the latest leg ran readonly or never started (issue #8, spec §5.3). `target`
      *  filters out same-machine/different-repo rows: relaying repo-A's branch name into repo-B's
      *  clone would just fail the start (PR #54 review finding 3); cross-machine rows stay — the
      *  branch may exist there after a push+fetch, and the dispatch flags `crossMachine`. */
     latestBranchOnThread(threadId: string, target?: { deviceId: string; repoId: string | null }): WorkerRow | null {
-      const row = target
+      const rows = target
         ? sql<Record<string, unknown>>`
             SELECT * FROM sh_worker WHERE threadId = ${threadId} AND workerRelation = 'relay' AND branch IS NOT NULL
               AND NOT (deviceId = ${target.deviceId} AND repoId IS NOT NULL AND ${target.repoId} IS NOT NULL AND repoId != ${target.repoId})
-            ORDER BY createdAt DESC, workerId DESC LIMIT 1
-          `[0]
+            ORDER BY createdAt DESC, workerId DESC
+          `
         : sql<Record<string, unknown>>`
             SELECT * FROM sh_worker WHERE threadId = ${threadId} AND workerRelation = 'relay' AND branch IS NOT NULL
-            ORDER BY createdAt DESC, workerId DESC LIMIT 1
-          `[0];
-      return row ? viewWorker(row) : null;
+            ORDER BY createdAt DESC, workerId DESC
+          `;
+      return rows.map(viewWorker).find(hasSurvivingBranch) ?? null;
     },
     /** The worker a new relay session continues FROM (issue #8): the previous leg. Same
      *  machine must also mean same repo — continuing a thread into another repository of
@@ -1241,12 +1300,27 @@ export function createLedger(deps: LedgerDeps) {
      * ledger matches the snapshot, later hellos take no branch.
      */
     reconcileFromSnapshot(deviceId: string, snapshots: HelloMessage["workers"]): void {
-      const rows = sql<WorkerRow>`
+      const rows = sql<Record<string, unknown>>`
         SELECT * FROM sh_worker WHERE deviceId = ${deviceId}
-      `;
+      `.map(viewWorker);
       for (const worker of rows) {
         const snap = snapshots.find((s) => s.workerId === worker.workerId);
         if (!snap) continue; // not this deployment's business (pruned / other device)
+        if (typeof snap.hasWorktree === "boolean") {
+          if (snap.hasWorktree) {
+            if (worker.worktreeStatus !== "active" && worker.worktreeStatus !== "cleaning") {
+              sql`UPDATE sh_worker SET worktreeStatus = 'active', updatedAt = ${now()} WHERE workerId = ${worker.workerId}`;
+            }
+          } else if (
+            worker.worktreeStatus === "active" ||
+            worker.worktreeStatus === "cleaning" ||
+            worker.worktreeStatus === "cleanup_blocked"
+          ) {
+            const nextStatus: WorktreeStatus =
+              worker.branch !== null || worker.worktreeStatus === "cleaning" ? "cleaned" : "none";
+            sql`UPDATE sh_worker SET worktreeStatus = ${nextStatus}, updatedAt = ${now()} WHERE workerId = ${worker.workerId}`;
+          }
+        }
         const processed =
           sql<{ processedUpTo: number }>`SELECT processedUpTo FROM worker_ack WHERE workerId = ${worker.workerId}`[0]
             ?.processedUpTo ?? 0;
@@ -2695,6 +2769,7 @@ export function createLedger(deps: LedgerDeps) {
         sql`
           UPDATE sh_worker SET state = 'running', sessionId = ${str(event.sessionId)},
                               branch = COALESCE(${str(event.branch)}, branch),
+                              worktreeStatus = CASE WHEN ${str(event.branch)} IS NOT NULL AND worktreeStatus = 'none' THEN 'active' ELSE worktreeStatus END,
                               lastOutcome = CASE WHEN lastOutcome = 'reaped' THEN NULL ELSE lastOutcome END,
                               lastEventAt = ${ts}, updatedAt = ${now()}
           WHERE workerId = ${workerId}
@@ -3314,9 +3389,10 @@ export function createLedger(deps: LedgerDeps) {
 
   const views = {
     /** Owner-facing data only: internal wake/run text and worker transcripts stay out. */
-    workspace() {
+    workspace(opts?: { includeArchived?: boolean }) {
       return {
-        threads: threads.list().map((thread) => ({
+        archivedCount: threads.archivedCount(),
+        threads: threads.list(opts).map((thread) => ({
           ...thread,
           repoIds: threads.repoIds(thread.threadId),
           workers: workers.listByThread(thread.threadId).map((worker) => ({

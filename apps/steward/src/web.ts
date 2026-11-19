@@ -278,6 +278,8 @@ export interface WebDeps {
     | "revoke"
     | "addDirectory"
     | "browseDirectory"
+    | "diffWorker"
+    | "archiveThread"
     | "webauthnRegisterOptions"
     | "webauthnRegisterVerify"
     | "webauthnRemove"

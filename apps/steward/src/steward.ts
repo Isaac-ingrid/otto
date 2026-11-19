@@ -73,7 +73,20 @@ import {
   type FauxRequestRecord,
   type StewardModels,
 } from "./llm/models.ts";
-import { createLedger, QUIET_MERGE_MS, wakeQuestionId, type Ledger, type LedgerSql, type NotifyRow, type OutboundDeliveryRow, type QuestionRow, type RunRow, type WakeRow, type WorkerRow } from "./ledger.ts";
+import {
+  createLedger,
+  ACTIVE_WORKER_STATES,
+  QUIET_MERGE_MS,
+  wakeQuestionId,
+  type Ledger,
+  type LedgerSql,
+  type NotifyRow,
+  type OutboundDeliveryRow,
+  type QuestionRow,
+  type RunRow,
+  type WakeRow,
+  type WorkerRow,
+} from "./ledger.ts";
 import { DeploymentAuth, deploymentSecrets, ownerAuthorized } from "./deployment-auth.ts";
 import { loginPage } from "./login-page.ts";
 import { renderChangeReports } from "./notes.ts";
@@ -115,7 +128,17 @@ export type { OutboxRow };
 import { PushService } from "./push.ts";
 import { escapeMarkers, verifyWakeText, wakeOwnerNotified, watchdogWakeText } from "./wake-text.ts";
 import { WorkspaceError, cardOpen, cardView, type WorkspaceActionInput, type WorkspaceInput } from "./workspace.ts";
-import { MAX_BODY_BYTES, parseApiMessage, readJson, type MachineDirectoryBrowseInput, type MachineDirectoryInput, type MachineDirectoryResult } from "./workspace-api.ts";
+import {
+  MAX_BODY_BYTES,
+  parseApiMessage,
+  readJson,
+  type MachineDirectoryBrowseInput,
+  type MachineDirectoryInput,
+  type MachineDirectoryResult,
+  type ThreadArchiveInput,
+  type ThreadArchiveResult,
+  type ThreadCleanupPolicy,
+} from "./workspace-api.ts";
 import { WorkspaceStream } from "./workspace-stream.ts";
 import { WebApp, linkTargetForThread, loginLinkPolicyFromEnv, parseSessionCookie, verifyLinkToken } from "./web.ts";
 
@@ -815,6 +838,8 @@ export class Steward extends Agent<Env> {
         revoke: (id: string) => { this.logChannel("web_machine_revoked", id); void this.revoke(id); },
         addDirectory: (input) => this.connectorProto.addMachineDirectory(input),
         browseDirectory: (input, signal) => this.connectorProto.browseMachineDirectory(input, signal),
+        diffWorker: (input, signal) => this.connectorProto.diffWorker(input, signal),
+        archiveThread: (input) => this.archiveThread(input),
         webauthnRegisterOptions: (sid: string, rpId: string) => this.web.webauthnRegisterOptions(sid, rpId),
         webauthnRegisterVerify: (sid: string, rpId: string, origin: string, label: string, attestation: unknown) =>
           this.web.webauthnRegisterVerify(sid, rpId, origin, label, attestation),
@@ -930,6 +955,11 @@ export class Steward extends Agent<Env> {
       interruptWorker: async (input) => {
         const outcome = await this.dispatcher.interruptWorker(input);
         if (outcome.kind === "interrupted") await this.backfillRunThread(outcome.threadId);
+        return outcome;
+      },
+      archiveThread: async (input) => {
+        const outcome = await this.archiveThread(input);
+        await this.backfillRunThread(outcome.threadId);
         return outcome;
       },
       notifyUser: async (input) => {
@@ -1522,6 +1552,9 @@ export class Steward extends Agent<Env> {
       case "directory_listing":
         this.connectorProto.handleDirectoryListing(connection, message);
         return;
+      case "worker_diff_result":
+        this.connectorProto.handleWorkerDiffResult(connection, message);
+        return;
       case "error":
         // A connector reply to something the DO itself sent. The only DO-originated requests
         // are history pulls (§6.6): relay a failure to the waiting browser and end its stream.
@@ -2085,7 +2118,10 @@ export class Steward extends Agent<Env> {
       this.sql`UPDATE outbox SET state = 'failed', failReason = 'not_after' WHERE cmdId = ${row.cmdId} AND state = 'queued'`;
     }
     const cutoff = nowMs - IDLE_FAIL_MS;
-    const stale = this.sql<{ cmdId: string; kind: string }>`SELECT cmdId, kind FROM outbox WHERE state = 'queued' AND createdAt <= ${cutoff} AND held = 0`;
+    const stale = this.sql<{ cmdId: string; kind: string }>`
+      SELECT cmdId, kind FROM outbox
+      WHERE state = 'queued' AND createdAt <= ${cutoff} AND held = 0 AND kind != 'cleanup_worktree'
+    `;
     for (const row of stale) {
       this.sql`UPDATE outbox SET state = 'failed', failReason = 'idle' WHERE cmdId = ${row.cmdId}`;
       // Issue #21: a pr_worker the machine never came back for must not vanish silently —
@@ -3136,12 +3172,172 @@ export class Steward extends Agent<Env> {
     return work;
   }
 
+  async setWorkerDiffTimeoutForTest(ms: number): Promise<void> {
+    this.connectorProto.setWorkerDiffTimeoutForTest(ms);
+  }
+
+  async archiveThread(input: ThreadArchiveInput): Promise<ThreadArchiveResult> {
+    const key = `archive:${input.id}`;
+    const policy: ThreadCleanupPolicy = input.cleanupPolicy ?? "auto";
+    const reqSig = JSON.stringify({
+      threadId: input.threadId,
+      archived: input.archived,
+      cleanupPolicy: policy,
+    });
+    const previous = this.ledger.webRequests.get(key);
+    if (previous) {
+      const parsed = JSON.parse(previous.payload) as { req?: string; res?: ThreadArchiveResult };
+      if (parsed.req !== reqSig) throw new WorkspaceError("id_conflict", 409);
+      if (previous.status === "done" && parsed.res) return parsed.res;
+    }
+
+    const thread = this.ledger.threads.get(input.threadId);
+    if (!thread) throw new WorkspaceError("thread_not_found", 404);
+
+    if (!input.archived) {
+      if (thread.archived) {
+        this.ledger.threads.setArchived(thread.threadId, false);
+        this.ledger.timeline.add(
+          thread.threadId,
+          "note",
+          "Thread 已取消归档（后续派发将自动开启新棒会话）",
+          { unarchived: true },
+        );
+      }
+      const res: ThreadArchiveResult = {
+        id: input.id,
+        threadId: thread.threadId,
+        archived: false,
+        cleanedWorkers: [],
+        queuedWorkers: [],
+        keptWorkers: [],
+      };
+      this.ctx.storage.transactionSync(() => {
+        this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+        this.ledger.webRequests.complete(key);
+      });
+      this.logChannel("thread_unarchived", thread.threadId);
+      return res;
+    }
+
+    const workers = this.ledger.workers.listByThread(thread.threadId);
+    const activeWorkers = workers.filter((w) => (ACTIVE_WORKER_STATES as readonly string[]).includes(w.state));
+    if (activeWorkers.length > 0) {
+      throw new WorkspaceError("thread_active", 409, {
+        activeWorkers: activeWorkers.map((w) => w.workerId),
+      });
+    }
+
+    const toClean: Array<{ worker: WorkerRow; force: boolean }> = [];
+    const keptWorkers: string[] = [];
+    const alreadyQueued: string[] = [];
+    const unmergedWorkers: Array<{
+      workerId: string;
+      branch: string | null;
+      ahead: number | null;
+      dirty: number | null;
+      cleanupBlocked: boolean;
+    }> = [];
+
+    for (const w of workers) {
+      const repo = w.repoId ? this.ledger.repos.get(w.repoId, w.deviceId) : null;
+      if (!w.repoId || repo?.capabilityKind === "plain") {
+        if (w.worktreeStatus !== "none") this.ledger.workers.setWorktreeStatus(w.workerId, "none");
+        continue;
+      }
+      const status = w.worktreeStatus ?? "active";
+      if (status === "cleaned" || status === "none") continue;
+      if (status === "cleaning") {
+        alreadyQueued.push(w.workerId);
+        continue;
+      }
+      if (w.mode === "readonly") {
+        toClean.push({ worker: w, force: false });
+        continue;
+      }
+      if (w.sessionId === null && w.branch === null) {
+        this.ledger.workers.setWorktreeStatus(w.workerId, "none");
+        continue;
+      }
+      const latestGit = this.ledger.reports.latestForWorker(w.workerId)?.git ?? null;
+      const prUrl = this.ledger.prConsent.branchState(w.workerId).url;
+      const isPushedClean =
+        (latestGit?.pushed === true && latestGit.dirty === 0) ||
+        (prUrl !== null && (latestGit?.dirty ?? 0) === 0);
+      const isZeroChanges = latestGit !== null && latestGit.ahead === 0 && latestGit.dirty === 0;
+      if (status !== "cleanup_blocked" && (isPushedClean || isZeroChanges)) {
+        toClean.push({ worker: w, force: false });
+        continue;
+      }
+      if (policy === "auto") {
+        unmergedWorkers.push({
+          workerId: w.workerId,
+          branch: w.branch,
+          ahead: latestGit?.ahead ?? null,
+          dirty: latestGit?.dirty ?? null,
+          cleanupBlocked: status === "cleanup_blocked",
+        });
+      } else if (policy === "force") {
+        toClean.push({ worker: w, force: true });
+      } else {
+        keptWorkers.push(w.workerId);
+      }
+    }
+
+    if (unmergedWorkers.length > 0) {
+      throw new WorkspaceError("worktree_unmerged", 409, { unmergedWorkers });
+    }
+
+    const cleanedWorkers: string[] = [];
+    const queuedWorkers: string[] = [...alreadyQueued];
+    for (const item of toClean) {
+      this.ledger.workers.setWorktreeStatus(item.worker.workerId, "cleaning");
+      const cmdId = `cleanup:${thread.threadId}:${item.worker.workerId}:${input.id}`;
+      const { state } = await this.enqueue(
+        item.worker.deviceId,
+        "cleanup_worktree",
+        { workerId: item.worker.workerId, ...(item.force ? { force: true } : {}) },
+        { workerId: item.worker.workerId, notAfter: null, cmdId },
+      );
+      if (state === "queued") queuedWorkers.push(item.worker.workerId);
+      else cleanedWorkers.push(item.worker.workerId);
+    }
+
+    this.ledger.questions.closeOpen(thread.threadId, "Thread 已归档");
+    this.ledger.threads.setArchived(thread.threadId, true);
+    const notes: string[] = [];
+    if (cleanedWorkers.length > 0) notes.push(`下发清理 ${cleanedWorkers.length} 个工作树`);
+    if (queuedWorkers.length > 0) notes.push(`离线排队清理 ${queuedWorkers.length} 个工作树`);
+    if (keptWorkers.length > 0) notes.push(`保留 ${keptWorkers.length} 个工作树`);
+    this.ledger.timeline.add(
+      thread.threadId,
+      "note",
+      `Thread 已归档${notes.length > 0 ? `（${notes.join("，")}）` : ""}`,
+      { archived: true, policy, cleanedWorkers, queuedWorkers, keptWorkers },
+    );
+
+    const res: ThreadArchiveResult = {
+      id: input.id,
+      threadId: thread.threadId,
+      archived: true,
+      cleanedWorkers,
+      queuedWorkers,
+      keptWorkers,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+      this.ledger.webRequests.complete(key);
+    });
+    this.logChannel("thread_archived", `${thread.threadId} policy=${policy}`);
+    return res;
+  }
+
   /** A boot-time replay of workspace message requests the crash interrupted mid-way (the
    *  sh_web_request row is the durable intent); card taps are not replayed — the card is
    *  still open if it never landed, and the owner can press again with a fresh request id. */
   private async recoverWorkspaceInputs(): Promise<void> {
     for (const row of this.ledger.webRequests.pending()) {
-      if (row.id.startsWith("action:") || row.id.startsWith("stop:")) continue;
+      if (row.id.startsWith("action:") || row.id.startsWith("stop:") || row.id.startsWith("archive:")) continue;
       if (row.id.startsWith("api:")) {
         const msgId = row.id.slice("api:".length);
         const parsed = JSON.parse(row.payload) as { text: string; replyTo?: string };

@@ -28,7 +28,11 @@ export interface WorkspaceActionInput {
 }
 
 export class WorkspaceError extends Error {
-  constructor(public code: string, public status = 400) {
+  constructor(
+    public code: string,
+    public status = 400,
+    public details?: Record<string, unknown>,
+  ) {
     super(code);
   }
 }
@@ -287,9 +291,15 @@ const parseProgress = (raw: string | null): { phase?: string; tool?: string; tar
   }
 };
 
-export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; devices: WorkspaceDevice[]; now: number }) {
+export function workspaceSnapshot(input: {
+  ledger: Ledger;
+  budget: BudgetState;
+  devices: WorkspaceDevice[];
+  now: number;
+  includeArchived?: boolean;
+}) {
   const { ledger, budget, devices, now } = input;
-  const view = ledger.views.workspace();
+  const view = ledger.views.workspace({ includeArchived: input.includeArchived });
   const machineName = new Map(devices.map((device) => [device.deviceId, device.name]));
   const repoNamesByMachine = new Map<string, string[]>();
   for (const repo of view.repos) {
@@ -340,6 +350,7 @@ export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; 
   return {
     now,
     busy: view.busy,
+    archivedCount: view.archivedCount,
     threads: view.threads.map((thread) => ({
       id: thread.threadId,
       title: thread.title,
@@ -347,6 +358,7 @@ export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; 
       summary: thread.summary,
       state: thread.state,
       unread: thread.unread,
+      archived: thread.archived,
       createdAt: thread.createdAt,
       lastActivityAt: thread.lastActivityAt,
       machine: thread.lastMachine ? (machineName.get(thread.lastMachine) ?? thread.lastMachine) : null,
@@ -362,6 +374,7 @@ export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; 
           lastObservedModel: worker.lastObservedModel ?? null,
           mode: worker.mode,
           state: worker.state,
+          worktreeStatus: worker.worktreeStatus ?? 'active',
           unreachable: worker.unreachable === true,
           machine: worker.machineName,
           branch: worker.branch,
@@ -371,7 +384,19 @@ export function workspaceSnapshot(input: { ledger: Ledger; budget: BudgetState; 
           contextPercent: worker.contextPercent,
           lastEventAt: worker.lastEventAt,
           createdAt: worker.createdAt,
-          git: git ? { branch: git.branch, ahead: git.ahead, pushed: git.pushed, dirty: git.dirty } : null,
+          git: git
+            ? {
+                branch: git.branch,
+                base: git.base,
+                ahead: git.ahead,
+                pushed: git.pushed,
+                dirty: git.dirty,
+                filesChanged: git.filesChanged,
+                insertions: git.insertions,
+                deletions: git.deletions,
+                ...(git.changedFiles ? { changedFiles: git.changedFiles } : {}),
+              }
+            : null,
           pr: worker.consent ? { decision: worker.consent.decision, url: worker.consent.url, failure: worker.consent.failure } : null,
         };
       }),

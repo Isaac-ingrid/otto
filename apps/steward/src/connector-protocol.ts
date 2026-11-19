@@ -23,6 +23,8 @@ import {
   RegisterRepoResultSchema,
   HelloMessageSchema,
   PingMessageSchema,
+  WORKER_DIFF_TIMEOUT_MS,
+  WorkerDiffResultMessageSchema,
   mintToken,
   ulid,
   type CmdResult,
@@ -34,15 +36,24 @@ import {
   type PongMessage,
   type ResyncMessage,
   type WelcomeMessage,
+  type WorkerDiffMessage,
+  type WorkerDiffPayload,
+  type WorkerDiffResult,
 } from "@isaac2ingrid/protocol";
 import { ambiguousWakeText, commandAttentionWakeText, escapeMarkers } from "./wake-text.ts";
 import type { Ledger, OutboundDeliveryRow, WorkerRow } from "./ledger.ts";
 import type { SqlExecutor } from "./schema.ts";
 import type { ConnState, OutboxRow } from "./steward-types.ts";
 import { WorkspaceError } from "./workspace.ts";
-import type { MachineDirectoryBrowseInput, MachineDirectoryInput, MachineDirectoryResult } from "./workspace-api.ts";
+import type {
+  MachineDirectoryBrowseInput,
+  MachineDirectoryInput,
+  MachineDirectoryResult,
+  WorkerDiffRequestInput,
+} from "./workspace-api.ts";
 
 type DirectoryReadResult = DirectoryBrowseResult | { ok: false; code: "machine_offline" | "browse_timeout" };
+type WorkerDiffReadResult = WorkerDiffResult | { ok: false; code: "machine_offline" | "diff_timeout" };
 
 /** The pr_worker error codes (worker-manager.ts) → the failure card's stages (review
  *  finding 3): lets the failed-cmd_result path keep the stage-specific fix text even when it
@@ -114,13 +125,20 @@ export class ConnectorProtocol {
     connectionId: string;
     finish(result: DirectoryReadResult): void;
   }>();
+  private workerDiffTimeoutMs = WORKER_DIFF_TIMEOUT_MS;
+  private readonly workerDiffReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: WorkerDiffReadResult): void;
+  }>();
 
   constructor(private readonly deps: ConnectorProtocolDeps) {}
 
   private get sql(): SqlExecutor { return this.deps.sql; }
 
-  // Tests shrink the browse timeout.
+  // Tests shrink the browse/diff timeouts.
   setDirectoryBrowseTimeoutForTest(ms: number): void { this.directoryBrowseTimeoutMs = ms; }
+  setWorkerDiffTimeoutForTest(ms: number): void { this.workerDiffTimeoutMs = ms; }
 
   handlePing(connection: Connection, raw: unknown): void {
     const parsed = PingMessageSchema.safeParse(raw);
@@ -154,7 +172,14 @@ export class ConnectorProtocol {
       other.close(CloseCode.SUPERSEDED, "superseded by a newer connection");
       this.deps.cancelDirectoryReadsForConnection(other.id, { ok: false, code: "machine_offline" });
     }
-    connection.setState({ deviceId: auth.deviceId, epoch: auth.epoch, keyId: auth.keyId, connEpoch: hello.connEpoch, directoryBrowse: hello.capabilities?.directoryBrowse === true } satisfies ConnState);
+    connection.setState({
+      deviceId: auth.deviceId,
+      epoch: auth.epoch,
+      keyId: auth.keyId,
+      connEpoch: hello.connEpoch,
+      directoryBrowse: hello.capabilities?.directoryBrowse === true,
+      workerDiff: hello.capabilities?.workerDiff === true,
+    } satisfies ConnState);
     // hello is the machine/repo snapshot's source of truth (protocol §6.1, steward.md §2.2):
     // name, agents, limits, and the full repo list — removals included — land in the ledger.
     this.deps.ledger.machines.upsertFromHello(hello);
@@ -200,6 +225,9 @@ export class ConnectorProtocol {
           WHERE cmdId = ${pending.cmdId} AND state NOT IN ('done', 'failed', 'expired', 'ambiguous')
         `;
         const changed = this.sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+        if (changed) {
+          this.settleCleanupWorktree(pending.cmdId, pending.state === "done", pending.code ?? null, null);
+        }
         if (changed && pending.state === "failed" && pending.code === "not_delivered") {
           const row = this.sql<{ workerId: string | null; kind: string }>`
             SELECT workerId, kind FROM outbox WHERE cmdId = ${pending.cmdId}
@@ -282,6 +310,13 @@ export class ConnectorProtocol {
           UPDATE outbox SET state = ${ack.result.ok ? "done" : "failed"}, result = ${JSON.stringify(ack.result)}
           WHERE cmdId = ${ack.re}
         `;
+        const dupErr = (ack.result.error ?? {}) as { code?: unknown; message?: unknown };
+        this.settleCleanupWorktree(
+          ack.re,
+          ack.result.ok,
+          typeof dupErr.code === "string" ? dupErr.code : null,
+          typeof dupErr.message === "string" ? dupErr.message : null,
+        );
         this.deps.relayWebCmd(ack.re, ack, true);
       } else {
         this.sql`UPDATE outbox SET state = 'accepted' WHERE cmdId = ${ack.re} AND state IN ('sent', 'queued')`;
@@ -293,6 +328,7 @@ export class ConnectorProtocol {
         UPDATE outbox SET state = 'failed', failReason = 'rejected', result = ${JSON.stringify({ code: ack.code ?? null })}
         WHERE cmdId = ${ack.re}
       `;
+      this.settleCleanupWorktree(ack.re, false, ack.code ?? null, null);
       this.noteCommandFailure(ack.re, `连接器拒绝（${ack.code ?? "未知原因"}）`);
       this.deps.relayWebCmd(ack.re, ack, true);
     } else if (ack.status === "ambiguous") {
@@ -318,6 +354,7 @@ export class ConnectorProtocol {
     `;
     this.deps.relayWebCmd(result.re, result, true);
     if (result.ok) {
+      this.settleCleanupWorktree(result.re, true, null, null);
       // Review finding 4 (#57): a pr_worker settles with the URL even when its pr_created
       // event was lost (the connector's emit raced a shutdown). This backstop delivers the
       // card from the command result; idempotent against the event path — whichever lands
@@ -335,6 +372,12 @@ export class ConnectorProtocol {
     }
     if (!wasFailed) {
       const error = (result.error ?? {}) as { code?: unknown; message?: unknown };
+      this.settleCleanupWorktree(
+        result.re,
+        false,
+        typeof error.code === "string" ? error.code : null,
+        typeof error.message === "string" ? error.message : null,
+      );
       const reason = [typeof error.code === "string" ? error.code : null, typeof error.message === "string" ? error.message : null]
         .filter((part): part is string => part !== null)
         .join("：") || "未知原因";
@@ -347,6 +390,42 @@ export class ConnectorProtocol {
       if (code === "session_in_use" || code === "not_delivered") {
         this.noteCommandAttention(result.re, code, typeof error.message === "string" ? error.message : "");
       }
+    }
+  }
+
+  private settleCleanupWorktree(
+    cmdId: string,
+    ok: boolean,
+    code: string | null,
+    message: string | null,
+  ): void {
+    const row = this.sql<{ workerId: string | null; kind: string }>`
+      SELECT workerId, kind FROM outbox WHERE cmdId = ${cmdId}
+    `[0];
+    if (!row || row.kind !== "cleanup_worktree" || !row.workerId) return;
+    const worker = this.deps.ledger.workers.get(row.workerId);
+    if (!worker) return;
+    if (ok || code === "no_worktree" || code === "not_found") {
+      if (worker.worktreeStatus !== "cleaned") {
+        this.deps.ledger.workers.setWorktreeStatus(worker.workerId, "cleaned");
+        this.deps.ledger.timeline.add(
+          worker.threadId,
+          "note",
+          `已清理工作树 ${worker.workerId}${worker.branch ? `（分支 ${worker.branch}）` : ""}`,
+          { cmdId, workerId: row.workerId, cleaned: true },
+        );
+      }
+      return;
+    }
+    if (worker.worktreeStatus !== "cleanup_blocked") {
+      this.deps.ledger.workers.setWorktreeStatus(worker.workerId, "cleanup_blocked");
+      const detail = [code, message].filter((p): p is string => Boolean(p)).join("：");
+      this.deps.ledger.timeline.add(
+        worker.threadId,
+        "note",
+        `工作树清理被拦截（${detail || "存在未提交或未合并变更"}）：已保留工作树目录`,
+        { cmdId, workerId: row.workerId, cleanupBlocked: true, code },
+      );
     }
   }
 
@@ -691,13 +770,83 @@ export class ConnectorProtocol {
     return { state: "pending", id: input.id };
   }
 
+  diffWorker(input: WorkerDiffRequestInput, signal: AbortSignal): Promise<WorkerDiffPayload> {
+    const worker = this.deps.ledger.workers.get(input.workerId);
+    if (!worker) throw new WorkspaceError("not_found", 404);
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${worker.deviceId}`[0];
+    if (!device || device.revoked) throw new WorkspaceError("not_found", 404);
+    const connection = this.deps.connFor(worker.deviceId);
+    if (!connection) throw new WorkspaceError("machine_offline", 409);
+    const connectionState = connection.state as ConnState | null;
+    if (!connectionState?.workerDiff) throw new WorkspaceError("unsupported", 409);
+    if (this.workerDiffReads.size >= 32) throw new WorkspaceError("busy", 429);
+    const id = ulid();
+    return new Promise((resolve, reject) => {
+      const finish = (result: WorkerDiffReadResult) => {
+        if (!this.workerDiffReads.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        if (result.ok) {
+          resolve(result.diff);
+          return;
+        }
+        if (result.code === "no_worktree") {
+          const latest = this.deps.ledger.workers.get(input.workerId);
+          if (latest && latest.worktreeStatus === "active") {
+            this.deps.ledger.workers.setWorktreeStatus(
+              latest.workerId,
+              latest.branch !== null ? "cleaned" : "none",
+            );
+          }
+        }
+        const status = {
+          not_found: 404,
+          invalid_path: 400,
+          no_worktree: 409,
+          not_git_repo: 409,
+          unsupported: 409,
+          machine_offline: 409,
+          busy: 429,
+          diff_timeout: 504,
+          diff_failed: 502,
+        }[result.code];
+        reject(new WorkspaceError(result.code, status));
+      };
+      const abort = () => finish({ ok: false, code: "diff_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "diff_timeout" }), this.workerDiffTimeoutMs);
+      this.workerDiffReads.set(id, { deviceId: worker.deviceId, connectionId: connection.id, finish });
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(JSON.stringify({ t: "worker_diff", id, ...input } satisfies WorkerDiffMessage));
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleWorkerDiffResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.workerDiffReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = WorkerDiffResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "diff_failed" });
+  }
+
   // ---- Connection lifecycle cleanup hooks --------------------------------------------------------
 
-  /** Cancel directory reads whose connection is closing or device is going offline. */
+  /** Cancel directory and diff reads whose connection is closing or device is going offline. */
   cancelReadsForConnection(connectionId: string, result: DirectoryReadResult): void {
     for (const pending of this.modelReads.values()) if (pending.connectionId === connectionId) pending.finish();
     for (const pending of this.directoryReads.values()) {
       if (pending.connectionId === connectionId) pending.finish(result);
+    }
+    for (const pending of this.workerDiffReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
     }
   }
 
@@ -705,6 +854,9 @@ export class ConnectorProtocol {
     for (const pending of this.modelReads.values()) if (pending.deviceId === deviceId) pending.finish();
     for (const pending of this.directoryReads.values()) {
       if (pending.deviceId === deviceId) pending.finish(result);
+    }
+    for (const pending of this.workerDiffReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
   }
 }

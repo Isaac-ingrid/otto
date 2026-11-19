@@ -28,6 +28,7 @@ export type NewSessionReason =
   | "repo_switch" // the continuation targets a different repository
   | "mode_switch" // readonly ⇄ write: the session cannot run the task
   | "context_high" // the previous session's context usage ran high
+  | "worktree_cleaned" // the previous worker's worktree directory was cleaned up on archive
   | "session_unusable"; // broken session: the connector would refuse to deliver
 
 export type ContinuationDecision =
@@ -59,6 +60,9 @@ export function decideContinuation(input: ContinuationInput): ContinuationDecisi
   if (previous.agent !== input.next.agent) return { action: "new_session", from: previous, reason: "agent_switch" };
   if (previous.deviceId !== input.next.deviceId) return { action: "new_session", from: previous, reason: "machine_switch" };
   if (!resumableSession(previous)) return { action: "new_session", from: previous, reason: "session_unusable" };
+  if (previous.worktreeStatus === "cleaned" || previous.worktreeStatus === "cleaning") {
+    return { action: "new_session", from: previous, reason: "worktree_cleaned" };
+  }
   if (previous.repoId !== null && input.next.repoId !== null && previous.repoId !== input.next.repoId) {
     return { action: "new_session", from: previous, reason: "repo_switch" };
   }

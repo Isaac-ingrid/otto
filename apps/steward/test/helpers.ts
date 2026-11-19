@@ -375,6 +375,10 @@ export interface FakeWorkerRun {
   tests?: { ran: boolean; passed?: boolean; note?: string };
   /** Emitted as the `started` event's branch and the report's git facts. */
   branch?: string;
+  /** When true, omits branch/git (e.g. readonly leg in main checkout or plain workspace). */
+  noBranch?: boolean;
+  ahead?: number;
+  dirty?: number;
   /** Whether the run's commits are already on the remote (git.pushed). Default false — an
    *  unpushed write completion carries the #21 consent ask, which pushes instead of merging
    *  quietly; tests that model an ORDINARY completion (e.g. #11's merge windows) set this. */
@@ -404,8 +408,12 @@ export class FakeConnector {
   historySilent = false;
   /** Advertises the directory browsing capability in hello (off = old connector). */
   directoryBrowse = false;
+  /** Advertises the worker diff capability in hello (off = old connector). */
+  workerDiff = false;
   /** Every directory_list request received so far. */
   readonly directoryRequests: Array<Record<string, unknown>> = [];
+  /** Every worker_diff request received so far. */
+  readonly workerDiffRequests: Array<Record<string, unknown>> = [];
   /** Every history_req the machine was asked (the full-session reads carry `format`/`since`). */
   readonly historyRequests: Array<Record<string, unknown>> = [];
   /** When set, the connector drops its connection after sending this many chunks. */
@@ -470,9 +478,13 @@ export class FakeConnector {
               readonly: true,
             }
           : { steer: true, followUp: true, interrupt: true, resume: true, history: true, images: true, structuredReport: true, readonly: true };
+    const capabilities = {
+      ...(this.directoryBrowse ? { directoryBrowse: true } : {}),
+      ...(this.workerDiff ? { workerDiff: true } : {}),
+    };
     return {
       bootId: this.bootId,
-      ...(this.directoryBrowse ? { capabilities: { directoryBrowse: true } } : {}),
+      ...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
       workers: this.workers,
       machine: { name: this.machineName, memTotalMB: 65536, memFreeMB: 31000 },
       agents: this.agents.map((kind) => ({ kind, version: "1.0.0-test", capabilities: caps(kind) })),
@@ -514,6 +526,10 @@ export class FakeConnector {
       }
       if (message.t === "directory_list") {
         this.directoryRequests.push(message);
+        continue;
+      }
+      if (message.t === "worker_diff") {
+        this.workerDiffRequests.push(message);
         continue;
       }
       if (message.t === "error") {
@@ -616,19 +632,33 @@ export class FakeConnector {
     if (stream.next >= stream.chunks.length) this.historyStream = null;
   }
 
+  /** Waits until `count` worker_diff frames have arrived and returns them in order. */
+  async waitForWorkerDiffRequests(count: number, timeoutMs = 5000): Promise<Array<Record<string, unknown>>> {
+    const startedAt = Date.now();
+    for (;;) {
+      if (this.workerDiffRequests.length >= count) return this.workerDiffRequests.slice(0, count);
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(`only ${this.workerDiffRequests.length}/${count} worker_diff requests arrived`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   /** Scripted worker behavior: ack → result → started → progress → report(+git) → settled. */
   private async playRun(cmd: Record<string, unknown>, run: FakeWorkerRun): Promise<void> {
     const args = cmd.args as Record<string, unknown>;
     const workerId = String(args.workerId);
-    const branch = run.branch ?? `otto/${String(args.threadId).replace(/[^a-zA-Z0-9._-]/g, "")}-1`;
+    const branch = run.noBranch
+      ? undefined
+      : (run.branch ?? `otto/${String(args.threadId).replace(/[^a-zA-Z0-9._-]/g, "")}-1`);
     this.send({ t: "cmd_ack", re: cmd.id, status: "accepted" });
     this.send({
       t: "cmd_result",
       re: cmd.id,
       ok: true,
-      data: { sessionId: workerId, branch, cwd: `/srv/${String(args.repoId)}` },
+      data: { sessionId: workerId, ...(branch ? { branch } : {}), cwd: `/srv/${String(args.repoId)}` },
     });
-    await this.emit("started", workerId, { sessionId: workerId, cwd: "/srv", branch });
+    await this.emit("started", workerId, { sessionId: workerId, cwd: "/srv", ...(branch ? { branch } : {}) });
     await this.emit("progress", workerId, { type: "progress", phase: "tool", tool: "edit", target: "src/a.ts", turn: 1 });
     await this.emit("report", workerId, {
       type: "report",
@@ -640,7 +670,20 @@ export class FakeConnector {
       ...(run.next ? { next: run.next } : {}),
       ...(run.leftovers ? { leftovers: run.leftovers } : {}),
       ...(run.tests ? { tests: run.tests } : {}),
-      git: { branch, base: "main", ahead: 1, dirty: 0, filesChanged: 2, insertions: 10, deletions: 2, pushed: run.pushed === true },
+      ...(branch
+        ? {
+            git: {
+              branch,
+              base: "main",
+              ahead: run.ahead ?? 1,
+              dirty: run.dirty ?? 0,
+              filesChanged: (run.ahead ?? 1) === 0 && (run.dirty ?? 0) === 0 ? 0 : 2,
+              insertions: (run.ahead ?? 1) === 0 && (run.dirty ?? 0) === 0 ? 0 : 10,
+              deletions: (run.ahead ?? 1) === 0 && (run.dirty ?? 0) === 0 ? 0 : 2,
+              pushed: run.pushed === true,
+            },
+          }
+        : {}),
     });
     if (run.settleDelayMs) await new Promise((resolve) => setTimeout(resolve, run.settleDelayMs));
     await this.emit("settled", workerId, {

@@ -264,9 +264,16 @@ export class Dispatcher {
         machineName, repoId: existing.repoId!, queued: !this.ledger.machines.get(existing.deviceId)?.online, created: false };
     }
     const attach = input.threadId ? this.ledger.threads.get(input.threadId) : null;
-    if (input.threadId && !attach) return { kind: "refused", reason: `Thread ${input.threadId} 不存在（可能已归档）` };
+    if (input.threadId && !attach) return { kind: "refused", reason: `Thread ${input.threadId} 不存在` };
     if (!attach && !input.newTitle) {
       return { kind: "refused", reason: "需要 threadId（接续）或 newTitle（新开一件事）" };
+    }
+    if (attach?.archived) {
+      this.ledger.threads.setArchived(attach.threadId, false);
+      this.ledger.timeline.add(attach.threadId, "note", "接续派发任务，Thread 已自动取消归档", {
+        provenance: input.provenance,
+        unarchived: true,
+      });
     }
 
     const repoRows = this.ledger.repos.machinesHaving(input.repoRef);
@@ -792,7 +799,10 @@ export class Dispatcher {
     // a repo-A branch name sent to repo-B's clone would only fail the start; a repo switch
     // is a fresh start, exactly what the comment always promised.
     const previous = this.ledger.workers.relaySource(thread.threadId, { deviceId, repoId });
-    const baseWorker = previous?.branch ? previous : this.ledger.workers.latestBranchOnThread(thread.threadId, { deviceId, repoId });
+    const baseWorker =
+      previous && this.ledger.workers.hasSurvivingBranch(previous)
+        ? previous
+        : this.ledger.workers.latestBranchOnThread(thread.threadId, { deviceId, repoId });
     // A brief only when the previous leg produced anything (a branch or at least one event):
     // retrying after a cancelled/never-started leg must not prefix an empty 【交接简报】.
     const brief =
@@ -808,6 +818,7 @@ export class Dispatcher {
       repoId,
       agent,
       mode,
+      hasWorktree: mode === "write" || Boolean(baseWorker),
       requestedModel: selection.model ?? null,
       modelSource: selection.modelSource ?? 'agent-default',
       parentWorker: previous?.workerId,

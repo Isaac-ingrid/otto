@@ -25,9 +25,11 @@ import {
   type InterruptWorkerOutcome,
   type SendToWorkerInput,
   type SendToWorkerOutcome,
-  type StartWorkerInput,
+  StartWorkerInput,
   type StartWorkerOutcome,
 } from "../dispatch.ts";
+import { WorkspaceError } from "../workspace.ts";
+import type { ThreadArchiveInput, ThreadArchiveResult } from "../workspace-api.ts";
 import { describeSchedule, parseAtIso, type RoutineService, type RoutineSpecInput } from "../routines.ts";
 import { parsePrUrl, type PrEvidenceMode } from "../pr-evidence.ts";
 import type { PrWatchRow } from "../pr-watch.ts";
@@ -52,6 +54,7 @@ export interface StewardExtensionContext {
    *  deterministic service — the outcomes tell the model how the message will be delivered. */
   sendToWorker(input: SendToWorkerInput): Promise<SendToWorkerOutcome>;
   interruptWorker(input: InterruptWorkerInput): Promise<InterruptWorkerOutcome>;
+  archiveThread(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   /** Verify a model-claimed provenance reference (§7.2): `user:<msgId>` must be a message
    *  this deployment actually received; `routine:`/`followup:` ids must exist (issue #20). */
   checkProvenanceRef(ref: string): Promise<boolean>;
@@ -177,7 +180,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   let prAlternativeAttemptedOperationId: string | undefined;
   const prAlternatives = new Set(["start_worker", "send_to_worker", "interrupt_worker", "set_followup", "create_routine", "suggest_routine"]);
   const externalActionTools = new Set([
-    "start_worker", "send_to_worker", "interrupt_worker", "update_thread", "answer_worker",
+    "start_worker", "send_to_worker", "interrupt_worker", "update_thread", "archive_thread", "answer_worker",
     "notes_propose", "notes_commit", "notes_confirm", "notes_pin", "notes_remove",
     "create_routine", "suggest_routine", "set_followup", "cancel_schedule", "pause_schedule",
     "create_pr_watch", "cancel_pr_watch",
@@ -330,6 +333,73 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
             ? `。⚠️ 下一次更新是第 ${status.updates + 1} 版＝整十版：必须【从头重写】——按 get_thread 的时间线与汇报重建，不要在旧摘要上缝补（防漂移）。`
             : ""),
       );
+    },
+  });
+
+  const archiveThread = defineTool({
+    name: "archive_thread",
+    description:
+      "归档或取消归档一个 Thread（archived=true 归档并按策略清理工作树；archived=false 取消归档）。" +
+      "仅在用户明确要求归档/取消归档时调用（basis=user_explicit）。默认 cleanupPolicy='auto'（已推送或零改动工作树会自动回收；若存在未提交/未推送改动会安全拦截，届时用 ask_user 让用户选 keep 或 force）。" +
+      "cleanupPolicy='force' 会丢弃未合并变更，必须用户在当轮原话中明确授权强制清理/丢弃。",
+    parameters: Type.Object({
+      threadId: Type.String({ description: "如 t_8f2…" }),
+      archived: Type.Boolean({ description: "true=归档；false=取消归档" }),
+      cleanupPolicy: Type.Optional(
+        Type.Union([Type.Literal("auto"), Type.Literal("keep"), Type.Literal("force")], {
+          description: "默认 auto；keep=仅归档保留工作树；force=丢弃未合并变更并强制清理（须用户当轮明示）",
+        }),
+      ),
+      basis: Type.Literal("user_explicit"),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      const run = await ctx.currentRun();
+      if (!run || run.kind !== "user" || !run.provenance.startsWith("user:") || !(await ctx.checkProvenanceRef(run.provenance))) {
+        return err("refused: 归档/取消归档只能由真实用户消息发起（basis=user_explicit），事件/例行运行不可自动归档。");
+      }
+      const policy = args.cleanupPolicy ?? "auto";
+      if (args.archived && policy === "force") {
+        const ownerText = (await ctx.ownerMessageText(run.provenance)) ?? "";
+        const negated = /(?:不要|不能|别|勿|不想)\s*(?:强制|丢弃|放弃|删掉|删除)/u.test(ownerText);
+        const explicitForce = !negated && /(?:强制|丢弃|放弃|删掉|删除|不保留|\bforce\b|\bdiscard\b)/iu.test(ownerText);
+        if (!explicitForce) {
+          return err(
+            "refused: cleanupPolicy=force 会永久丢弃未合并工作树变更，必须用户在当轮原话中明确要求「强制清理/丢弃变更」才可执行；请改用 ask_user 让用户选择保留工作树（keep）或强制清理（force）。",
+          );
+        }
+      }
+      try {
+        const outcome = await ctx.archiveThread({
+          id: `tool-archive-${api.taskId}`,
+          threadId: args.threadId,
+          archived: args.archived,
+          cleanupPolicy: policy,
+        });
+        if (!outcome.archived) {
+          return ok(`已取消归档 ${outcome.threadId}。后续若继续派发任务，系统会自动开启新棒会话并附交接简报。`);
+        }
+        const parts: string[] = [];
+        if (outcome.cleanedWorkers.length > 0) parts.push(`已向在线机器下发清理 ${outcome.cleanedWorkers.length} 个工作树`);
+        if (outcome.queuedWorkers.length > 0) parts.push(`${outcome.queuedWorkers.length} 个工作树因机器离线已排队待重连后自动清理`);
+        if (outcome.keptWorkers.length > 0) parts.push(`按要求保留 ${outcome.keptWorkers.length} 个工作树`);
+        return ok(`已归档 ${outcome.threadId}${parts.length > 0 ? `（${parts.join("；")}）` : ""}。`);
+      } catch (error) {
+        if (error instanceof WorkspaceError) {
+          if (error.code === "thread_not_found") return err(`Thread ${args.threadId} 不存在。`);
+          if (error.code === "thread_active") {
+            return err("refused: 该 Thread 仍有正在运行或排队的 worker，无法归档。请等运行结束或按用户指示先中断。");
+          }
+          if (error.code === "worktree_unmerged") {
+            const list = Array.isArray(error.details?.unmergedWorkers) ? error.details.unmergedWorkers : [];
+            return err(
+              `refused: 该 Thread 存在未推送或未提交的工作树变更（${JSON.stringify(list)}），安全起见未归档。请用 ask_user 让用户选择：1) 仅归档但保留工作树（cleanupPolicy='keep'）；2) 丢弃未合并变更并强制清理（cleanupPolicy='force'）；3) 先推送/创建 PR 再归档。`,
+            );
+          }
+          return err(`refused: ${error.code}`);
+        }
+        throw error;
+      }
     },
   });
 
@@ -1497,7 +1567,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     name: "otto-steward",
     tools: [
       ...(webSearch ? [webSearch] : []),
-      situation, findThreads, getThread, updateThread, startWorker, sendToWorker, interruptWorker,
+      situation, findThreads, getThread, updateThread, archiveThread, startWorker, sendToWorker, interruptWorker,
       notifyUser, askUser, answerWorker, noAction,
       createRoutine, suggestRoutine, setFollowup, listSchedules, cancelSchedule, pauseSchedule,
       createPrWatch, listPrWatches, cancelPrWatch,

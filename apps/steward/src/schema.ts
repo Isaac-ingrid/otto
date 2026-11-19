@@ -1170,4 +1170,14 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX IF NOT EXISTS sh_proposal_pending ON sh_proposal (status, expiresAt)`;
     },
   },
+  {
+    // Worktree diff & Thread archive cleanup lifecycle: tracks whether each worker's isolated
+    // Git worktree is active, cleaning, cleaned, cleanup_blocked, or none.
+    id: "042_worktree_lifecycle",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN worktreeStatus TEXT NOT NULL DEFAULT 'active'`;
+      });
+    },
+  },
 ];

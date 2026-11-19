@@ -6,7 +6,18 @@
 import { isThinkingLevel, parseThinkingDeclaration, type ComposerModelInput, type ModelSaveResult, type ModelSwitchInput } from "./llm/models.ts";
 import type { ConnectionTestResult } from "./llm/connection-test.ts";
 import type { BudgetState } from "./budget.ts";
-import { AgentModelIdSchema, DirectoryBrowseArgsSchema, RegisterRepoArgsSchema, type DirectoryBrowseArgs, type DirectoryListing, type RegisterRepoResult } from "@isaac2ingrid/protocol";
+import {
+  AgentModelIdSchema,
+  DirectoryBrowseArgsSchema,
+  isSafeRelativeGitPath,
+  RegisterRepoArgsSchema,
+  WorkerDiffArgsSchema,
+  type DirectoryBrowseArgs,
+  type DirectoryListing,
+  type RegisterRepoResult,
+  type WorkerDiffArgs,
+  type WorkerDiffPayload,
+} from "@isaac2ingrid/protocol";
 import type { Ledger } from "./ledger.ts";
 import {
   WorkspaceError,
@@ -28,6 +39,26 @@ export type MachineDirectoryResult =
   | { state: "pending"; id: string }
   | { state: "done"; id: string; repo: RegisterRepoResult["repo"] }
   | { state: "failed"; id: string; code: string };
+
+export type WorkerDiffRequestInput = WorkerDiffArgs;
+
+export type ThreadCleanupPolicy = "auto" | "force" | "keep";
+
+export interface ThreadArchiveInput {
+  id: string;
+  threadId: string;
+  archived: boolean;
+  cleanupPolicy?: ThreadCleanupPolicy;
+}
+
+export interface ThreadArchiveResult {
+  id: string;
+  threadId: string;
+  archived: boolean;
+  cleanedWorkers: string[];
+  queuedWorkers: string[];
+  keptWorkers: string[];
+}
 
 export interface WorkspaceApiDeps {
   ledger: Ledger;
@@ -58,6 +89,8 @@ export interface WorkspaceApiDeps {
   revoke?(deviceId: string): void;
   addDirectory?(input: MachineDirectoryInput): Promise<MachineDirectoryResult>;
   browseDirectory?(input: MachineDirectoryBrowseInput, signal: AbortSignal): Promise<DirectoryListing>;
+  diffWorker?(input: WorkerDiffRequestInput, signal: AbortSignal): Promise<WorkerDiffPayload>;
+  archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
    *  only webauthn.ts's verifyRegistrationResponse/verifyAssertionResponse ever assert their
    *  shape — this layer validates only that the JSON body is an object with the right keys
@@ -198,8 +231,15 @@ function parseModelSwitch(body: Record<string, unknown>): ModelSwitchInput {
 export async function handleWorkspaceApi(request: Request, url: URL, session: ApiSession, deps: WorkspaceApiDeps): Promise<Response> {
   if (url.pathname === "/app/api/workspace") {
     if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    const includeArchived = url.searchParams.get("includeArchived") === "1";
     return json({
-      ...workspaceSnapshot({ ledger: deps.ledger, budget: deps.budget(), devices: deps.devices(), now: deps.now() }),
+      ...workspaceSnapshot({
+        ledger: deps.ledger,
+        budget: deps.budget(),
+        devices: deps.devices(),
+        now: deps.now(),
+        includeArchived,
+      }),
       csrf: session.csrf,
     });
   }
@@ -207,7 +247,13 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
   if (request.method !== "POST") return json({ error: "not_found" }, 404);
 
   const origin = request.headers.get("origin");
-  const requireOrigin = deps.requireOrigin || url.pathname === '/app/api/settings/agent-model/refresh' || url.pathname.startsWith("/app/api/machines/directories") || url.pathname.startsWith("/app/api/push/");
+  const requireOrigin =
+    deps.requireOrigin ||
+    url.pathname === "/app/api/settings/agent-model/refresh" ||
+    url.pathname.startsWith("/app/api/machines/directories") ||
+    url.pathname.startsWith("/app/api/workers/") ||
+    /^\/app\/api\/threads\/[\w-]{1,128}\/archive$/.test(url.pathname) ||
+    url.pathname.startsWith("/app/api/push/");
   if (!sameSecret(request.headers.get("x-csrf-token") ?? "", session.csrf) || (requireOrigin ? origin !== url.origin : origin !== null && origin !== url.origin)) {
     return json({ error: "forbidden" }, 403);
   }
@@ -337,6 +383,42 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       const cookie = ["otto_session=", "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0", ...(secure ? ["Secure"] : [])].join("; ");
       return json({ ok: true }, 200, { "set-cookie": cookie });
     }
+    const workerDiffMatch = /^\/app\/api\/workers\/([\w.-]{1,128})\/diff$/.exec(url.pathname);
+    if (workerDiffMatch && deps.diffWorker) {
+      const body = await readJson(request);
+      if (
+        body.filePath !== undefined &&
+        (typeof body.filePath !== "string" || !isSafeRelativeGitPath(body.filePath))
+      ) {
+        throw new WorkspaceError("invalid_path", 400);
+      }
+      const parsed = WorkerDiffArgsSchema.safeParse({ ...body, workerId: workerDiffMatch[1]! });
+      if (!parsed.success) throw new WorkspaceError("bad_request", 400);
+      return json(await deps.diffWorker(parsed.data, request.signal));
+    }
+    const archiveMatch = /^\/app\/api\/threads\/([\w-]{1,128})\/archive$/.exec(url.pathname);
+    if (archiveMatch && deps.archiveThread) {
+      const { id, archived, cleanupPolicy } = await readJson(request);
+      if (typeof id !== "string" || !REQUEST_ID.test(id) || typeof archived !== "boolean") {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      if (
+        cleanupPolicy !== undefined &&
+        cleanupPolicy !== "auto" &&
+        cleanupPolicy !== "force" &&
+        cleanupPolicy !== "keep"
+      ) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      return json(
+        await deps.archiveThread({
+          id,
+          threadId: archiveMatch[1]!,
+          archived,
+          ...(cleanupPolicy !== undefined ? { cleanupPolicy } : {}),
+        }),
+      );
+    }
     const read = /^\/app\/api\/threads\/([\w-]{1,128})\/read$/.exec(url.pathname);
     if (read) {
       if (!deps.ledger.threads.get(read[1]!)) return json({ error: "thread_not_found" }, 404);
@@ -345,7 +427,9 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     }
     return json({ error: "not_found" }, 404);
   } catch (error) {
-    if (error instanceof WorkspaceError) return json({ error: error.code }, error.status);
+    if (error instanceof WorkspaceError) {
+      return json({ error: error.code, ...(error.details ?? {}) }, error.status);
+    }
     // The mutation did not complete; the client retries with the same request id.
     deps.audit("web_api_failed", `${url.pathname} ${error instanceof Error ? error.message : String(error)}`);
     return json({ error: "retry" }, 503);
