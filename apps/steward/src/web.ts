@@ -282,6 +282,8 @@ export interface WebDeps {
     | "checkpointWorker"
     | "distillWorker"
     | "repoSkillOp"
+    | "stopWorker"
+    | "stopThread"
     | "archiveThread"
     | "controlPlane"
     | "webauthnRegisterOptions"

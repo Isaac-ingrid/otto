@@ -185,7 +185,7 @@ export interface InterruptWorkerInput {
 }
 
 export type InterruptWorkerOutcome =
-  | { kind: "interrupted"; threadId: string; machineOffline: boolean }
+  | { kind: "interrupted"; threadId: string; machineOffline: boolean; withdrawn?: boolean }
   | { kind: "refused"; reason: string };
 
 export interface DispatcherDeps {
@@ -475,8 +475,37 @@ export class Dispatcher {
     if (worker.state === "broken") {
       return { kind: "refused", reason: `worker ${input.workerId} 已损坏（需要人工决定），没有运行中的任务可停。` };
     }
+    if (input.then === undefined && worker.state === "idle") {
+      return { kind: "refused", reason: `worker ${input.workerId} 已运行结束，没有运行中的任务可停。` };
+    }
     if (this.#deps.commandExists(input.cmdId)) {
       return { kind: "interrupted", threadId: worker.threadId, machineOffline: offline };
+    }
+    // Pre-flight withdrawal (Three-Way Stop §4.1): if the start/resume command has not left
+    // the DO yet (still `queued` in outbox, or an un-enqueued sibling proposal), withdraw it
+    // atomically instead of queueing a trailing `interrupt` behind an undelivered start.
+    if (input.then === undefined && (worker.state === "starting" || worker.state === "queued")) {
+      const cancelledOutbox = worker.cmdId !== null && this.#deps.cancelQueuedCommand(worker.cmdId);
+      if (cancelledOutbox) {
+        const offer = this.ledger.offlineDispatches.get(worker.cmdId!);
+        if (offer && (offer.status === "offered" || offer.status === "waiting")) {
+          this.ledger.offlineDispatches.transition(worker.cmdId!, offer.status, "cancelled");
+          this.ledger.questions.close(`offline:${worker.cmdId!}`, "已撤回派发");
+        }
+        if (worker.sessionId === null) {
+          this.ledger.workers.settleWithdrawnStart(worker.workerId);
+          this.ledger.proposals.markWithdrawnBySpawnedWorker(worker.workerId);
+        } else {
+          this.ledger.workers.markResumeCancelled(worker.workerId, worker.cmdId!);
+        }
+        return { kind: "interrupted", threadId: worker.threadId, machineOffline: offline, withdrawn: true };
+      }
+      if (worker.sessionId === null && (worker.workerRelation ?? "relay") === "sibling") {
+        if (this.ledger.proposals.markWithdrawnBySpawnedWorker(worker.workerId)) {
+          this.ledger.workers.settleWithdrawnStart(worker.workerId);
+          return { kind: "interrupted", threadId: worker.threadId, machineOffline: offline, withdrawn: true };
+        }
+      }
     }
     const { cmdId } = await this.#deps.enqueueCommand(
       worker.deviceId,

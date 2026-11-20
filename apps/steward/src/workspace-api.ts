@@ -72,6 +72,50 @@ export interface ThreadArchiveResult {
   cleanedWorkers: string[];
   queuedWorkers: string[];
   keptWorkers: string[];
+  cancelledFollowups?: string[];
+  cancelledPrWatches?: string[];
+  expiredProposals?: string[];
+}
+
+export type WorkerStopOutcome =
+  | "withdrawn"
+  | "interrupt_sent"
+  | "interrupt_queued_offline"
+  | "already_stopped"
+  | "unreachable";
+
+export interface WorkerStopInput {
+  id: string;
+  workerId: string;
+}
+
+export interface WorkerStopResult {
+  ok: true;
+  id: string;
+  workerId: string;
+  threadId: string;
+  outcome: WorkerStopOutcome;
+}
+
+export interface ThreadStopInput {
+  id: string;
+  threadId: string;
+  stopWorkers?: boolean;
+  cancelFollowups?: boolean;
+  cancelPrWatches?: boolean;
+  expireProposals?: boolean;
+  pauseRoutines?: boolean;
+}
+
+export interface ThreadStopResult {
+  ok: true;
+  id: string;
+  threadId: string;
+  workers: Array<{ workerId: string; outcome: WorkerStopOutcome }>;
+  cancelledFollowups: string[];
+  cancelledPrWatches: string[];
+  expiredProposals: string[];
+  pausedRoutines: string[];
 }
 
 export interface WorkspaceApiDeps {
@@ -107,6 +151,8 @@ export interface WorkspaceApiDeps {
   checkpointWorker?(workerId: string, signal: AbortSignal): Promise<WorkerCheckpointPayload>;
   distillWorker?(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult>;
   repoSkillOp?(input: { deviceId: string; op: RepoSkillOpArgs }, signal: AbortSignal): Promise<RepoSkillData>;
+  stopWorker?(input: WorkerStopInput): Promise<WorkerStopResult>;
+  stopThread?(input: ThreadStopInput): Promise<ThreadStopResult>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   controlPlane?: Omit<ControlPlaneDeps, "ledger" | "budget" | "audit">;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
@@ -297,7 +343,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     url.pathname.startsWith("/app/api/machines/directories") ||
     url.pathname.startsWith("/app/api/repos/skills/") ||
     url.pathname.startsWith("/app/api/workers/") ||
-    /^\/app\/api\/threads\/[\w-]{1,128}\/archive$/.test(url.pathname) ||
+    /^\/app\/api\/threads\/[\w-]{1,128}\/(?:archive|stop)$/.test(url.pathname) ||
     url.pathname.startsWith("/app/api/push/");
   if (!sameSecret(request.headers.get("x-csrf-token") ?? "", session.csrf) || (requireOrigin ? origin !== url.origin : origin !== null && origin !== url.origin)) {
     return json({ error: "forbidden" }, 403);
@@ -461,6 +507,38 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
           threadId: archiveMatch[1]!,
           archived,
           ...(cleanupPolicy !== undefined ? { cleanupPolicy } : {}),
+        }),
+      );
+    }
+    const workerStopMatch = /^\/app\/api\/workers\/([\w.-]{1,128})\/stop$/.exec(url.pathname);
+    if (workerStopMatch && deps.stopWorker) {
+      const { id } = await readJson(request);
+      if (typeof id !== "string" || !REQUEST_ID.test(id)) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      return json(await deps.stopWorker({ id, workerId: workerStopMatch[1]! }));
+    }
+    const threadStopMatch = /^\/app\/api\/threads\/([\w-]{1,128})\/stop$/.exec(url.pathname);
+    if (threadStopMatch && deps.stopThread) {
+      const body = await readJson(request);
+      const { id, stopWorkers, cancelFollowups, cancelPrWatches, expireProposals, pauseRoutines } = body;
+      if (typeof id !== "string" || !REQUEST_ID.test(id)) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      for (const flag of [stopWorkers, cancelFollowups, cancelPrWatches, expireProposals, pauseRoutines]) {
+        if (flag !== undefined && typeof flag !== "boolean") {
+          throw new WorkspaceError("bad_request", 400);
+        }
+      }
+      return json(
+        await deps.stopThread({
+          id,
+          threadId: threadStopMatch[1]!,
+          ...(typeof stopWorkers === "boolean" ? { stopWorkers } : {}),
+          ...(typeof cancelFollowups === "boolean" ? { cancelFollowups } : {}),
+          ...(typeof cancelPrWatches === "boolean" ? { cancelPrWatches } : {}),
+          ...(typeof expireProposals === "boolean" ? { expireProposals } : {}),
+          ...(typeof pauseRoutines === "boolean" ? { pauseRoutines } : {}),
         }),
       );
     }

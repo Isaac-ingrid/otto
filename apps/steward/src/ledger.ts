@@ -1739,7 +1739,7 @@ export function createLedger(deps: LedgerDeps) {
     settleWithdrawnStart(workerId: string): boolean {
       const worker = workers.get(workerId);
       if (!worker || worker.state !== "starting") return false;
-      sql`UPDATE sh_worker SET state = 'idle', lastOutcome = 'cancelled', updatedAt = ${now()} WHERE workerId = ${workerId}`;
+      sql`UPDATE sh_worker SET state = 'idle', lastOutcome = 'cancelled', worktreeStatus = 'none', updatedAt = ${now()} WHERE workerId = ${workerId}`;
       timeline.add(worker.threadId, "note", "派发命令已撤回，worker 未启动", { workerId, withdrawn: true });
       recomputeThreadState(worker.threadId);
       return true;
@@ -1852,6 +1852,37 @@ export function createLedger(deps: LedgerDeps) {
     markDispatched(id: string, cmdId: string): boolean {
       sql`UPDATE sh_proposal SET status = 'dispatched', cmdId = ${cmdId} WHERE id = ${id} AND status IN ('auto_approved', 'approved')`;
       return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    },
+    /** Withdraws an unstarted sibling proposal when its spawned worker is cancelled pre-flight. */
+    markWithdrawnBySpawnedWorker(spawnedWorkerId: string, actor = 'user:worker_stop'): boolean {
+      sql`
+        UPDATE sh_proposal
+        SET status = 'declined', decidedBy = ${actor}, decidedAt = ${now()}
+        WHERE spawnedWorkerId = ${spawnedWorkerId} AND status IN ('auto_approved', 'approved', 'dispatched')
+      `;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    },
+    /** Cancels all still-open cross-machine probe confirmation cards on a Thread. */
+    cancelOpenForThread(threadId: string, reason: string, actor = 'user:thread_stop'): string[] {
+      return tx(() => {
+        const tsNow = now();
+        const open = sql<Record<string, unknown>>`
+          SELECT * FROM sh_proposal
+          WHERE threadId = ${threadId} AND status = 'pending_owner' AND (expiresAt IS NULL OR expiresAt > ${tsNow})
+          ORDER BY createdAt, id
+        `.map(viewProposal);
+        if (open.length === 0) return [];
+        for (const p of open) {
+          sql`
+            UPDATE sh_proposal
+            SET status = 'declined', decidedBy = ${actor}, decidedAt = ${tsNow}
+            WHERE id = ${p.id} AND status = 'pending_owner'
+          `;
+          questions.close(p.id, reason);
+        }
+        recomputeThreadState(threadId);
+        return open.map((p) => p.id);
+      });
     },
     expireDue(nowMs: number = now()): number {
       return tx(() => {
@@ -3663,6 +3694,30 @@ export function createLedger(deps: LedgerDeps) {
             report: reports.latestForWorker(worker.workerId),
             consent: prConsent.latestForWorker(worker.workerId),
           })),
+          plans: {
+            followups: followups
+              .listByThread(thread.threadId)
+              .filter((f) => f.status === 'open')
+              .sort((a, b) => a.dueAt - b.dueAt)
+              .map((f) => ({ id: f.followupId, dueAt: f.dueAt, reason: f.reason })),
+            prWatches: sql<{ id: string; url: string; nextCheckAt: number }>`
+              SELECT id, url, nextCheckAt FROM sh_pr_watch
+              WHERE threadId = ${thread.threadId} AND status = 'active'
+              ORDER BY nextCheckAt, id
+            `,
+            routines: sql<Record<string, unknown>>`
+              SELECT * FROM sh_routine
+              WHERE threadId = ${thread.threadId} AND status = 'active'
+              ORDER BY createdAt, routineId
+            `.map(viewRoutine).map((r) => ({
+              id: r.routineId,
+              kind: r.kind,
+              scheduleKind: r.scheduleKind,
+              cron: r.cron,
+              onceAt: r.onceAt,
+              instruction: r.instruction,
+            })),
+          },
           timeline: timeline.recent(thread.threadId, WORKSPACE_TIMELINE),
         })),
         machines: machines.list().map((machine) => ({ ...machine, running: machines.runningCount(machine.deviceId) })),

@@ -141,6 +141,11 @@ import {
   type ThreadArchiveInput,
   type ThreadArchiveResult,
   type ThreadCleanupPolicy,
+  type ThreadStopInput,
+  type ThreadStopResult,
+  type WorkerStopInput,
+  type WorkerStopOutcome,
+  type WorkerStopResult,
 } from "./workspace-api.ts";
 import { WorkspaceStream } from "./workspace-stream.ts";
 import { WebApp, linkTargetForThread, loginLinkPolicyFromEnv, parseSessionCookie, verifyLinkToken } from "./web.ts";
@@ -846,6 +851,8 @@ export class Steward extends Agent<Env> {
         checkpointWorker: (workerId, signal) => this.connectorProto.checkpointWorker(workerId, signal),
         distillWorker: (input, signal) => this.distillWorker(input, signal),
         repoSkillOp: ({ deviceId, op }, signal) => this.connectorProto.repoSkillOp(deviceId, op, signal),
+        stopWorker: (input) => this.stopWorkerByOwner(input),
+        stopThread: (input) => this.stopThreadByOwner(input),
         archiveThread: (input) => this.archiveThread(input),
         controlPlane: {
           tx: (fn) => this.ctx.storage.transactionSync(fn),
@@ -3480,17 +3487,46 @@ export class Steward extends Agent<Env> {
       else cleanedWorkers.push(item.worker.workerId);
     }
 
+    const cancelledFollowups: string[] = [];
+    for (const f of this.ledger.followups.listByThread(thread.threadId)) {
+      if (f.status !== "open") continue;
+      const cancelled = await this.routineService.cancel(f.followupId);
+      if (cancelled.ok) cancelledFollowups.push(f.followupId);
+    }
+    const cancelledPrWatches: string[] = [];
+    for (const w of this.prWatches.list()) {
+      if (w.threadId !== thread.threadId || w.status !== "active") continue;
+      if (this.prWatches.cancel(w.id)) cancelledPrWatches.push(w.id);
+    }
+    const expiredProposals = this.ledger.proposals.cancelOpenForThread(
+      thread.threadId,
+      "Thread 已归档",
+      "user:thread_archive",
+    );
+
     this.ledger.questions.closeOpen(thread.threadId, "Thread 已归档");
     this.ledger.threads.setArchived(thread.threadId, true);
     const notes: string[] = [];
     if (cleanedWorkers.length > 0) notes.push(`下发清理 ${cleanedWorkers.length} 个工作树`);
     if (queuedWorkers.length > 0) notes.push(`离线排队清理 ${queuedWorkers.length} 个工作树`);
     if (keptWorkers.length > 0) notes.push(`保留 ${keptWorkers.length} 个工作树`);
+    if (cancelledFollowups.length > 0) notes.push(`取消 ${cancelledFollowups.length} 条挂起跟进`);
+    if (cancelledPrWatches.length > 0) notes.push(`停止 ${cancelledPrWatches.length} 项 PR 盯盘`);
+    if (expiredProposals.length > 0) notes.push(`关闭 ${expiredProposals.length} 项待确认探针`);
     this.ledger.timeline.add(
       thread.threadId,
       "note",
       `Thread 已归档${notes.length > 0 ? `（${notes.join("，")}）` : ""}`,
-      { archived: true, policy, cleanedWorkers, queuedWorkers, keptWorkers },
+      {
+        archived: true,
+        policy,
+        cleanedWorkers,
+        queuedWorkers,
+        keptWorkers,
+        cancelledFollowups,
+        cancelledPrWatches,
+        expiredProposals,
+      },
     );
 
     const res: ThreadArchiveResult = {
@@ -3500,12 +3536,151 @@ export class Steward extends Agent<Env> {
       cleanedWorkers,
       queuedWorkers,
       keptWorkers,
+      ...(cancelledFollowups.length > 0 ? { cancelledFollowups } : {}),
+      ...(cancelledPrWatches.length > 0 ? { cancelledPrWatches } : {}),
+      ...(expiredProposals.length > 0 ? { expiredProposals } : {}),
     };
     this.ctx.storage.transactionSync(() => {
       this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
       this.ledger.webRequests.complete(key);
     });
     this.logChannel("thread_archived", `${thread.threadId} policy=${policy}`);
+    this.notifyWorkspaces();
+    return res;
+  }
+
+  private async stopWorkerCore(worker: WorkerRow, cmdId: string): Promise<WorkerStopOutcome> {
+    if (worker.state === "idle" || worker.state === "broken") return "already_stopped";
+    if (worker.state === "lost") return "unreachable";
+    const outcome = await this.dispatcher.interruptWorker({
+      workerId: worker.workerId,
+      provenance: "web_direct",
+      cmdId,
+    });
+    if (outcome.kind === "refused") return "already_stopped";
+    if (outcome.withdrawn) return "withdrawn";
+    return outcome.machineOffline ? "interrupt_queued_offline" : "interrupt_sent";
+  }
+
+  async stopWorkerByOwner(input: WorkerStopInput): Promise<WorkerStopResult> {
+    const key = `wstop:${input.id}`;
+    const reqSig = JSON.stringify({ workerId: input.workerId });
+    const previous = this.ledger.webRequests.get(key);
+    if (previous) {
+      const parsed = JSON.parse(previous.payload) as { req?: string; res?: WorkerStopResult };
+      if (parsed.req !== reqSig) throw new WorkspaceError("id_conflict", 409);
+      if (previous.status === "done" && parsed.res) return parsed.res;
+    }
+    const worker = this.ledger.workers.get(input.workerId);
+    if (!worker) throw new WorkspaceError("worker_not_found", 404);
+    const outcome = await this.stopWorkerCore(worker, key);
+    const res: WorkerStopResult = {
+      ok: true,
+      id: input.id,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      outcome,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+      this.ledger.webRequests.complete(key);
+    });
+    this.logChannel("web_worker_stopped", `${worker.workerId}:${outcome}`);
+    this.notifyWorkspaces();
+    return res;
+  }
+
+  async stopThreadByOwner(input: ThreadStopInput): Promise<ThreadStopResult> {
+    const key = `tstop:${input.id}`;
+    const reqSig = JSON.stringify({
+      threadId: input.threadId,
+      stopWorkers: Boolean(input.stopWorkers),
+      cancelFollowups: Boolean(input.cancelFollowups),
+      cancelPrWatches: Boolean(input.cancelPrWatches),
+      expireProposals: Boolean(input.expireProposals),
+      pauseRoutines: Boolean(input.pauseRoutines),
+    });
+    const previous = this.ledger.webRequests.get(key);
+    if (previous) {
+      const parsed = JSON.parse(previous.payload) as { req?: string; res?: ThreadStopResult };
+      if (parsed.req !== reqSig) throw new WorkspaceError("id_conflict", 409);
+      if (previous.status === "done" && parsed.res) return parsed.res;
+    }
+    const thread = this.ledger.threads.get(input.threadId);
+    if (!thread) throw new WorkspaceError("thread_not_found", 404);
+
+    const workers: Array<{ workerId: string; outcome: WorkerStopOutcome }> = [];
+    if (input.stopWorkers) {
+      for (const w of this.ledger.workers.listByThread(thread.threadId)) {
+        if (!(ACTIVE_WORKER_STATES as readonly string[]).includes(w.state)) continue;
+        const outcome = await this.stopWorkerCore(w, `${key}:${w.workerId}`);
+        workers.push({ workerId: w.workerId, outcome });
+      }
+    }
+
+    const cancelledFollowups: string[] = [];
+    if (input.cancelFollowups) {
+      for (const f of this.ledger.followups.listByThread(thread.threadId)) {
+        if (f.status !== "open") continue;
+        const cancelled = await this.routineService.cancel(f.followupId);
+        if (cancelled.ok) cancelledFollowups.push(f.followupId);
+      }
+    }
+
+    const cancelledPrWatches: string[] = [];
+    if (input.cancelPrWatches) {
+      for (const w of this.prWatches.list()) {
+        if (w.threadId !== thread.threadId || w.status !== "active") continue;
+        if (this.prWatches.cancel(w.id)) cancelledPrWatches.push(w.id);
+      }
+    }
+
+    const expiredProposals = input.expireProposals
+      ? this.ledger.proposals.cancelOpenForThread(thread.threadId, "已手动取消挂起探针确认", "user:thread_stop")
+      : [];
+
+    const pausedRoutines: string[] = [];
+    if (input.pauseRoutines) {
+      for (const r of this.ledger.routines.list()) {
+        if (r.threadId !== thread.threadId || r.status !== "active") continue;
+        const paused = await this.routineService.pause(r.routineId, true);
+        if (paused.ok) pausedRoutines.push(r.routineId);
+      }
+    }
+
+    const planNotes: string[] = [];
+    if (cancelledFollowups.length > 0) planNotes.push(`取消 ${cancelledFollowups.length} 条待触发跟进`);
+    if (cancelledPrWatches.length > 0) planNotes.push(`停止 ${cancelledPrWatches.length} 项 PR 盯盘`);
+    if (expiredProposals.length > 0) planNotes.push(`关闭 ${expiredProposals.length} 项待确认探针`);
+    if (pausedRoutines.length > 0) planNotes.push(`暂停 ${pausedRoutines.length} 项关联例行任务`);
+    if (planNotes.length > 0) {
+      this.ledger.timeline.add(thread.threadId, "note", `已手动收口事项计划：${planNotes.join("，")}`, {
+        cancelledFollowups,
+        cancelledPrWatches,
+        expiredProposals,
+        pausedRoutines,
+      });
+    }
+
+    const res: ThreadStopResult = {
+      ok: true,
+      id: input.id,
+      threadId: thread.threadId,
+      workers,
+      cancelledFollowups,
+      cancelledPrWatches,
+      expiredProposals,
+      pausedRoutines,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+      this.ledger.webRequests.complete(key);
+    });
+    this.logChannel(
+      "web_thread_stopped",
+      `${thread.threadId} workers=${workers.length} followups=${cancelledFollowups.length} watches=${cancelledPrWatches.length} routines=${pausedRoutines.length}`,
+    );
+    this.notifyWorkspaces();
     return res;
   }
 
@@ -3514,7 +3689,15 @@ export class Steward extends Agent<Env> {
    *  still open if it never landed, and the owner can press again with a fresh request id. */
   private async recoverWorkspaceInputs(): Promise<void> {
     for (const row of this.ledger.webRequests.pending()) {
-      if (row.id.startsWith("action:") || row.id.startsWith("stop:") || row.id.startsWith("archive:")) continue;
+      if (
+        row.id.startsWith("action:") ||
+        row.id.startsWith("stop:") ||
+        row.id.startsWith("wstop:") ||
+        row.id.startsWith("tstop:") ||
+        row.id.startsWith("archive:")
+      ) {
+        continue;
+      }
       if (row.id.startsWith("api:")) {
         const msgId = row.id.slice("api:".length);
         const parsed = JSON.parse(row.payload) as { text: string; replyTo?: string };

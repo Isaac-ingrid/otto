@@ -452,6 +452,7 @@ export function workspaceSnapshot(input: {
           launchObservedModel: worker.launchObservedModel ?? null,
           lastObservedModel: worker.lastObservedModel ?? null,
           mode: worker.mode,
+          workerRelation: worker.workerRelation ?? 'relay',
           state: worker.state,
           worktreeStatus: worker.worktreeStatus ?? 'active',
           unreachable: worker.unreachable === true,
@@ -479,6 +480,7 @@ export function workspaceSnapshot(input: {
           pr: worker.consent ? { decision: worker.consent.decision, url: worker.consent.url, failure: worker.consent.failure } : null,
         };
       }),
+      plans: thread.plans,
       timeline: thread.timeline.map((entry) => ({ id: entry.id, at: entry.ts, kind: entry.kind, text: entry.text })),
     })),
     machines: devices.map((device) => {
