@@ -3,7 +3,7 @@
 import type { BudgetState } from "./budget.ts";
 import type { Ledger } from "./ledger.ts";
 import { isNoteKind, type NoteKind, type NoteLayer, type NoteRow, type NotesUsageSummary } from "./notes.ts";
-import type { PrWatchRow } from "./pr-watch.ts";
+import type { PrWatchFailureBrief, PrWatchRow } from "./pr-watch.ts";
 import { WorkspaceError } from "./workspace.ts";
 
 const REQUEST_ID = /^[\w-]{8,128}$/;
@@ -30,6 +30,7 @@ export interface ControlPlaneDeps {
   pauseRoutine(routineId: string, paused: boolean): Promise<{ ok: true; what: string } | { ok: false; reason: string }>;
   cancelSchedule(scheduleId: string): Promise<{ ok: true; what: string } | { ok: false; reason: string }>;
   listPrWatches(): PrWatchRow[];
+  summarizePrWatchFailure?(watch: PrWatchRow): PrWatchFailureBrief;
   cancelPrWatch(watchId: string): boolean;
   onChanged?(): void;
   audit(reason: string, detail: string): void;
@@ -327,6 +328,7 @@ export async function readSchedulesControlPlane(deps: ControlPlaneDeps) {
   const prWatches = deps.listPrWatches().map((w) => ({
     ...w,
     threadTitle: threadTitle(w.threadId),
+    ...(deps.summarizePrWatchFailure ? deps.summarizePrWatchFailure(w) : {}),
   }));
 
   const budget = deps.budget();

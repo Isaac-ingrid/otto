@@ -48,6 +48,7 @@ const PROBE_PATHS = [
   "/app/api/workers/w_probe/distill",
   "/app/api/workers/w_probe/stop",
   "/app/api/threads/t_probe/stop",
+  "/app/api/pr-watches/watch_probe/diagnosis",
   "/app/unknown", // unknown app pages are not a login-gated route index
   "/setup", // removed with the Feishu channel (ADR-0003) — stays a 404 forever
   "/channels/feishu/events", // removed with the Feishu channel (ADR-0003) — stays a 404 forever

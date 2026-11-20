@@ -285,6 +285,7 @@ export interface WebDeps {
     | "stopWorker"
     | "stopThread"
     | "archiveThread"
+    | "diagnosePrWatch"
     | "controlPlane"
     | "webauthnRegisterOptions"
     | "webauthnRegisterVerify"

@@ -1,6 +1,22 @@
-// Durable, owner-authorized read-only commissions. No LLM, worker dispatch or GitHub writes.
+// Durable, owner-authorized read-only commissions. No worker dispatch or GitHub writes;
+// optional failure diagnosis runs out-of-band via a tool-less text completion callback.
 import type { SqlExecutor } from "./schema.ts";
-import { parsePrUrl, readPrEvidence, type EvidenceResult, type PrTarget, type PrEvidenceMode } from "./pr-evidence.ts";
+import {
+  parsePrUrl,
+  readPrEvidence,
+  type EvidenceResult,
+  type PrEvidenceMode,
+  type PrFailureSnapshot,
+  type PrTarget,
+} from "./pr-evidence.ts";
+import {
+  buildDeterministicPrDiagnosis,
+  buildPrRepairPrompt,
+  formatPrFailureNoticeDetails,
+  type PrDiagnoseOutcome,
+  type PrDiagnosisStatus,
+  type PrFailureDiagnosis,
+} from "./pr-failure-diagnoser.ts";
 
 export interface PrWatchRow {
   id: string; threadId: string; url: string; status: "active" | "completed" | "cancelled" | "expired";
@@ -8,6 +24,36 @@ export interface PrWatchRow {
   head: string | null; observedState: string | null; checkedAt: number | null; lastError: string | null;
   checks: number; failed: number; pending: number; evidenceMode: PrEvidenceMode;
 }
+
+export interface PrWatchDiagnosisRecord {
+  watchId: string;
+  head: string;
+  snapshot: PrFailureSnapshot;
+  diagnosis: PrFailureDiagnosis | null;
+  diagnosisStatus: PrDiagnosisStatus;
+  effectiveDiagnosis: PrFailureDiagnosis;
+  repairPrompt: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PrWatchFailureBrief {
+  hasFailureDetail: boolean;
+  failureHeadline: string | null;
+  diagnosisStatus: PrDiagnosisStatus | null;
+  failedChecks?: string[];
+}
+
+interface StoredDiagnosisRow {
+  watchId: string;
+  head: string;
+  snapshotJson: string;
+  diagnosisJson: string | null;
+  diagnosisStatus: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface Notice { id: string; watchId: string; threadId: string; text: string }
 export interface PrWatchDeps {
   sql: SqlExecutor;
@@ -16,6 +62,8 @@ export interface PrWatchDeps {
   notify(input: Notice): Promise<void>;
   record?(threadId: string, text: string, data: Record<string, unknown>): void;
   read?(target: PrTarget, mode: PrEvidenceMode): Promise<EvidenceResult>;
+  readFailureDetail?(target: PrTarget, head: string, mode: PrEvidenceMode): Promise<PrFailureSnapshot | null>;
+  diagnoseFailure?(snapshot: PrFailureSnapshot, url: string): Promise<PrDiagnoseOutcome>;
   now?: () => number;
 }
 export class PrWatchInputError extends Error {}
@@ -23,13 +71,141 @@ const DAY = 86_400_000;
 const LEASE = 120_000;
 const MAX_ACTIVE = 10;
 
+function parseJsonSafe<T>(raw: string | null | undefined): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDiagnosisStatus(raw: unknown): PrDiagnosisStatus {
+  if (
+    raw === "ready" ||
+    raw === "skipped_over_budget" ||
+    raw === "skipped_no_model" ||
+    raw === "failed"
+  ) {
+    return raw;
+  }
+  return "none";
+}
+
 export class PrWatchService {
   private running?: Promise<void>;
   private readonly deps: PrWatchDeps;
   constructor(deps: PrWatchDeps) { this.deps = deps; }
   private get sql(): SqlExecutor { return this.deps.sql; }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
-  list(): PrWatchRow[] { return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch ORDER BY (status = 'active') DESC, createdAt DESC LIMIT 100`; }
+
+  get(id: string): PrWatchRow | null {
+    return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${id}`[0] ?? null;
+  }
+
+  list(): PrWatchRow[] {
+    return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch ORDER BY (status = 'active') DESC, createdAt DESC LIMIT 100`;
+  }
+
+  private hydrateDiagnosis(watch: PrWatchRow, row: StoredDiagnosisRow): PrWatchDiagnosisRecord | null {
+    const snapshot = parseJsonSafe<PrFailureSnapshot>(row.snapshotJson);
+    if (!snapshot || !Array.isArray(snapshot.items)) return null;
+    const diagnosis = parseJsonSafe<PrFailureDiagnosis>(row.diagnosisJson);
+    const diagnosisStatus = normalizeDiagnosisStatus(row.diagnosisStatus);
+    const effectiveDiagnosis = diagnosis ?? buildDeterministicPrDiagnosis(snapshot, watch.url);
+    const repairPrompt = buildPrRepairPrompt({
+      url: watch.url,
+      head: row.head,
+      snapshot,
+      diagnosis,
+    });
+    return {
+      watchId: row.watchId,
+      head: row.head,
+      snapshot,
+      diagnosis,
+      diagnosisStatus,
+      effectiveDiagnosis,
+      repairPrompt,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  getDiagnosis(watchId: string, head?: string | null): PrWatchDiagnosisRecord | null {
+    const watch = this.get(watchId);
+    if (!watch) return null;
+    const targetHead = head ?? watch.head;
+    if (!targetHead) return null;
+    const row = this.sql<StoredDiagnosisRow>`
+      SELECT * FROM sh_pr_watch_diagnosis WHERE watchId = ${watchId} AND head = ${targetHead}
+    `[0];
+    if (!row) return null;
+    return this.hydrateDiagnosis(watch, row);
+  }
+
+  summaryForWatch(watch: PrWatchRow): PrWatchFailureBrief {
+    if (watch.observedState !== "failure" || !watch.head) {
+      return { hasFailureDetail: false, failureHeadline: null, diagnosisStatus: null };
+    }
+    const record = this.getDiagnosis(watch.id, watch.head);
+    if (!record) {
+      return { hasFailureDetail: false, failureHeadline: null, diagnosisStatus: null };
+    }
+    return {
+      hasFailureDetail: true,
+      failureHeadline: record.effectiveDiagnosis.headline,
+      diagnosisStatus: record.diagnosisStatus,
+      failedChecks: record.snapshot.items.map((it) => (it.failedStep ? `${it.name} (${it.failedStep})` : it.name)),
+    };
+  }
+
+  async refreshDiagnosis(
+    watchId: string,
+    head?: string | null,
+  ): Promise<
+    | { ok: true; record: PrWatchDiagnosisRecord }
+    | { ok: false; code: "not_found" | "no_snapshot" | "over_budget" | "no_model" | "failed" }
+  > {
+    const watch = this.get(watchId);
+    if (!watch) return { ok: false, code: "not_found" };
+    const existing = this.getDiagnosis(watchId, head);
+    if (!existing) return { ok: false, code: "no_snapshot" };
+    if (!this.deps.diagnoseFailure) return { ok: false, code: "no_model" };
+
+    let outcome: PrDiagnoseOutcome;
+    try {
+      outcome = await this.deps.diagnoseFailure(existing.snapshot, watch.url);
+    } catch {
+      outcome = { status: "failed" };
+    }
+    const ts = this.now();
+    if (outcome.status === "ready") {
+      this.deps.tx(() => {
+        this.sql`
+          UPDATE sh_pr_watch_diagnosis
+          SET diagnosisJson = ${JSON.stringify(outcome.diagnosis)},
+              diagnosisStatus = 'ready',
+              updatedAt = ${ts}
+          WHERE watchId = ${watchId} AND head = ${existing.head}
+        `;
+      });
+      const updated = this.getDiagnosis(watchId, existing.head);
+      return updated ? { ok: true, record: updated } : { ok: false, code: "no_snapshot" };
+    }
+    this.deps.tx(() => {
+      this.sql`
+        UPDATE sh_pr_watch_diagnosis
+        SET diagnosisStatus = ${outcome.status},
+            updatedAt = ${ts}
+        WHERE watchId = ${watchId} AND head = ${existing.head} AND diagnosisJson IS NULL
+      `;
+    });
+    if (outcome.status === "skipped_over_budget") return { ok: false, code: "over_budget" };
+    if (outcome.status === "skipped_no_model") return { ok: false, code: "no_model" };
+    return { ok: false, code: "failed" };
+  }
+
   targetsForThread(threadId: string): string[] {
     const rows = this.sql<{ url: string }>`SELECT url FROM sh_pr_watch WHERE threadId = ${threadId}
       UNION SELECT url FROM sh_pr_consent WHERE threadId = ${threadId} AND url IS NOT NULL`;
@@ -103,6 +279,10 @@ export class PrWatchService {
       }
     });
   }
+  private claimStillValid(claim: PrWatchRow): boolean {
+    const row = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${claim.id}`[0];
+    return Boolean(row && row.status === "active" && row.generation === claim.generation && row.expiresAt > this.now());
+  }
   private async pass(): Promise<void> {
     this.expire();
     await this.deliver();
@@ -124,6 +304,46 @@ export class PrWatchService {
       let result: EvidenceResult;
       try { result = target ? await (this.deps.read ? this.deps.read(target, claim.evidenceMode) : readPrEvidence(target, { mode: claim.evidenceMode })) : { ok: false, reason: 'invalid_target' }; }
       catch { result = { ok: false, reason: 'github_unavailable' }; }
+
+      // Bounded once-per-(watchId, head) failure detail & zero-tool diagnosis outside tx.
+      let diagSnapshot: PrFailureSnapshot | null = null;
+      let diagValue: PrFailureDiagnosis | null = null;
+      let diagStatus: PrDiagnosisStatus = "none";
+      let persistNewDiag = false;
+
+      if (result.ok && result.evidence.state === "failure" && this.claimStillValid(claim)) {
+        const existingDiag = this.getDiagnosis(claim.id, result.evidence.head);
+        if (existingDiag) {
+          diagSnapshot = existingDiag.snapshot;
+          diagValue = existingDiag.diagnosis;
+          diagStatus = existingDiag.diagnosisStatus;
+        } else if (target && this.deps.readFailureDetail) {
+          try {
+            diagSnapshot = await this.deps.readFailureDetail(target, result.evidence.head, claim.evidenceMode);
+          } catch {
+            diagSnapshot = null;
+          }
+          if (diagSnapshot && this.claimStillValid(claim)) {
+            persistNewDiag = true;
+            if (this.deps.diagnoseFailure) {
+              try {
+                const outcome = await this.deps.diagnoseFailure(diagSnapshot, claim.url);
+                if (outcome.status === "ready") {
+                  diagValue = outcome.diagnosis;
+                  diagStatus = "ready";
+                } else {
+                  diagStatus = outcome.status;
+                }
+              } catch {
+                diagStatus = "failed";
+              }
+            } else {
+              diagStatus = "skipped_no_model";
+            }
+          }
+        }
+      }
+
       this.expire();
       this.deps.tx(() => {
         const current = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${claim.id}`[0];
@@ -136,18 +356,44 @@ export class PrWatchService {
           return; // no evidence is not a failed build, and does not justify buzzing the owner
         }
         const evidence = result.evidence;
+        const tsNow = this.now();
         const terminal = ['success', 'closed', 'merged'].includes(evidence.state);
-        this.sql`UPDATE sh_pr_watch SET head = ${evidence.head}, observedState = ${evidence.state}, checkedAt = ${this.now()}, lastError = NULL,
+        this.sql`UPDATE sh_pr_watch SET head = ${evidence.head}, observedState = ${evidence.state}, checkedAt = ${tsNow}, lastError = NULL,
           checks = ${evidence.checks}, failed = ${evidence.failed}, pending = ${evidence.pending},
-          status = ${terminal ? 'completed' : 'active'}, nextCheckAt = ${this.now() + current.intervalMs} WHERE id = ${claim.id}`;
+          status = ${terminal ? 'completed' : 'active'}, nextCheckAt = ${tsNow + current.intervalMs} WHERE id = ${claim.id}`;
+        if (persistNewDiag && diagSnapshot) {
+          this.sql`
+            INSERT OR IGNORE INTO sh_pr_watch_diagnosis (
+              watchId, head, snapshotJson, diagnosisJson, diagnosisStatus, createdAt, updatedAt
+            )
+            VALUES (
+              ${claim.id},
+              ${evidence.head},
+              ${JSON.stringify(diagSnapshot)},
+              ${diagValue ? JSON.stringify(diagValue) : null},
+              ${diagStatus},
+              ${tsNow},
+              ${tsNow}
+            )
+          `;
+        }
         if (evidence.state !== 'waiting' && (current.head !== evidence.head || current.observedState !== evidence.state)) {
           const limited = current.evidenceMode === 'statuses-only';
           const subject = limited ? 'commit statuses' : 'CI 检查';
           const label = evidence.state === 'success' ? `已观察到 ${subject}通过（不代表需求验收通过）`
             : evidence.state === 'failure' ? `${subject}失败：${evidence.failed} 项失败、${evidence.pending} 项等待，继续只读跟进`
             : evidence.state === 'merged' ? 'PR 已被合并，跟进结束' : 'PR 已关闭，跟进结束';
+          const detailBlock =
+            evidence.state === 'failure' && diagSnapshot
+              ? `\n${formatPrFailureNoticeDetails({
+                  snapshot: diagSnapshot,
+                  diagnosis: diagValue,
+                  diagnosisStatus: diagStatus,
+                  url: current.url,
+                })}`
+              : '';
           this.notice({ ...current, head: evidence.head }, evidence.state,
-            `${label}${limited ? '\n仅验证 commit statuses；未验证 Checks/Actions，不代表完整 CI 通过。' : ''}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`);
+            `${label}${detailBlock}${limited ? '\n仅验证 commit statuses；未验证 Checks/Actions，不代表完整 CI 通过。' : ''}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`);
         }
       });
     }
@@ -156,7 +402,7 @@ export class PrWatchService {
   private async deliver(): Promise<void> {
     for (const notice of this.sql<Notice>`SELECT * FROM sh_pr_watch_notice WHERE deliveredAt IS NULL ORDER BY id LIMIT 20`) {
       const row = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${notice.watchId}`[0];
-      if (!row || row.status === 'cancelled' || !this.deps.threadExists(notice.threadId)) {
+      if (!row || row.status === 'cancelled' || !this.deps.threadExists(row.threadId)) {
         this.sql`DELETE FROM sh_pr_watch_notice WHERE id = ${notice.id}`;
         continue;
       }

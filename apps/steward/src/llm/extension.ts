@@ -34,7 +34,7 @@ import { WorkspaceError } from "../workspace.ts";
 import type { ThreadArchiveInput, ThreadArchiveResult } from "../workspace-api.ts";
 import { describeSchedule, parseAtIso, type RoutineService, type RoutineSpecInput } from "../routines.ts";
 import { parsePrUrl, type PrEvidenceMode } from "../pr-evidence.ts";
-import type { PrWatchRow } from "../pr-watch.ts";
+import type { PrWatchFailureBrief, PrWatchRow } from "../pr-watch.ts";
 import { approvalText, type PrWatchRequest, type PrWatchApproval } from "../pr-watch-approval.ts";
 import { hasExplicitPrWatchIntent, hasExplicitPrCancelIntent, mentionsFullPrCi, withoutPrUrls } from "../pr-watch-intent.ts";
 import { MAX_CONCLUSION, MAX_DID_ITEM, MAX_DID_ITEMS, MAX_NEEDS_YOU, type Tone } from "../report-template.ts";
@@ -108,6 +108,7 @@ export interface StewardExtensionContext {
     targetsForThread(threadId: string): string[];
     threadsForUrl(url: string): string[];
     request(input: PrWatchRequest, taskId: string): Promise<PrWatchApproval>;
+    failureBrief?(watch: PrWatchRow): PrWatchFailureBrief;
   };
   /** Records an explicit in-run outcome (no_action) on the firing routine/follow-up (§8.6). */
   recordProactiveOutcome(operationId: string, outcome: string): void;
@@ -279,7 +280,10 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
           repos: repoIds,
           createdFromMsg: thread.createdFromMsg,
           pullRequests: ctx.prWatches.targetsForThread(thread.threadId),
-          prWatches: ctx.prWatches.list().filter(w => w.threadId === thread.threadId),
+          prWatches: ctx.prWatches.list().filter(w => w.threadId === thread.threadId).map(w => ({
+            ...w,
+            ...(ctx.prWatches.failureBrief ? ctx.prWatches.failureBrief(w) : {}),
+          })),
           workers: workers.map((w) => ({
             workerId: w.workerId, state: w.state, agent: w.agent, mode: w.mode,
             branch: w.branch, parentWorker: w.parentWorker, contextPercent: w.contextPercent, lastOutcome: w.lastOutcome,
@@ -1376,7 +1380,10 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
   const listPrWatches = defineTool({
     name: "list_pr_watches", description: "列出 PR 只读跟进，含编号、事项、PR、验证范围、状态、最近检查与错误。取消前先查编号；不联网、不派 worker。",
     parameters: Type.Object({ threadId: Type.Optional(Type.String()) }), replay: "safe",
-    execute: async args => ok(JSON.stringify(ctx.prWatches.list().filter(w => args.threadId === undefined || w.threadId === args.threadId))),
+    execute: async args => ok(JSON.stringify(ctx.prWatches.list().filter(w => args.threadId === undefined || w.threadId === args.threadId).map(w => ({
+      ...w,
+      ...(ctx.prWatches.failureBrief ? ctx.prWatches.failureBrief(w) : {}),
+    })))),
   });
   const cancelPrWatch = defineTool({
     name: "cancel_pr_watch", description: "仅按用户明确取消要求生成单个 PR 跟进的取消确认提案，必须用户点击专用卡后才取消；查看、保留或不要取消不授权取消，编号本身不是授权。编号从 list_pr_watches 获取。取消跟进不等于停止 worker、结束 turn 或取消其他定时任务；多个候选必须 ask_user。",

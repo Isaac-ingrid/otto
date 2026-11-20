@@ -37,6 +37,8 @@ import { escapeMarkers, eventWakeText, externalActivityWakeText, queueReturnedWa
 import { createMachineStatus, type MachineReliability } from "./machine-status.ts";
 import type { StartWorkerInput } from "./dispatch.ts";
 import type { QuietSection } from "./report-template.ts";
+import type { PrFailureSnapshot } from "./pr-evidence.ts";
+import { buildDeterministicPrDiagnosis, type PrDiagnosisStatus, type PrFailureDiagnosis } from "./pr-failure-diagnoser.ts";
 
 /** Tagged-template SQL over the DO's SQLite (same shape schema.ts migrations use). */
 export type LedgerSql = <T = Record<string, unknown>>(
@@ -3700,11 +3702,40 @@ export function createLedger(deps: LedgerDeps) {
               .filter((f) => f.status === 'open')
               .sort((a, b) => a.dueAt - b.dueAt)
               .map((f) => ({ id: f.followupId, dueAt: f.dueAt, reason: f.reason })),
-            prWatches: sql<{ id: string; url: string; nextCheckAt: number }>`
-              SELECT id, url, nextCheckAt FROM sh_pr_watch
-              WHERE threadId = ${thread.threadId} AND status = 'active'
-              ORDER BY nextCheckAt, id
-            `,
+            prWatches: sql<{
+              id: string;
+              url: string;
+              nextCheckAt: number;
+              head: string | null;
+              observedState: string | null;
+              failed: number;
+              pending: number;
+              snapshotJson: string | null;
+              diagnosisJson: string | null;
+              diagnosisStatus: PrDiagnosisStatus | null;
+            }>`
+              SELECT w.id, w.url, w.nextCheckAt, w.head, w.observedState, w.failed, w.pending,
+                     d.snapshotJson, d.diagnosisJson, d.diagnosisStatus
+              FROM sh_pr_watch w
+              LEFT JOIN sh_pr_watch_diagnosis d ON d.watchId = w.id AND d.head = w.head
+              WHERE w.threadId = ${thread.threadId} AND w.status = 'active'
+              ORDER BY w.nextCheckAt, w.id
+            `.map((r) => {
+              const snap = r.observedState === 'failure' ? jsonOrNull<PrFailureSnapshot>(r.snapshotJson) : null;
+              const diag = snap ? jsonOrNull<PrFailureDiagnosis>(r.diagnosisJson) : null;
+              return {
+                id: r.id,
+                url: r.url,
+                nextCheckAt: r.nextCheckAt,
+                head: r.head,
+                observedState: r.observedState,
+                failed: r.failed,
+                pending: r.pending,
+                hasFailureDetail: snap !== null,
+                failureHeadline: snap ? (diag?.headline ?? buildDeterministicPrDiagnosis(snap, r.url).headline) : null,
+                diagnosisStatus: snap ? (r.diagnosisStatus ?? 'skipped_no_model') : null,
+              };
+            }),
             routines: sql<Record<string, unknown>>`
               SELECT * FROM sh_routine
               WHERE threadId = ${thread.threadId} AND status = 'active'

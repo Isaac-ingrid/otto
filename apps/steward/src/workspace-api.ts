@@ -33,6 +33,9 @@ import {
   type ControlPlaneDeps,
 } from "./control-plane.ts";
 import type { Ledger } from "./ledger.ts";
+import type { PrFailureSnapshot } from "./pr-evidence.ts";
+import type { PrDiagnosisStatus, PrFailureDiagnosis } from "./pr-failure-diagnoser.ts";
+import type { PrWatchRow } from "./pr-watch.ts";
 import {
   WorkspaceError,
   workspaceSnapshot,
@@ -48,6 +51,24 @@ export interface MachineDirectoryInput {
 }
 
 export type MachineDirectoryBrowseInput = DirectoryBrowseArgs & { deviceId: string };
+
+export interface PrWatchDiagnosisInput {
+  id?: string;
+  watchId: string;
+  head?: string;
+  refreshDiagnosis?: boolean;
+}
+
+export interface PrWatchDiagnosisResponse {
+  ok: true;
+  watch: PrWatchRow;
+  head: string | null;
+  snapshot: PrFailureSnapshot | null;
+  diagnosis: PrFailureDiagnosis | null;
+  diagnosisStatus: PrDiagnosisStatus | null;
+  effectiveDiagnosis: PrFailureDiagnosis | null;
+  repairPrompt: string | null;
+}
 
 export type MachineDirectoryResult =
   | { state: "pending"; id: string }
@@ -154,6 +175,7 @@ export interface WorkspaceApiDeps {
   stopWorker?(input: WorkerStopInput): Promise<WorkerStopResult>;
   stopThread?(input: ThreadStopInput): Promise<ThreadStopResult>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
+  diagnosePrWatch?(input: PrWatchDiagnosisInput, signal: AbortSignal): Promise<PrWatchDiagnosisResponse>;
   controlPlane?: Omit<ControlPlaneDeps, "ledger" | "budget" | "audit">;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
    *  only webauthn.ts's verifyRegistrationResponse/verifyAssertionResponse ever assert their
@@ -343,6 +365,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     url.pathname.startsWith("/app/api/machines/directories") ||
     url.pathname.startsWith("/app/api/repos/skills/") ||
     url.pathname.startsWith("/app/api/workers/") ||
+    /^\/app\/api\/pr-watches\/[A-Za-z0-9_-]{1,80}\/diagnosis$/.test(url.pathname) ||
     /^\/app\/api\/threads\/[\w-]{1,128}\/(?:archive|stop)$/.test(url.pathname) ||
     url.pathname.startsWith("/app/api/push/");
   if (!sameSecret(request.headers.get("x-csrf-token") ?? "", session.csrf) || (requireOrigin ? origin !== url.origin : origin !== null && origin !== url.origin)) {
@@ -660,6 +683,34 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
         return json(res);
       }
       throw new WorkspaceError("io_failed", 502);
+    }
+    const prDiagMatch = /^\/app\/api\/pr-watches\/([A-Za-z0-9_-]{1,80})\/diagnosis$/.exec(url.pathname);
+    if (prDiagMatch && deps.diagnosePrWatch) {
+      const body = await readJson(request);
+      const { id, head, refreshDiagnosis } = body;
+      if (head !== undefined && (typeof head !== "string" || !/^[a-f0-9]{40}$/i.test(head))) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      if (refreshDiagnosis !== undefined && typeof refreshDiagnosis !== "boolean") {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      if (refreshDiagnosis === true && (typeof id !== "string" || !REQUEST_ID.test(id))) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      if (id !== undefined && (typeof id !== "string" || !REQUEST_ID.test(id))) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      return json(
+        await deps.diagnosePrWatch(
+          {
+            watchId: prDiagMatch[1]!,
+            ...(typeof id === "string" ? { id } : {}),
+            ...(typeof head === "string" ? { head: head.toLowerCase() } : {}),
+            ...(typeof refreshDiagnosis === "boolean" ? { refreshDiagnosis } : {}),
+          },
+          request.signal,
+        ),
+      );
     }
     if (url.pathname === "/app/api/memory") {
       const body = await readJson(request);

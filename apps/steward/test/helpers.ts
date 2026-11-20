@@ -63,6 +63,7 @@ export async function resetLedgerState(): Promise<void> {
       storage.sql.exec(`DELETE FROM ${table}`);
     }
     await instance.setAmbientSkillRepliesForTest(null);
+  await instance.setPrDiagnosisRepliesForTest(null);
   });
 }
 

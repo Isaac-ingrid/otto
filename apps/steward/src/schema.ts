@@ -1216,4 +1216,23 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX IF NOT EXISTS sh_skill_offer_status ON sh_skill_offer (status)`;
     },
   },
+  {
+    // PR Watch Read-Only CI Failure Log Triage & Diagnosis (Direction A):
+    // Standalone per-(watchId, head) diagnostic snapshot and optional zero-tool L2 root-cause
+    // summary. Keeps sh_pr_watch columns untouched and preserves historical commit failures.
+    id: "044_pr_watch_failure_diagnostics",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_pr_watch_diagnosis (
+        watchId TEXT NOT NULL,
+        head TEXT NOT NULL,
+        snapshotJson TEXT NOT NULL,
+        diagnosisJson TEXT,
+        diagnosisStatus TEXT NOT NULL DEFAULT 'none',
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (watchId, head)
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_pr_watch_diagnosis_watch ON sh_pr_watch_diagnosis (watchId, updatedAt DESC)`;
+    },
+  },
 ];

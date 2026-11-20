@@ -39,9 +39,10 @@ import {
   type ServerKey,
 } from "@isaac2ingrid/protocol";
 import { bearer, resolveKeySecrets } from "./auth.ts";
-import { PrWatchInputError, PrWatchService } from "./pr-watch.ts";
+import { PrWatchInputError, PrWatchService, type PrWatchDeps } from "./pr-watch.ts";
 import { PrWatchApprovals, approvalText, approvalThread, PR_WATCH_APPROVAL_FAILURE, type PrWatchRequest, type PrWatchDecision } from './pr-watch-approval.ts';
-import { readPrEvidence } from "./pr-evidence.ts";
+import { readPrEvidence, readPrFailureDetail, type PrEvidenceMode, type PrFailureSnapshot, type PrTarget } from "./pr-evidence.ts";
+import { diagnosePrFailureWithLlm } from "./pr-failure-diagnoser.ts";
 import {
   formatUsd,
   renderOverBudgetNote,
@@ -138,6 +139,8 @@ import {
   type MachineDirectoryBrowseInput,
   type MachineDirectoryInput,
   type MachineDirectoryResult,
+  type PrWatchDiagnosisInput,
+  type PrWatchDiagnosisResponse,
   type ThreadArchiveInput,
   type ThreadArchiveResult,
   type ThreadCleanupPolicy,
@@ -854,6 +857,7 @@ export class Steward extends Agent<Env> {
         stopWorker: (input) => this.stopWorkerByOwner(input),
         stopThread: (input) => this.stopThreadByOwner(input),
         archiveThread: (input) => this.archiveThread(input),
+        diagnosePrWatch: (input, signal) => this.diagnosePrWatchForWorkspace(input, signal),
         controlPlane: {
           tx: (fn) => this.ctx.storage.transactionSync(fn),
           listSdkSchedules: async () => {
@@ -863,6 +867,7 @@ export class Steward extends Agent<Env> {
           pauseRoutine: (routineId, paused) => this.routineService.pause(routineId, paused),
           cancelSchedule: (scheduleId) => this.routineService.cancel(scheduleId),
           listPrWatches: () => this.prWatches.list(),
+          summarizePrWatchFailure: (watch) => this.prWatches.summaryForWatch(watch),
           cancelPrWatch: (watchId) => this.prWatches.cancel(watchId),
           onChanged: () => this.notifyWorkspaces(),
         },
@@ -1123,6 +1128,7 @@ export class Steward extends Agent<Env> {
         targetsForThread: id => this.prWatches.targetsForThread(id),
         threadsForUrl: url => this.prWatches.threadsForUrl(url),
         request: (input, taskId) => this.requestPrWatchApproval(input, taskId),
+        failureBrief: (watch) => this.prWatches.summaryForWatch(watch),
       },
       /** §4.3/§7.2 (issue #10): whether a user-message evidence ref is one the bound owner
        *  actually sent — the one check answer_worker's hook cannot do for itself. */
@@ -2628,10 +2634,19 @@ export class Steward extends Agent<Env> {
 
   private prWatches_?: PrWatchService;
   private get prWatches(): PrWatchService {
-    return this.prWatches_ ??= new PrWatchService({
-      sql: this.sql.bind(this), tx: (fn) => this.ctx.storage.transactionSync(fn),
+    if (this.prWatches_) return this.prWatches_;
+    const defaultRead = (target: PrTarget, mode: PrEvidenceMode) =>
+      readPrEvidence(target, { token: this.env.OTTO_GITHUB_READ_TOKEN, mode });
+    const deps: PrWatchDeps = {
+      sql: this.sql.bind(this),
+      tx: (fn) => this.ctx.storage.transactionSync(fn),
       threadExists: (id) => this.ledger.threads.get(id) !== null,
-      read: (target, mode) => readPrEvidence(target, { token: this.env.OTTO_GITHUB_READ_TOKEN, mode }),
+      read: defaultRead,
+      readFailureDetail: (target, head, mode) =>
+        deps.read !== defaultRead
+          ? Promise.resolve(null)
+          : readPrFailureDetail(target, head, { token: this.env.OTTO_GITHUB_READ_TOKEN, mode }),
+      diagnoseFailure: (snapshot, url) => this.diagnosePrFailure(snapshot, url),
       record: (threadId, text, data) => { this.ledger.timeline.add(threadId, "note", text, data); },
       notify: async (notice) => {
         const owner = this.ownerOpenIdSync();
@@ -2641,7 +2656,9 @@ export class Steward extends Agent<Env> {
         this.push.queue(notice.id, "done");
         void this.drainPush();
       },
-    });
+    };
+    this.prWatches_ = new PrWatchService(deps);
+    return this.prWatches_;
   }
 
   private prWatchApprovals_?: PrWatchApprovals;
@@ -3209,15 +3226,109 @@ export class Steward extends Agent<Env> {
 
   private readonly skillTriageInFlight = new Map<string, Promise<void>>();
   private ambientSkillRepliesForTest: string[] | null = null;
+  private prDiagnosisRepliesForTest: string[] | null = null;
 
   async setAmbientSkillRepliesForTest(replies: string[] | null): Promise<void> {
     this.ambientSkillRepliesForTest = replies ? [...replies] : null;
+  }
+
+  async setPrDiagnosisRepliesForTest(replies: string[] | null): Promise<void> {
+    this.prDiagnosisRepliesForTest = replies ? [...replies] : null;
   }
 
   async waitSkillTriageIdleForTest(): Promise<void> {
     while (this.skillTriageInFlight.size > 0) {
       await Promise.allSettled([...this.skillTriageInFlight.values()]);
     }
+  }
+
+  private async diagnosePrFailure(
+    snapshot: PrFailureSnapshot,
+    prUrl: string,
+    signal: AbortSignal = AbortSignal.timeout(15_000),
+  ) {
+    await this.syncUsageQuietly();
+    return diagnosePrFailureWithLlm(
+      {
+        budget: () => this.budgetState(),
+        completeText: async ({ systemPrompt, userPrompt, signal: sig, maxTokens }) => {
+          if (this.prDiagnosisRepliesForTest !== null) {
+            const scripted = this.prDiagnosisRepliesForTest.shift();
+            if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
+            return scripted;
+          }
+          return this.completeBackgroundText({ systemPrompt, userPrompt, signal: sig, maxTokens });
+        },
+        audit: (reason, detail) => this.logChannel(reason, detail),
+      },
+      snapshot,
+      prUrl,
+      signal,
+    );
+  }
+
+  private async diagnosePrWatchForWorkspace(
+    input: PrWatchDiagnosisInput,
+    signal: AbortSignal,
+  ): Promise<PrWatchDiagnosisResponse> {
+    const watch = this.prWatches.get(input.watchId);
+    if (!watch) throw new WorkspaceError("not_found", 404);
+    const targetHead = input.head ?? watch.head;
+    if (input.refreshDiagnosis !== true) {
+      const record = targetHead ? this.prWatches.getDiagnosis(watch.id, targetHead) : null;
+      return {
+        ok: true,
+        watch,
+        head: targetHead,
+        snapshot: record?.snapshot ?? null,
+        diagnosis: record?.diagnosis ?? null,
+        diagnosisStatus: record?.diagnosisStatus ?? null,
+        effectiveDiagnosis: record?.effectiveDiagnosis ?? null,
+        repairPrompt: record?.repairPrompt ?? null,
+      };
+    }
+
+    if (!input.id) throw new WorkspaceError("bad_request", 400);
+    const key = `prdiag:${input.id}`;
+    const reqSig = JSON.stringify({ watchId: watch.id, head: targetHead ?? null });
+    const previous = this.ledger.webRequests.get(key);
+    if (previous) {
+      const parsedPrev = JSON.parse(previous.payload) as { req?: string; res?: PrWatchDiagnosisResponse };
+      if (parsedPrev.req !== reqSig) throw new WorkspaceError("id_conflict", 409);
+      if (previous.status === "done" && parsedPrev.res !== undefined) return parsedPrev.res;
+    }
+
+    const existing = targetHead ? this.prWatches.getDiagnosis(watch.id, targetHead) : null;
+    if (!existing) throw new WorkspaceError("no_failure_snapshot", 404);
+    if (signal.aborted) throw new WorkspaceError("aborted", 499);
+
+    const refreshed = await this.prWatches.refreshDiagnosis(watch.id, existing.head);
+    if (!refreshed.ok) {
+      if (refreshed.code === "not_found") throw new WorkspaceError("not_found", 404);
+      if (refreshed.code === "no_snapshot") throw new WorkspaceError("no_failure_snapshot", 404);
+      if (refreshed.code === "over_budget") throw new WorkspaceError("over_budget", 409);
+      if (refreshed.code === "no_model") throw new WorkspaceError("model_not_configured", 409);
+      throw new WorkspaceError("distill_failed", 502);
+    }
+
+    const latestWatch = this.prWatches.get(watch.id) ?? watch;
+    const res: PrWatchDiagnosisResponse = {
+      ok: true,
+      watch: latestWatch,
+      head: refreshed.record.head,
+      snapshot: refreshed.record.snapshot,
+      diagnosis: refreshed.record.diagnosis,
+      diagnosisStatus: refreshed.record.diagnosisStatus,
+      effectiveDiagnosis: refreshed.record.effectiveDiagnosis,
+      repairPrompt: refreshed.record.repairPrompt,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
+      this.ledger.webRequests.complete(key);
+    });
+    this.logChannel("web_pr_watch_diagnosed", `${watch.id}:${refreshed.record.head.slice(0, 12)}`);
+    this.notifyWorkspaces();
+    return res;
   }
 
   private async completeBackgroundText(input: {
@@ -3694,7 +3805,8 @@ export class Steward extends Agent<Env> {
         row.id.startsWith("stop:") ||
         row.id.startsWith("wstop:") ||
         row.id.startsWith("tstop:") ||
-        row.id.startsWith("archive:")
+        row.id.startsWith("archive:") ||
+        row.id.startsWith("prdiag:")
       ) {
         continue;
       }
@@ -4891,6 +5003,7 @@ export class Steward extends Agent<Env> {
     this.routineService_ = undefined;
     this.ctx.storage.sql.exec('DELETE FROM sh_pr_watch_approval');
     this.prWatchApprovals_ = undefined;
+    this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_diagnosis");
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_notice");
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch");
     this.prWatches_ = undefined;
