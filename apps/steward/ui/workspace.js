@@ -63,6 +63,8 @@ const state = {
   onboarding: null, // { step: 'model' | 'security', passkeyAdd, confirm }
   showArchived: false,
   archivingThreads: new Set(),
+  stoppingWorkers: new Set(),
+  stoppingThreadPlans: new Set(),
   workerDiffs: new Map(),
   diffRev: 0,
 };
@@ -281,7 +283,15 @@ function liveMessage(live) {
 
 function workingNode() {
   const queued = [...state.pending.values()].filter((entry) => entry.status === 'sending').length;
-  return h('div', { class: 'working', role: 'status' }, h('span', { class: 'working-dots' }, h('i'), h('i'), h('i')), h('span', { class: 'working-label' }, queued > 1 ? t('workingQueued', { count: queued - 1 }) : t('working')), h('button', { type: 'button', class: 'stop-turn', dataset: { action: 'stop-turn' }, disabled: state.stopping ? '' : null }, t(state.stopping ? 'stopping' : 'stopTurn')));
+  const scoped = state.selected
+    ? [threadById(state.selected)].filter(Boolean)
+    : (state.snapshot?.threads ?? []).filter((entry) => !entry.archived);
+  const hasRunningAgents = scoped.some((entry) => entry.workers.some(isActiveWorker));
+  return h('div', { class: 'working', role: 'status' },
+    h('span', { class: 'working-dots' }, h('i'), h('i'), h('i')),
+    h('span', { class: 'working-label' }, queued > 1 ? t('workingQueued', { count: queued - 1 }) : t('working')),
+    h('button', { type: 'button', class: 'stop-turn', dataset: { action: 'stop-turn' }, disabled: state.stopping ? '' : null }, state.stopping ? t('stopping') : t('stopTurn')),
+    hasRunningAgents ? h('span', { class: 'working-subnote' }, t('workingAgentsSeparate')) : null);
 }
 
 function renderFeed(stick) {
@@ -639,6 +649,179 @@ function openDiffDialog(workerId) {
   renderDialog();
 }
 
+function workerStopToastText(outcome, threadId) {
+  let msg;
+  if (outcome === 'withdrawn') msg = t('workerStopWithdrawn');
+  else if (outcome === 'interrupt_queued_offline') msg = t('workerStopQueuedOffline');
+  else if (outcome === 'already_stopped') msg = t('workerStopAlready');
+  else if (outcome === 'unreachable') msg = t('workerStopUnreachable');
+  else msg = t('workerStopSent');
+  const thread = threadId ? threadById(threadId) : null;
+  const pendingCount = (thread?.plans?.followups?.length ?? 0) + (thread?.plans?.prWatches?.length ?? 0);
+  if (pendingCount > 0 && (outcome === 'withdrawn' || outcome === 'interrupt_sent' || outcome === 'interrupt_queued_offline')) {
+    msg = `${msg} ${t('workerStopPlansHint')}`;
+  }
+  return msg;
+}
+
+function actionErrorToast(status, data) {
+  if (status === 404 && data?.error === 'not_found') return t('backendReloadRequired');
+  const code = typeof data?.error === 'string' && data.error ? ` (${data.error})` : status ? ` (${status})` : '';
+  return `${t('actionFailed')}${code}`;
+}
+
+async function stopWorkerInline(workerId, threadId) {
+  if (!workerId || state.stoppingWorkers.has(workerId)) return;
+  state.stoppingWorkers.add(workerId);
+  renderContext();
+  try {
+    const { status, data } = await request(`/app/api/workers/${encodeURIComponent(workerId)}/stop`, { id: uuid() });
+    if (status === 200 && data?.ok) {
+      toast(workerStopToastText(data.outcome, threadId ?? data.threadId));
+      await refresh();
+      return;
+    }
+    if (status !== 401) toast(actionErrorToast(status, data));
+  } catch {
+    toast(t('actionFailed'));
+  } finally {
+    state.stoppingWorkers.delete(workerId);
+    if (state.snapshot) renderContext();
+  }
+}
+
+async function stopThreadWorkers(threadId) {
+  const key = `workers:${threadId}`;
+  if (!threadId || state.stoppingThreadPlans.has(key)) return;
+  state.stoppingThreadPlans.add(key);
+  renderContext();
+  try {
+    const { status, data } = await request(`/app/api/threads/${encodeURIComponent(threadId)}/stop`, {
+      id: uuid(),
+      stopWorkers: true,
+    });
+    if (status === 200 && data?.ok) {
+      const count = Array.isArray(data.workers) ? data.workers.length : 0;
+      if (count === 1) toast(workerStopToastText(data.workers[0].outcome, threadId));
+      else toast(t('threadWorkersStoppedToast', { count }));
+      await refresh();
+      return;
+    }
+    if (status !== 401) toast(actionErrorToast(status, data));
+  } catch {
+    toast(t('actionFailed'));
+  } finally {
+    state.stoppingThreadPlans.delete(key);
+    if (state.snapshot) renderContext();
+  }
+}
+
+async function cancelThreadPlans(threadId) {
+  const key = `plans:${threadId}`;
+  if (!threadId || state.stoppingThreadPlans.has(key)) return;
+  state.stoppingThreadPlans.add(key);
+  renderContext();
+  try {
+    const { status, data } = await request(`/app/api/threads/${encodeURIComponent(threadId)}/stop`, {
+      id: uuid(),
+      cancelFollowups: true,
+      cancelPrWatches: true,
+      expireProposals: true,
+    });
+    if (status === 200 && data?.ok) {
+      toast(t('threadPlansCancelledToast'));
+      await refresh();
+      return;
+    }
+    if (status !== 401) toast(actionErrorToast(status, data));
+  } catch {
+    toast(t('actionFailed'));
+  } finally {
+    state.stoppingThreadPlans.delete(key);
+    if (state.snapshot) renderContext();
+  }
+}
+
+async function mutateThreadPlanItem(payload, busyKey) {
+  if (state.stoppingThreadPlans.has(busyKey)) return;
+  state.stoppingThreadPlans.add(busyKey);
+  renderContext();
+  try {
+    const { status } = await request('/app/api/schedules', { id: uuid(), ...payload });
+    if (status === 200) {
+      await refresh();
+      return;
+    }
+    if (status !== 401) toast(t('actionFailed'));
+  } catch {
+    toast(t('actionFailed'));
+  } finally {
+    state.stoppingThreadPlans.delete(busyKey);
+    if (state.snapshot) renderContext();
+  }
+}
+
+function threadPlansSection(thread) {
+  const plans = thread.plans;
+  if (!plans) return null;
+  const followups = plans.followups ?? [];
+  const prWatches = plans.prWatches ?? [];
+  const routines = plans.routines ?? [];
+  const total = followups.length + prWatches.length + routines.length;
+  if (total === 0) return null;
+  const oneOffCount = followups.length + prWatches.length;
+  const sweeping = state.stoppingThreadPlans.has(`plans:${thread.id}`);
+  return h('section', { class: 'context-section' },
+    h('h3', { class: 'section-title' }, t('threadPlansHeading'), h('span', null, String(total))),
+    oneOffCount > 0 ? h('div', { class: 'thread-plan-sweep' },
+      h('button', {
+        type: 'button',
+        class: 'button quiet',
+        disabled: sweeping ? true : null,
+        dataset: { action: 'cancel-thread-plans', thread: thread.id, focus: `cancel-plans:${thread.id}` },
+      }, icon('close'), sweeping ? t('threadCancellingPlans') : t('threadCancelPlansBtn'))) : null,
+    followups.map((f) => {
+      const busy = state.stoppingThreadPlans.has(`f:${f.id}`);
+      return h('div', { class: 'thread-plan-card' },
+        h('div', { class: 'thread-plan-top' },
+          h('span', null, icon('clock'), ' ', t('threadPlanFollowupLabel', { when: formatClock(f.dueAt) })),
+          h('button', {
+            type: 'button',
+            class: 'button quiet',
+            disabled: busy ? true : null,
+            dataset: { action: 'cancel-thread-followup', followup: f.id, focus: `cancel-f:${f.id}` },
+          }, t('threadPlanCancelOne'))),
+        h('p', { class: 'thread-plan-body' }, f.reason));
+    }),
+    prWatches.map((w) => {
+      const busy = state.stoppingThreadPlans.has(`w:${w.id}`);
+      return h('div', { class: 'thread-plan-card' },
+        h('div', { class: 'thread-plan-top' },
+          h('span', null, icon('branch'), ' ', t('threadPlanWatchLabel', { when: formatClock(w.nextCheckAt) })),
+          h('button', {
+            type: 'button',
+            class: 'button quiet',
+            disabled: busy ? true : null,
+            dataset: { action: 'cancel-thread-watch', watch: w.id, focus: `cancel-w:${w.id}` },
+          }, t('threadPlanCancelOne'))),
+        h('p', { class: 'thread-plan-body' }, h('a', { href: w.url, target: '_blank', rel: 'noopener noreferrer' }, w.url)));
+    }),
+    routines.map((r) => {
+      const busy = state.stoppingThreadPlans.has(`r:${r.id}`);
+      const sched = r.scheduleKind === 'cron' ? (r.cron ?? '') : (r.onceAt ? formatClock(r.onceAt) : '');
+      return h('div', { class: 'thread-plan-card' },
+        h('div', { class: 'thread-plan-top' },
+          h('span', null, icon('repeat'), ' ', t('threadPlanRoutineLabel', { schedule: sched })),
+          h('button', {
+            type: 'button',
+            class: 'button quiet',
+            disabled: busy ? true : null,
+            dataset: { action: 'pause-thread-routine', routine: r.id, focus: `pause-r:${r.id}` },
+          }, t('threadPlanPauseOne'))),
+        h('p', { class: 'thread-plan-body' }, r.instruction));
+    }));
+}
+
 async function archiveThread(threadId, archived, cleanupPolicy = 'auto') {
   if (!threadId || state.archivingThreads.has(threadId)) return;
   state.archivingThreads.add(threadId);
@@ -801,7 +984,13 @@ function workerNode(thread, worker) {
       : pr?.failure ? h('p', { class: 'worker-pr failed' }, `${t('prFailed')}: ${pr.failure}`)
         : pr?.decision === 'approved' ? h('p', { class: 'worker-pr' }, t('prPending'))
           : pr?.decision === 'declined' ? h('p', { class: 'worker-pr' }, t('prDeclined')) : null,
-    hasSession || canDiff || hasCheckpoint ? h('div', { class: 'worker-actions' },
+    active || hasSession || canDiff || hasCheckpoint ? h('div', { class: 'worker-actions' },
+      active ? h('button', {
+        type: 'button',
+        class: 'stop-worker-btn',
+        disabled: state.stoppingWorkers.has(worker.id) ? true : null,
+        dataset: { action: 'stop-worker', worker: worker.id, thread: thread.id, focus: `stop-worker:${worker.id}` },
+      }, icon('stop'), state.stoppingWorkers.has(worker.id) ? t('stoppingWorkerBtn') : t('stopWorkerBtn')) : null,
       hasSession ? h('a', { href: urlFor(thread.id, worker.id), dataset: { nav: thread.id, worker: worker.id, focus: `session:${worker.id}` } }, t('rawHistory'), icon('chevron-right')) : null,
       canDiff ? h('button', { type: 'button', 'aria-expanded': String(diffOpen), dataset: { action: 'toggle-diff', worker: worker.id, focus: `diff:${worker.id}` } }, icon('diff'), t(diffOpen ? 'hideChanges' : 'viewChanges')) : null,
       hasCheckpoint ? h('button', { type: 'button', dataset: { action: 'open-checkpoint', worker: worker.id, thread: thread.id, focus: `checkpoint:${worker.id}` } }, icon('sparkle'), t('checkpointOpen')) : null) : null,
@@ -812,7 +1001,8 @@ function renderContext() {
   const snapshot = state.snapshot;
   const panel = $('#context-panel');
   const thread = state.selected ? threadById(state.selected) : null;
-  const signature = [getLocale(), state.selected, state.diffRev, [...state.archivingThreads], thread ?? snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.machine, entry.workers.map((worker) => [worker.agent, worker.state])]),
+  const signature = [getLocale(), state.selected, state.diffRev, [...state.archivingThreads], [...state.stoppingWorkers], [...state.stoppingThreadPlans],
+    thread ?? snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.machine, entry.workers.map((worker) => [worker.agent, worker.state])]),
     snapshot.attention, snapshot.activity, snapshot.messages.map((message) => message.id), [...state.busyCards], minuteBucket()];
   redraw('context', signature, () => {
     const top = panel.scrollTop;
@@ -840,7 +1030,9 @@ function renderContext() {
       const previousSummary = panel.querySelector('details[data-summary-thread]');
       const summaryOpen = previousSummary?.dataset.summaryThread === thread.id && previousSummary.open;
       const archiving = state.archivingThreads.has(thread.id);
-      const hasActive = thread.state === 'running' || thread.workers.some(isActiveWorker);
+      const activeWorkers = thread.workers.filter(isActiveWorker);
+      const hasActive = thread.state === 'running' || activeWorkers.length > 0;
+      const stoppingThreadAgents = state.stoppingThreadPlans.has(`workers:${thread.id}`);
       sections.push(
         h('header', { class: 'context-header' }, h('h2', null, t('threadDetails')), close),
         h('section', { class: 'context-section' },
@@ -848,13 +1040,23 @@ function renderContext() {
           h('div', { class: 'thread-badge-row' }, stateBadge(thread.state), thread.archived ? stateBadge('archived') : null),
           thread.goal && thread.goal !== thread.summary ? h('p', { class: 'detail-goal' }, `${t('goal')}: ${thread.goal}`) : null,
           thread.repos.length ? h('div', { class: 'repo-label' }, icon('folder'), thread.repos.join(', ')) : null,
-          h('div', { class: 'thread-archive-actions' }, h('button', {
-            type: 'button', class: 'button quiet',
-            disabled: archiving || (!thread.archived && hasActive) ? true : null,
-            title: !thread.archived && hasActive ? t('archiveActiveHint') : null,
-            dataset: { action: thread.archived ? 'unarchive-thread' : 'archive-thread', thread: thread.id, focus: `archive:${thread.id}` },
-          }, icon('archive'), t(thread.archived ? (archiving ? 'unarchivingThread' : 'unarchiveThread') : (archiving ? 'archivingThread' : 'archiveThread'))))),
+          h('div', { class: 'thread-archive-actions' },
+            !thread.archived && activeWorkers.length > 0 ? h('button', {
+              type: 'button',
+              class: 'button danger quiet',
+              disabled: stoppingThreadAgents ? true : null,
+              dataset: { action: 'stop-thread-workers', thread: thread.id, focus: `stop-thread-workers:${thread.id}` },
+            }, icon('stop'), stoppingThreadAgents
+              ? t('stoppingThreadWorkers')
+              : (activeWorkers.length > 1 ? t('stopThreadWorkersMany', { count: activeWorkers.length }) : t('stopThreadWorkersOne'))) : null,
+            h('button', {
+              type: 'button', class: 'button quiet',
+              disabled: archiving || (!thread.archived && hasActive) ? true : null,
+              title: !thread.archived && hasActive ? t('archiveActiveHint') : null,
+              dataset: { action: thread.archived ? 'unarchive-thread' : 'archive-thread', thread: thread.id, focus: `archive:${thread.id}` },
+            }, icon('archive'), t(thread.archived ? (archiving ? 'unarchivingThread' : 'unarchiveThread') : (archiving ? 'archivingThread' : 'archiveThread'))))),
         waiting.length ? h('section', { class: 'context-section' }, h('h3', { class: 'section-title' }, t('needsYou'), h('strong', null, t(waiting.length === 1 ? 'decisionCountOne' : 'decisionCount', { count: waiting.length }))), waiting.map(attentionNode)) : null,
+        threadPlansSection(thread),
         h('section', { class: 'context-section' },
           h('h3', { class: 'section-title' }, t(workers.length ? 'agent' : 'execution'), h('span', null, workers.length ? '' : t('noWorkers'))),
           workers.map((worker) => workerNode(thread, worker))),
@@ -2903,6 +3105,12 @@ document.addEventListener('click', (event) => {
       checkpointModal.openSkillOffer(offer);
       return renderDialog();
     }
+    case 'stop-worker': return void stopWorkerInline(dataset.worker, dataset.thread);
+    case 'stop-thread-workers': return void stopThreadWorkers(dataset.thread);
+    case 'cancel-thread-plans': return void cancelThreadPlans(dataset.thread);
+    case 'cancel-thread-followup': return void mutateThreadPlanItem({ action: 'cancel_followup', followupId: dataset.followup }, `f:${dataset.followup}`);
+    case 'cancel-thread-watch': return void mutateThreadPlanItem({ action: 'cancel_pr_watch', watchId: dataset.watch }, `w:${dataset.watch}`);
+    case 'pause-thread-routine': return void mutateThreadPlanItem({ action: 'pause_routine', routineId: dataset.routine, paused: true }, `r:${dataset.routine}`);
     case 'archive-thread': return void archiveThread(dataset.thread, true, 'auto');
     case 'unarchive-thread': return void archiveThread(dataset.thread, false);
     case 'archive-confirm-keep': return void archiveThread(dataset.thread, true, 'keep');

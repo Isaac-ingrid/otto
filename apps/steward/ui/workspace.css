@@ -1044,3 +1044,17 @@ input.masked-secret { -webkit-text-security: disc; }
 .cp-skill-path { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 .cp-trust-note { margin: 0; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .cp-trust-note.ok { color: var(--green); }
+
+/* Three-way stop & inline thread plans */
+.working { flex-wrap: wrap; row-gap: 6px; }
+.working-subnote { font-size: 10px; color: var(--muted); margin-left: 4px; }
+.worker-actions { flex-wrap: wrap; gap: 8px; }
+.worker-actions button.stop-worker-btn { color: #e27860; font-weight: 500; }
+.worker-actions button.stop-worker-btn:hover:not(:disabled) { color: #ff9b85; }
+.thread-archive-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.thread-plan-card { border: 1px solid #1e261d; background: #0b0f0c; border-radius: var(--radius); padding: 10px 11px; display: flex; flex-direction: column; gap: 6px; }
+.thread-plan-card + .thread-plan-card { margin-top: 8px; }
+.thread-plan-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 10px var(--mono); color: var(--ink); }
+.thread-plan-body { font-size: 11.5px; color: #959f98; line-height: 1.6; overflow-wrap: anywhere; margin: 0; }
+.thread-plan-body a { color: var(--green); text-decoration: underline; }
+.thread-plan-sweep { margin-bottom: 9px; }
