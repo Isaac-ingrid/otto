@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { type RepoCapability } from "./git.ts";
 import { AgentModelCatalogSchema, AgentModelIdSchema, AgentModelObservationSchema } from './agent-models.ts';
+import { REPO_SKILL_HELLO_MAX_ITEMS, RepoSkillBriefSchema } from "./repo-skills.ts";
 
 export const PROTOCOL_VERSION = { min: 1, max: 1 } as const;
 
@@ -36,6 +37,10 @@ export const RepoSchema = z.object({
   hasSetupHook: z.boolean().optional(),
   hasArchiveHook: z.boolean().optional(),
   approved: z.boolean().optional(),
+  /** Ambient Memory & Skill Loop: whether `otto repo-config --approve` is enabled for `pi`,
+   *  plus bounded metadata-only briefs of whitelisted repository skill files. */
+  projectApproved: z.boolean().optional(),
+  skills: z.array(RepoSkillBriefSchema).max(REPO_SKILL_HELLO_MAX_ITEMS).optional(),
 });
 
 export type Repo = z.infer<typeof RepoSchema>;

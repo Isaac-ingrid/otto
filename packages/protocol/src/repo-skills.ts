@@ -5,6 +5,7 @@ import { z } from "zod";
 
 export const REPO_SKILL_MAX_BYTES = 32 * 1024;
 export const REPO_SKILL_LIST_MAX_ITEMS = 100;
+export const REPO_SKILL_HELLO_MAX_ITEMS = 25;
 export const REPO_SKILL_LIST_MAX_BYTES = 48 * 1024;
 export const REPO_SKILL_TIMEOUT_MS = 8_000;
 
@@ -44,6 +45,15 @@ export const RepoSkillScopeSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 export type RepoSkillScope = z.infer<typeof RepoSkillScopeSchema>;
+
+export const RepoSkillBriefSchema = z.object({
+  target: RepoSkillTargetSchema,
+  slug: SkillSlugSchema,
+  relativePath: z.string().min(1).max(256),
+  name: z.string().min(1).max(80),
+  description: z.string().max(160),
+});
+export type RepoSkillBrief = z.infer<typeof RepoSkillBriefSchema>;
 
 export const RepoSkillSummarySchema = z.object({
   target: RepoSkillTargetSchema,
