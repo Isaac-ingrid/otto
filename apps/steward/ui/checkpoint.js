@@ -32,6 +32,8 @@ export function createCheckpointModal(deps) {
     status: 'idle',
     checkpoint: null,
     distilling: null,
+    distillNotice: null,
+    distillErrorDetail: '',
     handoff: null,
     skillData: null,
     skillMarkdownDraft: '',
@@ -44,6 +46,7 @@ export function createCheckpointModal(deps) {
     skillSavedResult: null,
     selectedNotes: new Set(),
     savingNotes: false,
+    notesNotice: null,
   };
 
   const touch = () => {
@@ -87,10 +90,20 @@ export function createCheckpointModal(deps) {
     touch();
   }
 
+  function scrollToDraft(elementId) {
+    if (typeof requestAnimationFrame !== 'function') return;
+    requestAnimationFrame(() => {
+      document.getElementById(elementId)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }
+
   async function runDistill(mode) {
     if (state.distilling || !state.workerId) return;
     state.distilling = mode;
+    state.distillNotice = null;
+    state.distillErrorDetail = '';
     touch();
+    let scrollTarget = null;
     try {
       const { status, data } = await request(`/app/api/workers/${encodeURIComponent(state.workerId)}/distill`, {
         id: uuid(),
@@ -99,6 +112,8 @@ export function createCheckpointModal(deps) {
       if (status === 200 && data) {
         if (mode === 'handoff') {
           state.handoff = data;
+          state.distillNotice = 'handoff_ok';
+          scrollTarget = 'ck-handoff-box';
         } else {
           state.skillData = data;
           state.skillMarkdownDraft = data.skill?.markdown ?? '';
@@ -108,18 +123,28 @@ export function createCheckpointModal(deps) {
           state.skillConfirmOverwrite = false;
           state.skillWriteError = null;
           state.skillSavedResult = null;
+          state.notesNotice = null;
           state.selectedNotes = new Set((data.suggestedNotes ?? []).map((_, idx) => idx));
+          state.distillNotice = 'skill_ok';
+          scrollTarget = 'ck-skill-box';
         }
       } else if (status === 409 && data?.error === 'over_budget') {
+        state.distillNotice = 'over_budget';
         toast(t('ckDistillOverLimit'));
       } else if (status !== 401) {
+        state.distillNotice = 'failed';
+        const detail = [data?.error, data?.reason].filter(Boolean).join(': ');
+        state.distillErrorDetail = detail ? ` (${detail})` : '';
         toast(t('ckDistillFailed'));
       }
     } catch {
+      state.distillNotice = 'failed';
+      state.distillErrorDetail = '';
       toast(t('ckDistillFailed'));
     } finally {
       state.distilling = null;
       touch();
+      if (scrollTarget) scrollToDraft(scrollTarget);
     }
   }
 
@@ -149,6 +174,7 @@ export function createCheckpointModal(deps) {
         state.skillWriteError = null;
         state.skillSavedResult = data;
         toast(t('cpSkillSavedToast', { path: data.summary.relativePath }));
+        if (refreshWorkspace) void refreshWorkspace();
       } else if (status === 409 && data?.error === 'already_exists') {
         state.skillConfirmOverwrite = true;
         state.skillWriteError = 'already_exists';
@@ -167,6 +193,7 @@ export function createCheckpointModal(deps) {
     const sd = state.skillData;
     if (!sd || state.savingNotes || state.selectedNotes.size === 0) return;
     state.savingNotes = true;
+    state.notesNotice = null;
     touch();
     try {
       const items = (sd.suggestedNotes ?? []).filter((_, idx) => state.selectedNotes.has(idx));
@@ -181,9 +208,11 @@ export function createCheckpointModal(deps) {
         });
       }
       state.selectedNotes.clear();
+      state.notesNotice = 'saved';
       toast(t('ckNotesSaved'));
       await refreshWorkspace();
     } catch {
+      state.notesNotice = 'failed';
       toast(t('cpActionFailed'));
     } finally {
       state.savingNotes = false;
@@ -326,6 +355,25 @@ export function createCheckpointModal(deps) {
           : null));
   }
 
+  function renderDistillNotice() {
+    if (state.distilling) {
+      return h('p', { class: 'cp-trust-note', role: 'status' }, icon('sparkle'), t('ckDistillingHint'));
+    }
+    if (state.distillNotice === 'skill_ok') {
+      return h('p', { class: 'cp-trust-note ok', role: 'status' }, icon('check'), t('ckSkillDraftReady'));
+    }
+    if (state.distillNotice === 'handoff_ok') {
+      return h('p', { class: 'cp-trust-note ok', role: 'status' }, icon('check'), t('ckHandoffReady'));
+    }
+    if (state.distillNotice === 'over_budget') {
+      return h('p', { class: 'cp-error', role: 'alert' }, t('ckDistillOverLimit'));
+    }
+    if (state.distillNotice === 'failed') {
+      return h('p', { class: 'cp-error', role: 'alert' }, `${t('ckDistillFailed')}${state.distillErrorDetail}`);
+    }
+    return null;
+  }
+
   function renderDistillSection() {
     const busy = Boolean(state.distilling);
     const ho = state.handoff;
@@ -346,8 +394,9 @@ export function createCheckpointModal(deps) {
           disabled: busy,
           onclick: () => void runDistill('skill'),
         }, icon('memory'), state.distilling === 'skill' ? t('ckDistilling') : t('ckDistillSkillBtn'))),
+      renderDistillNotice(),
       ho
-        ? h('div', { class: 'cp-create-form' },
+        ? h('div', { id: 'ck-handoff-box', class: 'cp-create-form' },
           h('span', { class: 'cp-meta' }, t('ckHandoffSummary')),
           h('p', { class: 'cp-note-text' }, ho.summary),
           renderBulletCard('ckAccomplished', ho.accomplished),
@@ -370,7 +419,7 @@ export function createCheckpointModal(deps) {
               : null))
         : null,
       sd
-        ? h('div', { class: 'cp-create-form' },
+        ? h('div', { id: 'ck-skill-box', class: 'cp-create-form' },
           h('span', { class: 'cp-meta' }, t('ckSkillPreviewTitle')),
           h('textarea', {
             class: 'cp-textarea cp-code-textarea',
@@ -391,6 +440,11 @@ export function createCheckpointModal(deps) {
               class: 'cp-mini-btn',
               onclick: () => void copyText(state.skillMarkdownDraft),
             }, t('ckCopySkill'))),
+          state.notesNotice === 'saved'
+            ? h('p', { class: 'cp-trust-note ok', role: 'status' }, icon('check'), t('ckNotesSaved'))
+            : state.notesNotice === 'failed'
+              ? h('p', { class: 'cp-error', role: 'alert' }, t('cpActionFailed'))
+              : null,
           sd.suggestedNotes?.length
             ? h('div', { class: 'cp-card' },
               h('span', { class: 'cp-meta' }, t('ckSuggestedNotesTitle')),
@@ -424,15 +478,51 @@ export function createCheckpointModal(deps) {
       state.workerId = workerId;
       state.threadId = threadId ?? null;
       state.checkpoint = null;
+      state.distillNotice = null;
       state.handoff = null;
       state.skillData = null;
       state.skillMarkdownDraft = '';
       state.skillSlugDraft = '';
+      state.skillTarget = 'agents-skill';
+      state.skillScopeKind = 'repo';
       state.skillConfirmOverwrite = false;
       state.skillWriteError = null;
       state.skillSavedResult = null;
+      state.notesNotice = null;
       state.selectedNotes.clear();
       void loadCheckpoint(workerId);
+    },
+    openSkillOffer(offer) {
+      state.workerId = offer.workerId;
+      state.threadId = offer.threadId ?? null;
+      state.checkpoint = null;
+      state.distillNotice = 'skill_ok';
+      state.handoff = null;
+      state.skillData = {
+        mode: 'skill',
+        workerId: offer.workerId,
+        deviceId: offer.deviceId,
+        repoId: offer.repoId,
+        repoName: offer.repoName ?? null,
+        hasWriteWorktree: false,
+        skill: {
+          slug: offer.slug,
+          name: offer.name,
+          description: offer.description,
+          markdown: offer.markdown,
+        },
+        suggestedNotes: [],
+      };
+      state.skillMarkdownDraft = offer.markdown ?? '';
+      state.skillSlugDraft = offer.slug ?? '';
+      state.skillTarget = offer.target || 'agents-skill';
+      state.skillScopeKind = 'repo';
+      state.skillConfirmOverwrite = false;
+      state.skillWriteError = null;
+      state.skillSavedResult = null;
+      state.notesNotice = null;
+      state.selectedNotes.clear();
+      void loadCheckpoint(offer.workerId);
     },
     title() {
       return t('ckDialogTitle', { worker: state.workerId ?? '' });
@@ -441,15 +531,16 @@ export function createCheckpointModal(deps) {
       return [state.workerId, state.rev];
     },
     render() {
+      const topSection = state.status === 'loading' && !state.checkpoint
+        ? h('p', { class: 'cp-empty' }, t('ckLoading'))
+        : state.status === 'error' && !state.checkpoint
+          ? h('p', { class: 'cp-error' }, t('ckLoadFailed'))
+          : state.checkpoint
+            ? renderCheckpointSection(state.checkpoint)
+            : null;
+      const bottomSection = state.checkpoint || state.skillData ? renderDistillSection() : null;
       return h('div', { class: 'cp-root' },
-        h('div', { class: 'cp-pane' },
-          state.status === 'loading' && !state.checkpoint
-            ? h('p', { class: 'cp-empty' }, t('ckLoading'))
-            : state.status === 'error'
-              ? h('p', { class: 'cp-error' }, t('ckLoadFailed'))
-              : state.checkpoint
-                ? [renderCheckpointSection(state.checkpoint), renderDistillSection()]
-                : null));
+        h('div', { class: 'cp-pane' }, topSection, bottomSection));
     },
   };
 }

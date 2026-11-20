@@ -130,7 +130,7 @@ function buttonLabel(button) {
 const cardTitle = (card) => (KNOWN_TITLES[card.title] ? t(KNOWN_TITLES[card.title]) : card.title);
 const cardHeading = (card) => cardTitle(card) || card.body[0] || t(`kind${cap(card.kind)}`);
 
-function cardNode(card, cardId, open) {
+function cardNode(card, cardId, open, skillOffer = null) {
   const busy = state.busyCards.has(cardId);
   const actions = card.buttons.map((button) => {
     const label = buttonLabel(button);
@@ -142,6 +142,13 @@ function cardNode(card, cardId, open) {
       'aria-busy': busy ? 'true' : null, disabled: busy ? true : null,
     }, label);
   }).filter(Boolean);
+  if (open && skillOffer) {
+    actions.push(h('button', {
+      type: 'button', class: 'button quiet',
+      dataset: { action: 'preview-skill-offer', card: cardId, focus: `preview:${cardId}` },
+      disabled: busy ? true : null,
+    }, icon('sparkle'), t('actionSkillOfferPreview')));
+  }
   const canAnswer = canAnswerCard(card, cardId, open);
   return h('div', { class: `card${open ? ' is-open' : ''}`, dataset: { tone: card.tone, kind: card.kind } },
     h('div', { class: 'card-kind' }, icon(KIND_ICONS[card.kind]), t(`kind${cap(card.kind)}`)),
@@ -262,7 +269,7 @@ function assistantMessage(message) {
     h('div', { class: 'message-header' }, h('img', { class: 'agent-avatar', src: '/brand/otto.svg', width: 26, height: 26, alt: '' }), 'Otto', h('span', { class: 'message-time' }, formatClock(message.at))),
     h('div', { class: 'message-body' },
       state.selected ? null : threadReference(message.threadId),
-      message.card ? cardNode(message.card, message.id, message.open === true) : markup(message.text ?? '')));
+      message.card ? cardNode(message.card, message.id, message.open === true, message.skillOffer ?? null) : markup(message.text ?? '')));
 }
 
 /** The reply being written, shown as it arrives; the finished message replaces it. */
@@ -536,7 +543,7 @@ function activityItem(entry) {
 function attentionNode(item) {
   const inFeed = state.snapshot.messages.some((message) => message.id === item.id);
   return h('div', null,
-    cardNode(item, item.id, true),
+    cardNode(item, item.id, true, item.skillOffer ?? null),
     inFeed ? h('button', { type: 'button', class: 'context-link', dataset: { jump: item.id } }, t('showInChat')) : null);
 }
 
@@ -1618,13 +1625,23 @@ function renderDialog() {
     type === 'archive-confirm' ? [state.dialog.threadId, state.dialog.unmergedWorkers, [...state.archivingThreads]] : null,
     type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
+    const bodyNode = $('#dialog-body');
+    const sameType = state.dialog.renderedType === type;
+    const bodyTop = sameType ? bodyNode.scrollTop : 0;
+    const paneTop = sameType ? (bodyNode.querySelector('.cp-pane')?.scrollTop ?? 0) : 0;
     const { title, body } = dialogContent();
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
     $('#dialog').classList.toggle('diff-dialog', type === 'diff');
     $('#dialog').classList.toggle('control-dialog', type === 'control-plane' || type === 'checkpoint');
     $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
-    preservingFocus($('#dialog-body'), () => $('#dialog-body').replaceChildren(...[body].flat(Infinity).filter(Boolean)));
+    preservingFocus(bodyNode, () => bodyNode.replaceChildren(...[body].flat(Infinity).filter(Boolean)));
+    state.dialog.renderedType = type;
+    if (sameType) {
+      bodyNode.scrollTop = bodyTop;
+      const nextPane = bodyNode.querySelector('.cp-pane');
+      if (nextPane) nextPane.scrollTop = paneTop;
+    }
   });
   if (!$('#dialog').open) $('#dialog').showModal();
 }
@@ -2877,6 +2894,15 @@ document.addEventListener('click', (event) => {
       drawn.delete('dialog');
       checkpointModal.open(dataset.worker, dataset.thread);
       return renderDialog();
+    case 'preview-skill-offer': {
+      const offer = state.snapshot?.messages.find((m) => m.id === dataset.card)?.skillOffer
+        ?? state.snapshot?.attention.find((a) => a.id === dataset.card)?.skillOffer;
+      if (!offer) return;
+      state.dialog = { type: 'checkpoint', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      checkpointModal.openSkillOffer(offer);
+      return renderDialog();
+    }
     case 'archive-thread': return void archiveThread(dataset.thread, true, 'auto');
     case 'unarchive-thread': return void archiveThread(dataset.thread, false);
     case 'archive-confirm-keep': return void archiveThread(dataset.thread, true, 'keep');

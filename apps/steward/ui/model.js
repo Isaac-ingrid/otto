@@ -111,6 +111,8 @@ export const replyTarget = (snapshot, cardId) => snapshot.attention.find((item) 
 export const ACTION_KEYS = {
   pr_approve: 'actionApprove', pr_decline: 'actionDecline', wait_online: 'actionWait', switch_machine: 'actionSwitch', cancel: 'actionCancel',
   routine_accept: 'actionRoutineAccept', routine_decline: 'actionRoutineDecline', note_archive: 'actionArchive', note_keep: 'actionKeep',
+  note_confirm: 'actionNoteConfirm', note_remove: 'actionNoteRemove',
+  skill_offer_accept: 'actionSkillOfferAccept', skill_offer_decline: 'actionSkillOfferDecline',
 };
 
 /** Fixed titles of the system's own cards. */
@@ -118,6 +120,8 @@ export const KNOWN_TITLES = {
   '需要你拍板': 'titleDecision',
   '一条记忆很久没用了': 'titleMemory',
   '要把这个变成例行任务吗？': 'titleRoutine',
+  '记住这条项目观察吗？': 'titleNoteConfirm',
+  '要把这次排障套路存成仓库技能吗？': 'titleSkillOffer',
 };
 
 /** Full-screen states: [title, body]. */

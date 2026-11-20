@@ -722,6 +722,16 @@ export const STRINGS = {
   ckWritingRepo: ['Writing…', '正在写入…'],
   ckOpenSkillCatalog: ['Open Repo Skills catalog', '打开仓库技能目录'],
   machineRepoSkills: ['Repo Skills', '仓库技能'],
+  titleNoteConfirm: ['Remember this project observation?', '记住这条项目观察吗？'],
+  titleSkillOffer: ['Save this troubleshooting workflow as a repo skill?', '要把这次排障套路存成仓库技能吗？'],
+  actionNoteConfirm: ['Confirm', '确认有效'],
+  actionNoteRemove: ['Delete', '删除'],
+  actionSkillOfferAccept: ['Save to repo skills', '写入仓库技能'],
+  actionSkillOfferDecline: ['Dismiss', '忽略'],
+  actionSkillOfferPreview: ['Preview & edit', '预览与编辑'],
+  ckDistillingHint: ['Generating with Steward model (usually 5–20s)…', '正在调用总管模型提炼（通常需 5～20 秒）…'],
+  ckSkillDraftReady: ['SKILL.md draft ready below (not saved to disk yet) — review and click “Write to repository”.', '已在下方生成 SKILL.md 草稿（尚未落盘）—— 请核对后点击「写入仓库」。'],
+  ckHandoffReady: ['Compacted handoff brief ready below.', '已在下方生成压缩续跑简报。'],
 };
 
 const LOCALE_KEY = 'pip.locale';
