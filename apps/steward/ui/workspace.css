@@ -1058,3 +1058,24 @@ input.masked-secret { -webkit-text-security: disc; }
 .thread-plan-body { font-size: 11.5px; color: #959f98; line-height: 1.6; overflow-wrap: anywhere; margin: 0; }
 .thread-plan-body a { color: var(--green); text-decoration: underline; }
 .thread-plan-sweep { margin-bottom: 9px; }
+
+/* Read-only PR CI failure diagnosis */
+.thread-plan-failure, .cp-failure-banner { display: flex; align-items: flex-start; gap: 6px; padding: 6px 8px; border-radius: var(--radius); background: rgba(226, 120, 96, 0.1); border: 1px solid rgba(226, 120, 96, 0.28); color: #f0a08d; font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.thread-plan-failure svg, .cp-failure-banner svg { width: 13px; height: 13px; flex-shrink: 0; margin-top: 2px; color: #e27860; }
+.thread-plan-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.pr-diag-pane { display: flex; flex-direction: column; gap: 12px; }
+.pr-diag-meta { flex-wrap: wrap; gap: 8px; }
+.pr-diag-note { margin: 0; }
+.pr-diag-summary { border-color: rgba(226, 120, 96, 0.35); background: #101411; }
+.pr-diag-headline { margin: 0; font-size: 13.5px; font-weight: 600; color: var(--ink); line-height: 1.5; }
+.pr-diag-causes { margin: 4px 0 0; padding-left: 18px; color: #b9c2bc; font-size: 12px; line-height: 1.6; display: flex; flex-direction: column; gap: 4px; }
+.pr-diag-skip-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.pr-diag-item-name { font: 12px var(--mono); color: var(--ink); }
+.pr-diag-step { margin: 2px 0 0; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #f0a08d; }
+.pr-diag-step svg { width: 13px; height: 13px; flex-shrink: 0; color: #e27860; }
+.pr-diag-block { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.pr-diag-annotations { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #b9c2bc; line-height: 1.55; overflow-wrap: anywhere; }
+.pr-diag-log-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pr-diag-log { margin: 0; max-height: 260px; overflow: auto; padding: 10px 12px; border-radius: var(--radius); background: #070a08; border: 1px solid #1a211b; font: 11px/1.55 var(--mono); color: #cbd4ce; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pr-diag-footer { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.pr-diag-footnote { margin: 0; }

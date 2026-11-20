@@ -10,6 +10,7 @@ import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline,
 import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, threadMatches, withPending, workOn } from "../ui/model.js";
 import { formatCheckpointPlainText } from "../ui/checkpoint.js";
 import { CONTROL_PLANE_I18N_KEYS, controlPlaneCounts, skillErrorKey, skillTargetI18nKey } from "../ui/control-plane.js";
+import { PR_DIAGNOSIS_I18N_KEYS, formatPrDiagnosisPlainText, prDiagnosisCategoryKey, prDiagnosisSkipKey, prDiagnosisSourceKey } from "../ui/pr-diagnosis.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -28,7 +29,7 @@ const asset = async (name: string): Promise<string> => (await fetchAsset(name)).
 // design §6) — it is included here for the sink scan and the import-export check (it has no
 // imports, so that check is a no-op for it) but NOT in the i18n-completeness scan below, whose
 // own file list is separate and intentionally does not reach it.
-const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
+const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
 
 /** The text between the parentheses of every call to `fn(…)` (not `x.fn(…)`, not `prefixfn(…)`). */
 function callArguments(source: string, fn: string): string[] {
@@ -140,7 +141,7 @@ describe("interface copy", () => {
 
   it("covers every string the page asks for, including the data-driven ones", async () => {
     const used = new Set<string>();
-    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js"]) {
+    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js"]) {
       const source = await asset(name);
       for (const args of callArguments(source, "t")) for (const key of args.matchAll(/'([A-Za-z_:]+)'/g)) used.add(key[1]!);
       for (const attribute of source.matchAll(/data-i18n(?:-[a-z]+)?="([A-Za-z_:]+)"/g)) used.add(attribute[1]!);
@@ -152,7 +153,7 @@ describe("interface copy", () => {
     for (const state of ["connecting", "live", "reconnecting", "disconnected"]) used.add(state);
     // The session viewer labels the bookkeeping entries an agent writes by kind (session-model.js).
     for (const kind of ["session", "model", "thinking_level", "compaction", "branch_summary", "custom", "label", "session_info", "usage", "context_edit", "system", "summary", "info", "error"]) used.add(`svMeta_${kind}`);
-    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS), ...CONTROL_PLANE_I18N_KEYS]) used.add(key);
+    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS), ...CONTROL_PLANE_I18N_KEYS, ...PR_DIAGNOSIS_I18N_KEYS]) used.add(key);
     expect(used.size).toBeGreaterThan(60);
     expect([...used].filter((key) => !(key in STRINGS))).toEqual([]);
   });
@@ -581,5 +582,26 @@ describe("control plane counts", () => {
     expect(skillTargetI18nKey("agents-skill")).toBe("cpSkillTarget_agents_skill");
     expect(skillTargetI18nKey("claude-skill")).toBe("cpSkillTarget_claude_skill");
     expect(skillTargetI18nKey("claude-command")).toBe("cpSkillTarget_claude_command");
+    expect(prDiagnosisCategoryKey("test_failure")).toBe("prDiagCat_test_failure");
+    expect(prDiagnosisCategoryKey("unexpected")).toBe("prDiagCat_unknown");
+    expect(prDiagnosisSourceKey("actions_logs")).toBe("prDiagSource_actions_logs");
+    expect(prDiagnosisSkipKey("skipped_over_budget")).toBe("prDiagSkip_over_budget");
+    expect(prDiagnosisSkipKey("ready")).toBeNull();
+    const diagPlain = formatPrDiagnosisPlainText({
+      watch: { url: "https://github.com/acme/repo/pull/7" },
+      snapshot: {
+        head: "1".repeat(40),
+        items: [{
+          name: "unit-tests",
+          conclusion: "failure",
+          failedStep: "Run vitest",
+          annotations: [{ path: "src/a.ts", line: 9, title: "Error", message: "boom" }],
+          logExcerpt: "FAIL src/a.test.ts",
+        }],
+      },
+      effectiveDiagnosis: { headline: "Unit test failed", rootCauses: ["boom at line 9"] },
+    });
+    expect(diagPlain).toContain("Run vitest");
+    expect(diagPlain).toContain("src/a.ts:9");
   });
 });

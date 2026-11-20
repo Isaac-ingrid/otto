@@ -61,7 +61,7 @@ export function controlPlaneCounts(summary) {
 const repoCompositeKey = (r) => `${r.deviceId ?? ''}::${r.id}`;
 
 export function createControlPlane(deps) {
-  const { request, uuid, toast, bump, refreshWorkspace, openThread, serverNow } = deps;
+  const { request, uuid, toast, bump, refreshWorkspace, openThread, openPrDiagnosis, prefillPrFix, serverNow } = deps;
   let searchTimer = null;
 
   const cp = {
@@ -794,8 +794,27 @@ export function createControlPlane(deps) {
       h('div', { class: 'cp-submeta' },
         h('span', null, t('cpWatchChecks', { total: w.checks ?? 0, failed: w.failed ?? 0, pending: w.pending ?? 0 })),
         w.lastError ? h('span', { class: 'cp-warn-text' }, w.lastError) : null),
+      w.hasFailureDetail
+        ? h('div', { class: 'cp-failure-banner' },
+          icon('alert'),
+          h('span', null, w.failureHeadline || t('prDiagFallbackHeadline')))
+        : null,
       h('div', { class: 'cp-card-actions' },
         threadLinkBtn(w.threadId, w.threadTitle),
+        w.hasFailureDetail && openPrDiagnosis
+          ? h('button', {
+            type: 'button',
+            class: 'cp-action-btn',
+            onclick: () => openPrDiagnosis(w.id, { head: w.head, threadId: w.threadId, url: w.url, fromControlPlane: true }),
+          }, t('prDiagViewLogsBtn'))
+          : null,
+        w.hasFailureDetail && prefillPrFix
+          ? h('button', {
+            type: 'button',
+            class: 'cp-action-btn',
+            onclick: () => void prefillPrFix(w.id, { head: w.head, threadId: w.threadId, url: w.url }),
+          }, t('prDiagPrefillBtn'))
+          : null,
         active ? h('button', {
           type: 'button',
           class: 'cp-action-btn danger',

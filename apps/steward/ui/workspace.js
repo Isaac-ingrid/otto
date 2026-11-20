@@ -13,6 +13,7 @@ import { modelPicker } from './model-picker.js';
 import { markup } from './markup.js';
 import { createCheckpointModal } from './checkpoint.js';
 import { controlPlaneCounts, createControlPlane } from './control-plane.js';
+import { createPrDiagnosisModal } from './pr-diagnosis.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
 import { mountSessionViewer } from './session.js';
 import {
@@ -804,7 +805,23 @@ function threadPlansSection(thread) {
             disabled: busy ? true : null,
             dataset: { action: 'cancel-thread-watch', watch: w.id, focus: `cancel-w:${w.id}` },
           }, t('threadPlanCancelOne'))),
-        h('p', { class: 'thread-plan-body' }, h('a', { href: w.url, target: '_blank', rel: 'noopener noreferrer' }, w.url)));
+        h('p', { class: 'thread-plan-body' }, h('a', { href: w.url, target: '_blank', rel: 'noopener noreferrer' }, w.url)),
+        w.hasFailureDetail
+          ? [
+            h('div', { class: 'thread-plan-failure' }, icon('alert'), h('span', null, w.failureHeadline || t('prDiagFallbackHeadline'))),
+            h('div', { class: 'thread-plan-actions' },
+              h('button', {
+                type: 'button',
+                class: 'button quiet',
+                dataset: { action: 'open-pr-diagnosis', watch: w.id, thread: thread.id, head: w.head ?? '', url: w.url, focus: `diag-w:${w.id}` },
+              }, t('prDiagViewLogsBtn')),
+              h('button', {
+                type: 'button',
+                class: 'button quiet',
+                dataset: { action: 'prefill-pr-fix', watch: w.id, thread: thread.id, head: w.head ?? '', url: w.url, focus: `fix-w:${w.id}` },
+              }, t('prDiagPrefillBtn'))),
+          ]
+          : null);
     }),
     routines.map((r) => {
       const busy = state.stoppingThreadPlans.has(`r:${r.id}`);
@@ -1775,8 +1792,39 @@ function dialogContent() {
   if (state.dialog.type === 'checkpoint') {
     return { title: checkpointModal.title(), body: checkpointModal.render() };
   }
+  if (state.dialog.type === 'pr-diagnosis') {
+    return { title: prDiagnosisModal.title(), body: prDiagnosisModal.render() };
+  }
   return { title: t('accountTitle'), body: accountSection() };
 }
+
+function fillThreadComposer(threadId, promptText) {
+  if (state.dialog) state.dialog.returnTo = null;
+  closeDialog();
+  select(threadId);
+  const input = $('#message-input');
+  input.value = promptText;
+  state.drafts.set(scopeKey(), promptText);
+  $('#send-button').disabled = !promptText.trim();
+  resizeInput();
+  input.focus();
+}
+
+function openPrDiagnosisDialog(watchId, opts = {}) {
+  const returnTo = opts.fromControlPlane && state.dialog?.type === 'control-plane' ? 'control-plane' : null;
+  state.dialog = { type: 'pr-diagnosis', rev: 0, pairing: null, confirm: null, passkeyAdd: null, ...(returnTo ? { returnTo } : {}) };
+  drawn.delete('dialog');
+  prDiagnosisModal.open(watchId, opts);
+  renderDialog();
+}
+
+const prDiagnosisModal = createPrDiagnosisModal({
+  request: (path, body) => request(path, body),
+  uuid,
+  toast,
+  bump: () => bumpDialog(),
+  fillContinuation: fillThreadComposer,
+});
 
 const controlPlane = createControlPlane({
   request: (path, body) => request(path, body),
@@ -1785,6 +1833,8 @@ const controlPlane = createControlPlane({
   bump: () => bumpDialog(),
   refreshWorkspace: () => refresh(),
   openThread: (threadId) => { closeDialog(); select(threadId); },
+  openPrDiagnosis: (watchId, opts) => openPrDiagnosisDialog(watchId, opts),
+  prefillPrFix: (watchId, opts) => prDiagnosisModal.prefillQuickFix(watchId, opts),
   serverNow,
 });
 
@@ -1800,16 +1850,7 @@ const checkpointModal = createCheckpointModal({
     controlPlane.open('skills', { deviceId, repoId });
     renderDialog();
   },
-  fillContinuation: (threadId, promptText) => {
-    closeDialog();
-    select(threadId);
-    const input = $('#message-input');
-    input.value = promptText;
-    state.drafts.set(scopeKey(), promptText);
-    $('#send-button').disabled = !promptText.trim();
-    resizeInput();
-    input.focus();
-  },
+  fillContinuation: fillThreadComposer,
 });
 
 /** Rebuilds the open dialog only when what it shows changed, so a typed key or a selected command survives a refresh. */
@@ -1824,6 +1865,7 @@ function renderDialog() {
     type === 'diff' ? [state.diffRev, state.dialog.workerId] : null,
     type === 'control-plane' ? [controlPlane.signature(), snapshot?.controlPlaneSummary, minuteBucket()] : null,
     type === 'checkpoint' ? [checkpointModal.signature()] : null,
+    type === 'pr-diagnosis' ? [prDiagnosisModal.signature()] : null,
     type === 'archive-confirm' ? [state.dialog.threadId, state.dialog.unmergedWorkers, [...state.archivingThreads]] : null,
     type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
@@ -1835,7 +1877,7 @@ function renderDialog() {
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
     $('#dialog').classList.toggle('diff-dialog', type === 'diff');
-    $('#dialog').classList.toggle('control-dialog', type === 'control-plane' || type === 'checkpoint');
+    $('#dialog').classList.toggle('control-dialog', type === 'control-plane' || type === 'checkpoint' || type === 'pr-diagnosis');
     $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
     preservingFocus(bodyNode, () => bodyNode.replaceChildren(...[body].flat(Infinity).filter(Boolean)));
     state.dialog.renderedType = type;
@@ -3110,6 +3152,8 @@ document.addEventListener('click', (event) => {
     case 'cancel-thread-plans': return void cancelThreadPlans(dataset.thread);
     case 'cancel-thread-followup': return void mutateThreadPlanItem({ action: 'cancel_followup', followupId: dataset.followup }, `f:${dataset.followup}`);
     case 'cancel-thread-watch': return void mutateThreadPlanItem({ action: 'cancel_pr_watch', watchId: dataset.watch }, `w:${dataset.watch}`);
+    case 'open-pr-diagnosis': return openPrDiagnosisDialog(dataset.watch, { head: dataset.head || null, threadId: dataset.thread || null, url: dataset.url || null });
+    case 'prefill-pr-fix': return void prDiagnosisModal.prefillQuickFix(dataset.watch, { head: dataset.head || null, threadId: dataset.thread || null, url: dataset.url || null });
     case 'pause-thread-routine': return void mutateThreadPlanItem({ action: 'pause_routine', routineId: dataset.routine, paused: true }, `r:${dataset.routine}`);
     case 'archive-thread': return void archiveThread(dataset.thread, true, 'auto');
     case 'unarchive-thread': return void archiveThread(dataset.thread, false);
