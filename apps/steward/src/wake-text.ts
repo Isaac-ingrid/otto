@@ -95,14 +95,20 @@ export function eventWakeText(input: EventWakeInput): string {
     if (r.leftovers?.length) lines.push(`  遗留：${r.leftovers.join("；")}`);
     if (r.question) lines.push(`  问题：${r.question}`);
     lines.push(`已发送给用户的通知：${input.notified ? "是（核心模板卡片）" : "否"}`);
+    const memoryHint = worker.repoId
+      ? `若本次汇报暴露了【非显而易见且后续任务必踩】的构建/测试/迁移命令、目录约定或环境根因（尤其带 blocked-by-env / flaky-test / needs-migration 标签时），可顺路用 notes_propose + notes_commit 记 1～2 条单句项目记忆（layer="project", repoId="${escapeMarkers(worker.repoId)}", source="worker_reported", evidence="report:${worker.workerId}"）；常规增删改修复无需记录。`
+      : "";
     lines.push(
       r.status === "done"
         ? isSibling
-          ? "这是只读探针（sibling）的完成汇报，核心未单独打扰用户。请把关键结论并入 update_thread 摘要（必要时用 send_to_worker 同步给主链 worker，或确需用户知晓时 notify_user）；无事可做用 no_action 结束。"
+          ? "这是只读探针（sibling）的完成汇报，核心未单独打扰用户。请把关键结论并入 update_thread 摘要（必要时用 send_to_worker 同步给主链 worker，或确需用户知晓时 notify_user）；" +
+            (memoryHint ? `${memoryHint}` : "") +
+            "无事可做用 no_action 结束。"
           : "请做记账：用 update_thread 更新摘要。" +
             (input.summaryRewriteDue
               ? "⚠️ 这次的摘要更新落在整十版：必须【从头重写】（按 get_thread 的时间线与汇报重建，不要在旧摘要上缝补）。"
               : "") +
+            (memoryHint ? `${memoryHint}` : "") +
             "除非有用户必须知道的新信息，不要再通知用户；无事可做用 no_action 结束。"
         : "问题尚未转给用户。90 秒内可用 answer_worker 回答纯事实问题（必须有笔记或用户消息 evidence）；需要决定或没有证据时，用 ask_user 转问，带 questionId。notify_user 也须带 questionId。没有处理则核心原文转发。",
     );

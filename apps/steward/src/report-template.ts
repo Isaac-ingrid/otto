@@ -541,6 +541,77 @@ export function routineOfferCard(input: { schedule: string; instruction: string 
   };
 }
 
+/**
+ * Ambient memory confirmation card (Direction: ambient-memory-and-skill-loop Stage 2):
+ * surfaces a newly recorded unconfirmed `worker_reported`/`inferred` project note right in chat
+ * so the owner can promote it to `confirmed = 1` or remove it in one deterministic tap.
+ */
+export function noteConfirmCard(input: {
+  noteId: string;
+  repoName: string;
+  text: string;
+  threadTitle?: string;
+}): LocalMessage {
+  const head = input.threadTitle ? `【${clip(input.threadTitle, 80)}】` : "";
+  return {
+    text: [
+      `${head}🧠 记住这条项目观察吗？`,
+      "",
+      `仓库：${clip(input.repoName, 60)}`,
+      `「${clip(input.text, 200)}」`,
+      "",
+      "确认后会在后续新任务派发时作为已验证项目约定自动带上；点「删除」会直接移除。",
+    ].join("\n"),
+    buttons: [
+      { label: "确认有效", action: "note_confirm", primary: true },
+      { label: "删除", action: "note_remove" },
+    ],
+  };
+}
+
+/**
+ * High-friction skill offer card (Direction: ambient-memory-and-skill-loop Stage 3):
+ * proposes saving a distilled SKILL.md to `.agents/skills/<slug>/SKILL.md` in the main repo
+ * checkout ONLY after an explicit owner click (`skill_offer_accept`).
+ */
+export function skillOfferCard(input: {
+  repoName: string;
+  name: string;
+  slug: string;
+  relativePath: string;
+  description: string;
+  summaryBullets: string[];
+  projectApproved: boolean;
+  threadTitle?: string;
+  failureReason?: string | null;
+}): LocalMessage {
+  const head = input.threadTitle ? `【${clip(input.threadTitle, 80)}】` : "";
+  const bullets = input.summaryBullets
+    .filter((b) => b.trim().length > 0)
+    .slice(0, 3)
+    .map((b) => `- ${clip(b, 120)}`);
+  const lines = [
+    `${head}💡 要把这次排障套路存成仓库技能吗？`,
+    "",
+    `技能：${clip(input.name, 80)}（\`${input.relativePath}\` · 仓库 ${clip(input.repoName, 50)}）`,
+    `适用场景：${clip(input.description, 180)}`,
+    ...(bullets.length > 0 ? ["", ...bullets] : []),
+    ...(!input.projectApproved
+      ? ["", "提示：Codex 与 Claude 可直接发现；该仓库尚未开启 pi 本地信任（`otto repo-config <path> --approve`），但派发摘要仍会提醒按需查阅该文件。"]
+      : []),
+    ...(input.failureReason ? ["", `上次写入未完成：${clip(input.failureReason, 140)}（处理后可再次点击「写入仓库技能」重试）`] : []),
+    "",
+    "未点击前不会改动磁盘文件；可在工作台中先预览与编辑草稿。",
+  ];
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      { label: "写入仓库技能", action: "skill_offer_accept", primary: true },
+      { label: "忽略", action: "skill_offer_decline" },
+    ],
+  };
+}
+
 // ---- quiet merging (issue #11, spec §7.6 / steward.md §6.4 / §15 item 9) -------------------------
 //
 // Several completions close together arrive as ONE short report: `urgency: quiet` rows hold

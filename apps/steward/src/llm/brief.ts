@@ -54,7 +54,18 @@ export function buildSituationBrief(ledger: Ledger, now: number = Date.now()): s
       ? "仓库：机器上还没有登记任何仓库。"
       : `仓库：${repoRows
           .slice(0, 8)
-          .map((r) => `${r.name}（${machines.find((m) => m.deviceId === r.deviceId)?.name ?? r.deviceId}${r.online ? "" : "，离线"}）`)
+          .map((r) => {
+            const machineLabel = `${machines.find((m) => m.deviceId === r.deviceId)?.name ?? r.deviceId}${r.online ? "" : "，离线"}`;
+            const skillCount = ledger.repos.contextFor ? ledger.repos.contextFor(r.repoId, r.deviceId).skills.length : 0;
+            const noteCount = ledger.notes?.list
+              ? ledger.notes.list({ layer: "project", scopeRepoId: r.repoId }).filter((n) => n.status === "active").length
+              : 0;
+            const tags = [
+              noteCount > 0 ? `记忆${noteCount}` : null,
+              skillCount > 0 ? `技能${skillCount}` : null,
+            ].filter((t): t is string => t !== null);
+            return `${r.name}（${machineLabel}${tags.length > 0 ? `，${tags.join("·")}` : ""}）`;
+          })
           .join("、")}${repoRows.length > 8 ? ` 等 ${repoRows.length} 个` : ""}`;
 
   // Open questions lead: they are the brief's most action-relevant content and must survive

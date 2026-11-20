@@ -17,11 +17,16 @@ import {
   normalizeReportLabels,
   PROPOSAL_CONFIRM_TTL_MS,
   ProposalEventSchema,
+  REPO_SKILL_HELLO_MAX_ITEMS,
+  RepoSkillBriefSchema,
   type AgentModelCatalog,
   type AgentModelObservation,
   type ProposalKind,
   type ProposalRejectCode,
   type ProposalStatus,
+  type RepoSkillBrief,
+  type RepoSkillSummary,
+  type RepoSkillTarget,
   type ReportLabel,
 } from "@isaac2ingrid/protocol";
 import type { GitFacts, HelloMessage } from "@isaac2ingrid/protocol";
@@ -239,6 +244,33 @@ export interface RepoSummaryRow {
   hasSetupHook: boolean;
   hasArchiveHook: boolean;
   approved: boolean;
+}
+
+export interface RepoContextRow {
+  projectApproved: boolean;
+  skills: RepoSkillBrief[];
+}
+
+export type SkillOfferStatus = "offered" | "saving" | "saved" | "failed" | "dismissed";
+
+export interface SkillOfferRow {
+  id: string;
+  workerId: string;
+  threadId: string;
+  deviceId: string;
+  repoId: string;
+  target: RepoSkillTarget;
+  slug: string;
+  name: string;
+  description: string;
+  summaryBullets: string[];
+  markdown: string;
+  status: SkillOfferStatus;
+  savedPath: string | null;
+  savedSha256: string | null;
+  failureReason: string | null;
+  createdAt: number;
+  decidedAt: number | null;
 }
 
 export interface OfflineDispatchRow {
@@ -810,19 +842,51 @@ export function createLedger(deps: LedgerDeps) {
     createdAt: r.createdAt as number,
   });
 
+  const sanitizeSkillBriefText = (raw: string, max: number): string =>
+    escapeMarkers(
+      raw
+        .replace(/\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+        .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}\b/g, "[REDACTED]")
+        .replace(/\bxox[baprs]-[A-Za-z0-9-]{12,}\b/g, "[REDACTED]")
+        .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED]")
+        .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED]")
+        .replace(/\bAQ\.[A-Za-z0-9._-]{20,}\b/g, "[REDACTED]")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim(),
+    ).slice(0, max);
+
+  const toStoredSkillBrief = (s: { target: RepoSkillTarget; slug: string; relativePath: string; name: string; description: string }): RepoSkillBrief | null => {
+    const parsed = RepoSkillBriefSchema.safeParse({
+      target: s.target,
+      slug: s.slug,
+      relativePath: s.relativePath.replace(/[\r\n\t]+/g, "").trim().slice(0, 256),
+      name: sanitizeSkillBriefText(s.name, 80) || s.slug,
+      description: sanitizeSkillBriefText(s.description, 160),
+    });
+    return parsed.success ? parsed.data : null;
+  };
+
   function recordRepository(deviceId: string, repo: HelloMessage["repos"][number]): void {
     const capabilityKind = repo.capabilityKind ?? capabilityOf(repo).kind;
     const hasSetupHook = repo.hasSetupHook === true ? 1 : 0;
     const hasArchiveHook = repo.hasArchiveHook === true ? 1 : 0;
     const approved = (hasSetupHook === 1 || hasArchiveHook === 1) && repo.approved === true ? 1 : 0;
+    const projectApproved = repo.projectApproved === true ? 1 : 0;
+    const briefs = (repo.skills ?? [])
+      .slice(0, REPO_SKILL_HELLO_MAX_ITEMS)
+      .map(toStoredSkillBrief)
+      .filter((b): b is RepoSkillBrief => b !== null);
     sql`
       INSERT OR REPLACE INTO sh_repo (
         repoId, deviceId, name, path, defaultBranch, remote,
-        capabilityKind, hasSetupHook, hasArchiveHook, approved, updatedAt
+        capabilityKind, hasSetupHook, hasArchiveHook, approved,
+        projectApproved, skillIndexJson, updatedAt
       )
       VALUES (
         ${repo.repoId}, ${deviceId}, ${repo.name}, ${repo.path}, ${repo.defaultBranch}, ${repo.remote},
-        ${capabilityKind}, ${hasSetupHook}, ${hasArchiveHook}, ${approved}, ${now()}
+        ${capabilityKind}, ${hasSetupHook}, ${hasArchiveHook}, ${approved},
+        ${projectApproved}, ${JSON.stringify(briefs)}, ${now()}
       )
     `;
   }
@@ -945,6 +1009,74 @@ export function createLedger(deps: LedgerDeps) {
         FROM sh_repo r LEFT JOIN sh_machine m ON m.deviceId = r.deviceId
         ORDER BY r.name, r.repoId
       `.map(viewRepoSummary);
+    },
+    /** Cached pi project approval + whitelisted skill briefs for dispatch injection. */
+    contextFor(repoId: string, deviceId?: string): RepoContextRow {
+      const row = deviceId
+        ? sql<Record<string, unknown>>`
+            SELECT projectApproved, skillIndexJson FROM sh_repo
+            WHERE repoId = ${repoId} AND deviceId = ${deviceId}
+          `[0]
+        : sql<Record<string, unknown>>`
+            SELECT r.projectApproved, r.skillIndexJson
+            FROM sh_repo r LEFT JOIN sh_machine m ON m.deviceId = r.deviceId
+            WHERE r.repoId = ${repoId}
+            ORDER BY COALESCE(m.online, 0) DESC, r.updatedAt DESC LIMIT 1
+          `[0];
+      if (!row) return { projectApproved: false, skills: [] };
+      const raw = jsonOrNull<unknown[]>(row.skillIndexJson as string | null) ?? [];
+      const skills = raw
+        .map((item) => RepoSkillBriefSchema.safeParse(item))
+        .filter((p): p is { success: true; data: RepoSkillBrief } => p.success)
+        .map((p) => p.data);
+      return {
+        projectApproved: Number(row.projectApproved ?? 0) === 1,
+        skills,
+      };
+    },
+    /** Immediately reflects live repo-level skill list/write/delete outcomes in sh_repo cache. */
+    syncSkillMutation(
+      deviceId: string,
+      repoId: string,
+      mutation:
+        | { kind: "list"; skills: RepoSkillSummary[]; projectApproved?: boolean }
+        | { kind: "upsert"; summary: RepoSkillSummary; projectApproved?: boolean }
+        | { kind: "delete"; relativePath: string },
+    ): void {
+      const current = repos.contextFor(repoId, deviceId);
+      let nextSkills: RepoSkillBrief[] = current.skills;
+      let nextApproved = current.projectApproved;
+      if (mutation.kind === "list") {
+        nextSkills = mutation.skills
+          .slice(0, REPO_SKILL_HELLO_MAX_ITEMS)
+          .map(toStoredSkillBrief)
+          .filter((b): b is RepoSkillBrief => b !== null);
+        if (mutation.projectApproved !== undefined) nextApproved = mutation.projectApproved;
+      } else if (mutation.kind === "upsert") {
+        const brief = toStoredSkillBrief(mutation.summary);
+        if (brief) {
+          const filtered = current.skills.filter((s) => s.relativePath !== brief.relativePath);
+          nextSkills = [...filtered, brief]
+            .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+            .slice(0, REPO_SKILL_HELLO_MAX_ITEMS);
+        }
+        if (mutation.projectApproved !== undefined) nextApproved = mutation.projectApproved;
+        sql`
+          UPDATE sh_skill_offer
+          SET status = 'saved', savedPath = ${mutation.summary.relativePath},
+              savedSha256 = ${mutation.summary.sha256}, failureReason = NULL, decidedAt = ${now()}
+          WHERE repoId = ${repoId} AND slug = ${mutation.summary.slug} AND status IN ('offered', 'failed')
+        `;
+      } else {
+        nextSkills = current.skills.filter((s) => s.relativePath !== mutation.relativePath);
+      }
+      sql`
+        UPDATE sh_repo
+        SET projectApproved = ${nextApproved ? 1 : 0},
+            skillIndexJson = ${JSON.stringify(nextSkills)},
+            updatedAt = ${now()}
+        WHERE repoId = ${repoId} AND deviceId = ${deviceId}
+      `;
     },
   };
 
@@ -2305,6 +2437,7 @@ export function createLedger(deps: LedgerDeps) {
         SELECT * FROM sh_outbound
         WHERE kind = 'card' AND createdAt > ${sinceMs} AND (
           id LIKE 'offer:%' OR id LIKE 'offline:%' OR id LIKE 'switch:%' OR id LIKE 'noteask:%'
+          OR id LIKE 'noteconfirm:%' OR id LIKE 'skilloffer:%'
           OR id LIKE 'proposalapproval:%' OR id LIKE 'prwatchapproval:%'
           OR (id LIKE 'notify:report:%' AND payload LIKE '%pr_approve%')
           OR questionId IS NOT NULL OR payload LIKE '%"action":"ask:%' OR payload LIKE '%"action":"asknew:%'
@@ -2678,6 +2811,125 @@ export function createLedger(deps: LedgerDeps) {
     },
   };
 
+  const viewSkillOffer = (r: Record<string, unknown>): SkillOfferRow => ({
+    id: r.id as string,
+    workerId: r.workerId as string,
+    threadId: r.threadId as string,
+    deviceId: r.deviceId as string,
+    repoId: r.repoId as string,
+    target: (r.target === "claude-skill" || r.target === "claude-command" ? r.target : "agents-skill") as RepoSkillTarget,
+    slug: r.slug as string,
+    name: r.name as string,
+    description: r.description as string,
+    summaryBullets: jsonOrNull<string[]>(r.summaryJson as string | null) ?? [],
+    markdown: r.markdown as string,
+    status: r.status as SkillOfferStatus,
+    savedPath: (r.savedPath as string | null) ?? null,
+    savedSha256: (r.savedSha256 as string | null) ?? null,
+    failureReason: (r.failureReason as string | null) ?? null,
+    createdAt: r.createdAt as number,
+    decidedAt: (r.decidedAt as number | null) ?? null,
+  });
+
+  const skillOffers = {
+    create(input: {
+      id?: string;
+      workerId: string;
+      threadId: string;
+      deviceId: string;
+      repoId: string;
+      target?: RepoSkillTarget;
+      slug: string;
+      name: string;
+      description: string;
+      summaryBullets: string[];
+      markdown: string;
+    }): SkillOfferRow | null {
+      const id = input.id ?? `so_${ulid()}`;
+      sql`
+        INSERT OR IGNORE INTO sh_skill_offer (
+          id, workerId, threadId, deviceId, repoId, target, slug, name, description,
+          summaryJson, markdown, status, createdAt
+        )
+        VALUES (
+          ${id}, ${input.workerId}, ${input.threadId}, ${input.deviceId}, ${input.repoId},
+          ${input.target ?? "agents-skill"}, ${input.slug}, ${input.name}, ${input.description},
+          ${JSON.stringify(input.summaryBullets.slice(0, 3))}, ${input.markdown}, 'offered', ${now()}
+        )
+      `;
+      return skillOffers.byWorker(input.workerId);
+    },
+    get(id: string): SkillOfferRow | null {
+      const row = sql<Record<string, unknown>>`SELECT * FROM sh_skill_offer WHERE id = ${id}`[0];
+      return row ? viewSkillOffer(row) : null;
+    },
+    byWorker(workerId: string): SkillOfferRow | null {
+      const row = sql<Record<string, unknown>>`SELECT * FROM sh_skill_offer WHERE workerId = ${workerId}`[0];
+      return row ? viewSkillOffer(row) : null;
+    },
+    listByThread(threadId: string): SkillOfferRow[] {
+      return sql<Record<string, unknown>>`
+        SELECT * FROM sh_skill_offer WHERE threadId = ${threadId} ORDER BY createdAt, id
+      `.map(viewSkillOffer);
+    },
+    cooldownStatus(
+      threadId: string,
+      repoId: string,
+      nowMs: number = now(),
+    ): { allowed: boolean; reason?: "thread_already_offered" | "repo_24h_cooldown" | "repo_72h_dismiss_backoff" } {
+      const onThread = sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_skill_offer WHERE threadId = ${threadId}`[0]!.n;
+      if (onThread > 0) return { allowed: false, reason: "thread_already_offered" };
+      const recent = sql<Record<string, unknown>>`
+        SELECT * FROM sh_skill_offer WHERE repoId = ${repoId} ORDER BY createdAt DESC, id DESC LIMIT 2
+      `.map(viewSkillOffer);
+      if (recent.length > 0) {
+        const latest = recent[0]!;
+        if (recent.length >= 2 && recent[0]!.status === "dismissed" && recent[1]!.status === "dismissed") {
+          if (nowMs - latest.createdAt < 72 * 3_600_000) {
+            return { allowed: false, reason: "repo_72h_dismiss_backoff" };
+          }
+        }
+        if (nowMs - latest.createdAt < 24 * 3_600_000) {
+          return { allowed: false, reason: "repo_24h_cooldown" };
+        }
+      }
+      return { allowed: true };
+    },
+    beginSave(id: string): SkillOfferRow | null {
+      sql`
+        UPDATE sh_skill_offer SET status = 'saving', failureReason = NULL
+        WHERE id = ${id} AND status IN ('offered', 'failed')
+      `;
+      if (sql<{ n: number }>`SELECT changes() AS n`[0]!.n === 0) return null;
+      return skillOffers.get(id);
+    },
+    markSaved(id: string, savedPath: string, savedSha256: string): SkillOfferRow | null {
+      sql`
+        UPDATE sh_skill_offer
+        SET status = 'saved', savedPath = ${savedPath}, savedSha256 = ${savedSha256},
+            failureReason = NULL, decidedAt = ${now()}
+        WHERE id = ${id}
+      `;
+      return skillOffers.get(id);
+    },
+    markFailed(id: string, failureReason: string): SkillOfferRow | null {
+      sql`
+        UPDATE sh_skill_offer
+        SET status = 'failed', failureReason = ${failureReason.slice(0, 240)}, decidedAt = ${now()}
+        WHERE id = ${id}
+      `;
+      return skillOffers.get(id);
+    },
+    dismiss(id: string): SkillOfferRow | null {
+      sql`
+        UPDATE sh_skill_offer SET status = 'dismissed', decidedAt = ${now()}
+        WHERE id = ${id} AND status IN ('offered', 'failed')
+      `;
+      if (sql<{ n: number }>`SELECT changes() AS n`[0]!.n === 0) return null;
+      return skillOffers.get(id);
+    },
+  };
+
   // ---- the reducer (steward.md §5) ----------------------------------------------------------------
 
   /**
@@ -2686,9 +2938,10 @@ export function createLedger(deps: LedgerDeps) {
    * (protocol §4.3: persistence and processing are decoupled; a crash between the events_ack
    * and this call leaves the rows pending, and the next wake drains them again).
    */
-  function applyPendingEvents(): { applied: number } {
+  function applyPendingEvents(): { applied: number; completedRelayWorkers: string[] } {
     return tx(() => {
       let applied = 0;
+      const completedRelaySet = new Set<string>();
       const tracked = sql<{ workerId: string; processedUpTo: number }>`
         SELECT workerId, processedUpTo FROM worker_ack
       `;
@@ -2696,11 +2949,13 @@ export function createLedger(deps: LedgerDeps) {
         for (;;) {
           const next = nextInboxRow(workerId);
           if (!next) break; // gap or fully drained: stop in order (resync fills gaps later)
-          applyEvent(JSON.parse(next.payload) as Record<string, unknown>);
+          if (applyEvent(JSON.parse(next.payload) as Record<string, unknown>) === "relay_done") {
+            completedRelaySet.add(workerId);
+          }
           applied += 1;
         }
       }
-      return { applied };
+      return { applied, completedRelayWorkers: [...completedRelaySet] };
     });
   }
 
@@ -2715,7 +2970,7 @@ export function createLedger(deps: LedgerDeps) {
   }
 
   /** One event, already committed to the inbox. Deterministic; no LLM anywhere in here. */
-  function applyEvent(event: Record<string, unknown>): void {
+  function applyEvent(event: Record<string, unknown>): "relay_done" | void {
     const workerId = String(event.workerId ?? "");
     const seq = Number(event.seq ?? 0);
     const type = String(event.type ?? "");
@@ -2847,11 +3102,13 @@ export function createLedger(deps: LedgerDeps) {
             ...(storedLabels && storedLabels.length > 0 ? { labels: storedLabels } : {}),
           },
         );
+        let relayDone = false;
         if (status === "done") {
           // ADR-0022 Decision 8: `sibling` done reports feed Steward synthesis via `event`
           // wake without spamming a standalone owner done card.
           if (!isSibling) {
             notifications.queue(`report:${workerId}:${seq}`, "done_report", worker.threadId, workerId);
+            relayDone = true;
           }
         } else {
           questions.insert({
@@ -2888,6 +3145,11 @@ export function createLedger(deps: LedgerDeps) {
           }),
           { priority: status === "done" ? "normal" : "high" },
         );
+        if (relayDone) {
+          sql`UPDATE worker_ack SET processedUpTo = ${seq} WHERE workerId = ${workerId}`;
+          recomputeThreadState(worker.threadId);
+          return "relay_done";
+        }
         break;
       }
       case "settled": {
@@ -3511,7 +3773,7 @@ export function createLedger(deps: LedgerDeps) {
 
   return {
     machines, machineStatus, offlineDispatches, repos, threads, workers, reports, questions, timeline, notifications, outbound,
-    runs, ownerInputs, webRequests, wakes, notes, budget, routines, followups, offers, handoff, proposals, views, applyPendingEvents, recomputeThreadState, debug,
+    runs, ownerInputs, webRequests, wakes, notes, budget, routines, followups, offers, skillOffers, handoff, proposals, views, applyPendingEvents, recomputeThreadState, debug,
     prConsent,
   };
 }

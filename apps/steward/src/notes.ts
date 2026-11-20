@@ -1499,6 +1499,32 @@ export function createNotes(deps: NotesDeps) {
       return changes;
     });
 
+  /** Newly committed unconfirmed low-trust project notes since `sinceMs` whose `'noted'` log
+   *  has not been reported yet (Stage 2 ambient memory loop: surfaces `noteconfirm:<noteId>`). */
+  const unconfirmedProjectSince = (sinceMs: number, limit = 2): NoteRow[] =>
+    withStaleMarks(
+      sql<Record<string, unknown>>`
+        SELECT n.* FROM sh_note n
+        WHERE n.layer = 'project' AND n.status = 'active' AND n.confirmed = 0
+          AND n.source IN ('worker_reported', 'inferred')
+          AND n.createdAt >= ${sinceMs}
+          AND EXISTS (
+            SELECT 1 FROM sh_note_log l
+            WHERE l.noteId = n.noteId AND l.op = 'noted' AND l.reportedAt IS NULL
+          )
+        ORDER BY n.createdAt, n.noteId LIMIT ${limit}
+      `.map(viewNote),
+    );
+
+  /** Marks a note's `'noted'` log row reported once its standalone `noteconfirm:<noteId>` card
+   *  is durably enqueued so the next chat reply does not announce the same note a second time. */
+  const markNoteCardDelivered = (noteId: string): void => {
+    sql`
+      UPDATE sh_note_log SET reportedAt = ${now()}
+      WHERE noteId = ${noteId} AND op = 'noted' AND reportedAt IS NULL
+    `;
+  };
+
   return {
     propose,
     commit,
@@ -1522,6 +1548,8 @@ export function createNotes(deps: NotesDeps) {
     markPendingReported,
     markPendingMaintenanceReported,
     drainPendingForReply,
+    unconfirmedProjectSince,
+    markNoteCardDelivered,
     abandonAsk,
     askOpen,
     maintenance,

@@ -1180,4 +1180,40 @@ export const MIGRATIONS: readonly Migration[] = [
       });
     },
   },
+  {
+    // Ambient Memory & Skill Closed Loop: lightweight per-repo skill index + pi project trust
+    // cached on sh_repo for deterministic dispatch injection, plus sh_skill_offer for
+    // high-friction post-run skill proposals awaiting owner 1-tap consent.
+    id: "043_ambient_memory_and_skill_loop",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN projectApproved INTEGER NOT NULL DEFAULT 0`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN skillIndexJson TEXT NOT NULL DEFAULT '[]'`;
+      });
+      sql`CREATE TABLE IF NOT EXISTS sh_skill_offer (
+        id TEXT PRIMARY KEY,
+        workerId TEXT NOT NULL UNIQUE,
+        threadId TEXT NOT NULL,
+        deviceId TEXT NOT NULL,
+        repoId TEXT NOT NULL,
+        target TEXT NOT NULL DEFAULT 'agents-skill',
+        slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        summaryJson TEXT NOT NULL DEFAULT '[]',
+        markdown TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'offered',
+        savedPath TEXT,
+        savedSha256 TEXT,
+        failureReason TEXT,
+        createdAt INTEGER NOT NULL,
+        decidedAt INTEGER
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_skill_offer_repo_created ON sh_skill_offer (repoId, createdAt DESC)`;
+      sql`CREATE INDEX IF NOT EXISTS sh_skill_offer_thread ON sh_skill_offer (threadId)`;
+      sql`CREATE INDEX IF NOT EXISTS sh_skill_offer_status ON sh_skill_offer (status)`;
+    },
+  },
 ];

@@ -121,6 +121,7 @@ export interface ConnectorProtocolDeps {
   armWorkerSweeps: () => void;
   armQuestionFallback: () => Promise<void>;
   dispatchApprovedProposals: () => Promise<unknown>;
+  onRelayWorkerReportedDone?: (workerId: string) => void;
   cancelDirectoryReadsForConnection: (connectionId: string, result: DirectoryReadResult) => void;
   cancelDirectoryReadsForDevice: (deviceId: string, result: DirectoryReadResult) => void;
 }
@@ -656,10 +657,16 @@ export class ConnectorProtocol {
     this.applyLedgerEvents();
   }
 
+  canSyncRepoSkills(deviceId: string): boolean {
+    const connection = this.deps.connFor(deviceId);
+    const state = connection?.state as ConnState | null;
+    return Boolean(connection && state?.repoSkills === true && state?.workerCheckpoint === true);
+  }
+
   /** Reduces everything pending, then turns notification intents into outbound cards (§5.1). */
   applyLedgerEvents(): void {
     try {
-      const { applied } = this.deps.ledger.applyPendingEvents();
+      const { applied, completedRelayWorkers } = this.deps.ledger.applyPendingEvents();
       if (applied > 0) {
         // Events catching up can release a parked hello-snapshot verdict for a reaped
         // worker (issue #13 review finding 2) — resolve before anything reads the state.
@@ -678,6 +685,9 @@ export class ConnectorProtocol {
         // (the 3-second merge window keeps fresh rows waiting for their siblings) and arm the
         // alarm for the rest.
         void this.deps.drainWakes();
+        for (const workerId of completedRelayWorkers) {
+          this.deps.onRelayWorkerReportedDone?.(workerId);
+        }
       }
     } catch (err) {
       this.deps.logChannel("ledger_apply_failed", err instanceof Error ? err.message : String(err));
@@ -957,6 +967,26 @@ export class ConnectorProtocol {
         clearTimeout(timer);
         signal.removeEventListener("abort", abort);
         if (result.ok) {
+          if (op.scope.kind === "repo") {
+            if (result.data.action === "list") {
+              this.deps.ledger.repos.syncSkillMutation(deviceId, op.scope.repoId, {
+                kind: "list",
+                skills: result.data.skills,
+                ...(result.data.projectApproved !== undefined ? { projectApproved: result.data.projectApproved } : {}),
+              });
+            } else if (result.data.action === "write") {
+              this.deps.ledger.repos.syncSkillMutation(deviceId, op.scope.repoId, {
+                kind: "upsert",
+                summary: result.data.summary,
+                ...(result.data.projectApproved !== undefined ? { projectApproved: result.data.projectApproved } : {}),
+              });
+            } else if (result.data.action === "delete") {
+              this.deps.ledger.repos.syncSkillMutation(deviceId, op.scope.repoId, {
+                kind: "delete",
+                relativePath: result.data.relativePath,
+              });
+            }
+          }
           resolve(result.data);
           return;
         }

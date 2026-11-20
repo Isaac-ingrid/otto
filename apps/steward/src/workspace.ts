@@ -191,9 +191,9 @@ export function cardView(card: unknown): CardView {
 
 export function cardKind(row: Pick<CardRow, "id" | "questionId">, view: CardView): CardKind {
   const { id } = row;
-  if (id.startsWith("offer:")) return "offer";
+  if (id.startsWith("offer:") || id.startsWith("skilloffer:")) return "offer";
   if (id.startsWith("offline:") || id.startsWith("switch:")) return "offline";
-  if (id.startsWith("noteask:")) return "memory";
+  if (id.startsWith("noteask:") || id.startsWith("noteconfirm:")) return "memory";
   if (id.startsWith("proposalapproval:")) return "consent";
   if (id.startsWith("notify:report:")) return view.buttons.some((button) => button.action === "pr_approve") ? "consent" : "report";
   if (row.questionId !== null || view.buttons.some((button) => /^ask(?:new)?:/.test(button.action ?? ""))) return "question";
@@ -237,11 +237,20 @@ export function cardOpen(ledger: Ledger, row: Pick<CardRow, "id" | "questionId">
     );
   }
   if (id.startsWith("offer:")) return ledger.offers.get(id.slice("offer:".length))?.status === "offered";
+  if (id.startsWith("skilloffer:")) {
+    const offer = ledger.skillOffers.get(id.slice("skilloffer:".length));
+    return offer !== null && (offer.status === "offered" || offer.status === "failed");
+  }
   if (id.startsWith("offline:")) return ledger.offlineDispatches.get(id.slice("offline:".length))?.status === "offered";
   if (id.startsWith("switch:")) return ledger.offlineDispatches.get(id.slice("switch:".length))?.status === "switching";
   if (id.startsWith("noteask:")) {
     const ask = /^noteask:(n_[^:]+):(\d+)$/.exec(id);
     return ask !== null && ledger.notes.askOpen(ask[1]!, Number(ask[2]));
+  }
+  if (id.startsWith("noteconfirm:")) {
+    const noteId = id.slice("noteconfirm:".length);
+    const note = noteId ? ledger.notes.get(noteId) : null;
+    return note !== null && note.status === "active" && !note.confirmed;
   }
   if (id.startsWith("notify:report:")) {
     const report = /^notify:report:([^:]+):(\d+)$/.exec(id);
@@ -273,6 +282,24 @@ export interface WorkspaceDevice {
   revoked: boolean;
 }
 
+export interface WorkspaceSkillOfferMeta {
+  offerId: string;
+  workerId: string;
+  threadId: string;
+  deviceId: string;
+  repoId: string;
+  repoName: string;
+  target: string;
+  slug: string;
+  name: string;
+  description: string;
+  markdown: string;
+  projectApproved: boolean;
+  status: string;
+  savedPath: string | null;
+  failureReason: string | null;
+}
+
 export interface WorkspaceMessage {
   id: string;
   role: "user" | "assistant";
@@ -283,6 +310,8 @@ export interface WorkspaceMessage {
   card?: CardView & { kind: CardKind };
   /** A card whose decision is still pending. */
   open?: boolean;
+  /** Prefilled draft metadata for `skilloffer:<id>` cards so Web UI preview needs 0 extra LLM calls. */
+  skillOffer?: WorkspaceSkillOfferMeta;
   /** Assistant delivery state; web rows are always `sent`. */
   status?: string;
 }
@@ -316,6 +345,30 @@ export function workspaceSnapshot(input: {
   const repoName = new Map(view.repos.map((repo) => [repo.repoId, repo.name]));
   const ledgerMachines = new Map(view.machines.map((machine) => [machine.deviceId, machine]));
 
+  const skillOfferMetaFor = (cardId: string): WorkspaceSkillOfferMeta | undefined => {
+    if (!cardId.startsWith("skilloffer:")) return undefined;
+    const offer = ledger.skillOffers.get(cardId.slice("skilloffer:".length));
+    if (!offer) return undefined;
+    const ctx = ledger.repos.contextFor(offer.repoId, offer.deviceId);
+    return {
+      offerId: offer.id,
+      workerId: offer.workerId,
+      threadId: offer.threadId,
+      deviceId: offer.deviceId,
+      repoId: offer.repoId,
+      repoName: repoName.get(offer.repoId) ?? offer.repoId,
+      target: offer.target,
+      slug: offer.slug,
+      name: offer.name,
+      description: offer.description,
+      markdown: offer.markdown,
+      projectApproved: ctx.projectApproved,
+      status: offer.status,
+      savedPath: offer.savedPath,
+      failureReason: offer.failureReason,
+    };
+  };
+
   const messages: WorkspaceMessage[] = [
     ...view.inputs.map((row) => ({
       id: `user:${row.id}`,
@@ -341,7 +394,13 @@ export function workspaceSnapshot(input: {
         const card = cardView(payload.card);
         const kind = cardKind(ref, card);
         if (!DECISION_KINDS.has(kind)) return { ...base, text: messageText(payload.card, card) };
-        return { ...base, card: { ...card, kind }, open: cardOpen(ledger, ref, card) };
+        const skillOffer = skillOfferMetaFor(id);
+        return {
+          ...base,
+          card: { ...card, kind },
+          open: cardOpen(ledger, ref, card),
+          ...(skillOffer ? { skillOffer } : {}),
+        };
       }
       return { ...base, text: payload.text ?? "" };
     }),
@@ -353,7 +412,18 @@ export function workspaceSnapshot(input: {
       return { row, card };
     })
     .filter(({ row, card }) => cardOpen(ledger, row, card))
-    .map(({ row, card }) => ({ id: row.id, kind: cardKind(row, card), threadId: row.threadId, questionId: row.questionId, at: Number(row.createdAt), ...card }));
+    .map(({ row, card }) => {
+      const skillOffer = skillOfferMetaFor(row.id);
+      return {
+        id: row.id,
+        kind: cardKind(row, card),
+        threadId: row.threadId,
+        questionId: row.questionId,
+        at: Number(row.createdAt),
+        ...(skillOffer ? { skillOffer } : {}),
+        ...card,
+      };
+    });
 
   return {
     now,

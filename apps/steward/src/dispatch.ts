@@ -8,7 +8,7 @@
 // providerMsgId, never from data stuffed into the button.
 import { ulid, acceptsAgentModel, agentModelCatalogFor } from "@isaac2ingrid/protocol";
 import { isSpendQuery } from "./budget.ts";
-import { decideContinuation, renderHandoffBrief, type NewSessionReason } from "./handoff.ts";
+import { decideContinuation, renderHandoffBrief, renderRepoContextBrief, type NewSessionReason } from "./handoff.ts";
 import type { Ledger, OfflineDispatchRow, ThreadRow, WorkerRow } from "./ledger.ts";
 import { offlineAskCard, askUserCard } from "./report-template.ts";
 
@@ -777,6 +777,13 @@ export class Dispatcher {
     return { action: "resume", parentWorker: null, crossMachine: false, brief: false };
   }
 
+  private buildRepoContextPrefix(repoId: string, deviceId: string): string {
+    const repoName = this.ledger.repos.get(repoId, deviceId)?.name ?? repoId;
+    const notes = this.ledger.notes.forRepos([repoId]);
+    const { skills } = this.ledger.repos.contextFor(repoId, deviceId);
+    return renderRepoContextBrief({ repoName, notes, skills });
+  }
+
   /** The new-session half: new worker row (parentWorker = the leg it continues from), relay
    *  base = the Thread's latest worker branch, handoff brief prefixed to the task. */
   private async startNewSession(
@@ -809,7 +816,13 @@ export class Dispatcher {
       previous && (previous.branch !== null || previous.lastEventAt !== null)
         ? this.ledger.handoff.build(thread.threadId, previous.workerId)
         : null;
-    const fullPrompt = brief ? `${renderHandoffBrief(brief)}${prompt}` : prompt;
+    const repoContext = this.buildRepoContextPrefix(repoId, deviceId);
+    const taskPrompt = brief ? `${renderHandoffBrief(brief)}${prompt}` : prompt;
+    const fullPrompt = repoContext
+      ? brief
+        ? `${repoContext}\n\n${taskPrompt}`
+        : `${repoContext}\n\n本次任务：\n${prompt}`
+      : taskPrompt;
     this.ledger.questions.closeOpen(thread.threadId, "用户重新派发");
     this.ledger.workers.register({
       workerId,
@@ -901,13 +914,15 @@ export class Dispatcher {
       if (validModel) {
         this.ledger.workers.setModelRequest(proposal.spawnedWorkerId, validModel, "task-default");
       }
+      const repoContext = this.buildRepoContextPrefix(proposal.targetRepoId, proposal.targetDeviceId);
       const originLabel = proposal.decidedBy === "auto_same_machine" ? "同机" : "跨机（经用户批准）";
-      const probePrompt = [
+      const probeBody = [
         `【只读探针任务（由${originLabel} worker ${proposal.workerId} 提议）】`,
         `原因：${proposal.reason}`,
         "",
         proposal.prompt,
       ].join("\n");
+      const probePrompt = repoContext ? `${repoContext}\n\n${probeBody}` : probeBody;
       await this.#deps.enqueueCommand(
         proposal.targetDeviceId,
         "start_worker",

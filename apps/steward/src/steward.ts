@@ -52,7 +52,7 @@ import {
   type BudgetState,
 } from "./budget.ts";
 import { Dispatcher, parseOwnerCommand } from "./dispatch.ts";
-import { distillWorkerCheckpoint, type DistillMode, type DistillResult } from "./distiller.ts";
+import { distillWorkerCheckpoint, triageRepoSkillCandidate, type DistillMode, type DistillResult } from "./distiller.ts";
 import { buildSituationBrief } from "./llm/brief.ts";
 import { buildStewardExtension, type StewardExtensionContext } from "./llm/extension.ts";
 import { configuredWebSearch } from "./llm/web-search.ts";
@@ -100,6 +100,8 @@ import {
   askUserCard,
   reportCardFor,
   noteDecisionCard,
+  noteConfirmCard,
+  skillOfferCard,
   stallCard,
   workerQuestionCard,
   didBullets,
@@ -331,6 +333,7 @@ export class Steward extends Agent<Env> {
       armWorkerSweeps: () => this.armWorkerSweeps(),
       armQuestionFallback: () => this.armQuestionFallback(),
       dispatchApprovedProposals: () => this.dispatcher.dispatchApprovedProposals(),
+      onRelayWorkerReportedDone: (workerId) => { void this.maybeOfferRepoSkill(workerId); },
       cancelDirectoryReadsForConnection: (connectionId, result) => this.connectorProto.cancelReadsForConnection(connectionId, result),
       cancelDirectoryReadsForDevice: (deviceId, result) => this.connectorProto.cancelReadsForDevice(deviceId, result),
     }));
@@ -3197,6 +3200,56 @@ export class Steward extends Agent<Env> {
     return work;
   }
 
+  private readonly skillTriageInFlight = new Map<string, Promise<void>>();
+  private ambientSkillRepliesForTest: string[] | null = null;
+
+  async setAmbientSkillRepliesForTest(replies: string[] | null): Promise<void> {
+    this.ambientSkillRepliesForTest = replies ? [...replies] : null;
+  }
+
+  async waitSkillTriageIdleForTest(): Promise<void> {
+    while (this.skillTriageInFlight.size > 0) {
+      await Promise.allSettled([...this.skillTriageInFlight.values()]);
+    }
+  }
+
+  private async completeBackgroundText(input: {
+    systemPrompt: string;
+    userPrompt: string;
+    signal: AbortSignal;
+    maxTokens?: number;
+  }): Promise<string> {
+    await this.ensureRootModel();
+    const sealed = await this.modelConfig();
+    const config = mergeModelSelection(sealed, this.modelVarsConfig);
+    const model = this.llmModels.models.getModel(config.provider, config.modelId);
+    if (!model) throw new WorkspaceError("model_not_configured", 409);
+    const { thinkingLevel } = resolveModelThinking(config);
+    const reply = await this.llmModels.models.completeSimple(
+      model,
+      { systemPrompt: input.systemPrompt, messages: [{ role: "user", content: input.userPrompt, timestamp: Date.now() }] },
+      {
+        ...(thinkingLevel === "off" || thinkingLevel === "auto" ? {} : { reasoning: thinkingLevel }),
+        ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        maxRetries: 0,
+        timeoutMs: 60_000,
+        signal: input.signal,
+      },
+    );
+    const costUsd = Math.max(0, reply.usage?.cost?.total ?? 0);
+    const tokens = Math.max(0, reply.usage?.totalTokens ?? 0);
+    if (costUsd > 0 || tokens > 0) this.ledger.budget.add({ costUsd, tokens }, Date.now());
+    if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+      const rawMsg = typeof reply.errorMessage === "string" ? reply.errorMessage.replace(/\s+/g, " ").trim().slice(0, 180) : reply.stopReason;
+      this.logChannel("background_llm_failed", `${config.provider}/${config.modelId}:${reply.stopReason}:${rawMsg}`);
+      throw new WorkspaceError("distill_failed", 502, { reason: rawMsg });
+    }
+    return reply.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+  }
+
   async distillWorker(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult> {
     await this.syncUsageQuietly();
     return distillWorkerCheckpoint(
@@ -3205,32 +3258,95 @@ export class Steward extends Agent<Env> {
         tx: (fn) => this.ctx.storage.transactionSync(fn),
         budget: () => this.budgetState(),
         readCheckpoint: (workerId, sig) => this.connectorProto.checkpointWorker(workerId, sig),
-        completeText: async ({ systemPrompt, userPrompt, signal: sig }) => {
-          await this.ensureRootModel();
-          const sealed = await this.modelConfig();
-          const config = mergeModelSelection(sealed, this.modelVarsConfig);
-          const model = this.llmModels.models.getModel(config.provider, config.modelId);
-          if (!model) throw new WorkspaceError("model_not_configured", 409);
-          const reply = await this.llmModels.models.completeSimple(
-            model,
-            { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
-            { maxTokens: 1600, maxRetries: 0, timeoutMs: 30_000, signal: sig },
-          );
-          const costUsd = Math.max(0, reply.usage?.cost?.total ?? 0);
-          const tokens = Math.max(0, reply.usage?.totalTokens ?? 0);
-          if (costUsd > 0 || tokens > 0) this.ledger.budget.add({ costUsd, tokens }, Date.now());
-          if (reply.stopReason === "error" || reply.stopReason === "aborted") {
-            throw new WorkspaceError("distill_failed", 502);
-          }
-          return reply.content
-            .filter((b): b is { type: "text"; text: string } => b.type === "text")
-            .map((b) => b.text)
-            .join("\n");
-        },
+        completeText: ({ systemPrompt, userPrompt, signal: sig }) =>
+          this.completeBackgroundText({ systemPrompt, userPrompt, signal: sig }),
         audit: (reason, detail) => this.logChannel(reason, detail),
       },
       { ...input, signal },
     );
+  }
+
+  private maybeOfferRepoSkill(workerId: string): Promise<void> {
+    const existing = this.skillTriageInFlight.get(workerId);
+    if (existing) return existing;
+    const work = this.runAmbientSkillTriage(workerId)
+      .catch((err) => this.logChannel("ambient_skill_error", `${workerId} ${errorText(err)}`))
+      .finally(() => {
+        this.skillTriageInFlight.delete(workerId);
+      });
+    this.skillTriageInFlight.set(workerId, work);
+    return work;
+  }
+
+  private async runAmbientSkillTriage(workerId: string): Promise<void> {
+    await this.syncUsageQuietly();
+    const candidate = await triageRepoSkillCandidate(
+      {
+        ledger: this.ledger,
+        budget: () => this.budgetState(),
+        canSyncRepoSkills: (deviceId) => this.connectorProto.canSyncRepoSkills(deviceId),
+        readCheckpoint: (wid, sig) => this.connectorProto.checkpointWorker(wid, sig),
+        completeText: async ({ systemPrompt, userPrompt, signal }) => {
+          if (this.ambientSkillRepliesForTest !== null) {
+            const scripted = this.ambientSkillRepliesForTest.shift();
+            if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
+            return scripted;
+          }
+          return this.completeBackgroundText({ systemPrompt, userPrompt, signal });
+        },
+        audit: (reason, detail) => this.logChannel(reason, detail),
+      },
+      workerId,
+      AbortSignal.timeout(60_000),
+    );
+    if (!candidate) return;
+    const worker = this.ledger.workers.get(workerId);
+    if (!worker || !worker.repoId) return;
+    if (!this.ledger.skillOffers.cooldownStatus(worker.threadId, worker.repoId).allowed) {
+      this.logChannel("ambient_skill_skipped", `${workerId}:cooldown_race`);
+      return;
+    }
+    const offer = this.ledger.skillOffers.create({
+      workerId,
+      threadId: worker.threadId,
+      deviceId: worker.deviceId,
+      repoId: worker.repoId,
+      target: "agents-skill",
+      slug: candidate.slug,
+      name: candidate.name,
+      description: candidate.description,
+      summaryBullets: candidate.summaryBullets,
+      markdown: candidate.markdown,
+    });
+    if (!offer) return;
+    const thread = this.ledger.threads.get(worker.threadId);
+    const repo = this.ledger.repos.get(worker.repoId, worker.deviceId);
+    const ctx = this.ledger.repos.contextFor(worker.repoId, worker.deviceId);
+    const relativePath = `.agents/skills/${offer.slug}/SKILL.md`;
+    await this.enqueueOutbound({
+      id: `skilloffer:${offer.id}`,
+      kind: "card",
+      to: OWNER_ID,
+      threadId: worker.threadId,
+      urgency: "push",
+      card: skillOfferCard({
+        repoName: repo?.name ?? worker.repoId,
+        name: offer.name,
+        slug: offer.slug,
+        relativePath,
+        description: offer.description,
+        summaryBullets: offer.summaryBullets,
+        projectApproved: ctx.projectApproved,
+        ...(thread ? { threadTitle: thread.title } : {}),
+      }),
+    });
+    this.ledger.timeline.add(
+      worker.threadId,
+      "note",
+      `已生成高摩擦排障技能提议：${offer.name}（${relativePath}，待确认写入）`,
+      { offerId: offer.id, workerId, slug: offer.slug, friction: candidate.frictionReason },
+    );
+    this.logChannel("ambient_skill_offered", `${workerId}:${offer.id}:${offer.slug}:${candidate.frictionReason}`);
   }
 
   async setWorkerDiffTimeoutForTest(ms: number): Promise<void> {
@@ -3587,9 +3703,44 @@ export class Steward extends Agent<Env> {
       }
 
     }
+    if (run.kind === "event" && result.status === "done") {
+      this.enqueueEventNoteConfirmCards(run);
+    }
     // Event/routine/follow-up runs, and user runs that already reached the user: the text is
     // kept for audit and nothing more is sent (§6.2).
     this.ledger.runs.settle(run.operationId, result);
+  }
+
+  /** Stage 2 ambient memory loop: surfaces up to 2 unconfirmed low-trust project notes recorded
+   *  during an `event` bookkeeping run as standalone 1-tap confirm/remove cards. */
+  private enqueueEventNoteConfirmCards(run: RunRow): void {
+    const owner = this.ownerOpenIdSync();
+    if (!owner) return;
+    const created = this.ledger.notes.unconfirmedProjectSince(run.createdAt, 2);
+    if (created.length === 0) return;
+    const rawThreadId = /thread=(t_[^\s]+)/.exec(run.text)?.[1] ?? run.routedThreadId ?? null;
+    const thread = rawThreadId ? this.ledger.threads.get(rawThreadId) : null;
+    for (const note of created) {
+      const repoMatch = note.scopeRepoId ? this.ledger.repos.machinesHaving(note.scopeRepoId)[0] : undefined;
+      const repoName = repoMatch?.repoName ?? note.scopeRepoId ?? "当前仓库";
+      void this.enqueueOutbound({
+        id: `noteconfirm:${note.noteId}`,
+        kind: "card",
+        to: owner,
+        threadId: thread?.threadId ?? null,
+        urgency: "push",
+        card: noteConfirmCard({
+          noteId: note.noteId,
+          repoName,
+          text: note.text,
+          ...(thread ? { threadTitle: thread.title } : {}),
+        }),
+      })
+        .then(() => {
+          this.ledger.notes.markNoteCardDelivered(note.noteId);
+        })
+        .catch((err) => this.logChannel("note_confirm_enqueue_failed", `${note.noteId} ${errorText(err)}`));
+    }
   }
 
   /** The over-budget notice when it has not ridden a reply yet today; null otherwise. */
@@ -3824,6 +3975,14 @@ export class Steward extends Agent<Env> {
       await this.handleNoteDecisionCard(action, input.cardMsgId);
       return;
     }
+    if (action === "note_confirm" || action === "note_remove") {
+      await this.handleNoteConfirmCard(input.msgId, action, input.cardMsgId);
+      return;
+    }
+    if (action === "skill_offer_accept" || action === "skill_offer_decline") {
+      await this.handleSkillOfferCard(input.msgId, action, input.cardMsgId);
+      return;
+    }
     if (action === "pr_approve" || action === "pr_decline") {
       await this.handlePrConsentCard(action, input.cardMsgId);
       return;
@@ -3868,6 +4027,161 @@ export class Steward extends Agent<Env> {
     }
     // The tap's ack is a direct response to the owner's action (issue #11): push.
     await this.enqueueOutbound({ kind: "text", to: OWNER_ID, text: reply, urgency: "push" });
+  }
+
+  private async handleNoteConfirmCard(
+    msgId: string,
+    action: "note_confirm" | "note_remove",
+    cardMsgId: string,
+  ): Promise<void> {
+    const row = this.ledger.outbound.rowForProviderMsg(cardMsgId);
+    const match = row !== null && row.id.startsWith("noteconfirm:") ? /^noteconfirm:(n_[^:]+)$/.exec(row.id) : null;
+    const threadId = row?.threadId ?? null;
+    if (threadId) this.ledger.threads.markRead(threadId);
+    if (!match) {
+      await this.enqueueOutbound({ kind: "text", to: OWNER_ID, text: "这张记忆确认卡片已失效。", threadId, urgency: "push" });
+      return;
+    }
+    const noteId = match[1]!;
+    let reply: string;
+    if (action === "note_confirm") {
+      const evidence = this.ownerMessageRef(msgId) ?? `user:${msgId}`;
+      const res = this.ledger.notes.confirm(noteId, evidence, { reported: true });
+      this.ledger.ownerInputs.record("local", msgId, "确认项目记忆有效", threadId);
+      if (res.ok) {
+        reply = "✅ 已确认这条项目记忆，后续新任务派发与总管代答都会按已验证约定采用。";
+      } else if (res.reason === "already") {
+        reply = "这条项目记忆此前已经确认过了。";
+      } else if (res.reason === "superseded") {
+        reply = "这条项目记忆已被更新的记录取代，无需再确认旧版本。";
+      } else {
+        reply = "这条项目记忆已被移除，无需再确认。";
+      }
+    } else {
+      const res = this.ledger.notes.remove(noteId, { reported: true });
+      this.ledger.ownerInputs.record("local", msgId, "删除待确认项目观察", threadId);
+      reply = res.ok ? "🗑️ 已移除这条项目观察，后续不会再注入。" : "这条项目观察此前已移除。";
+    }
+    await this.enqueueOutbound({ kind: "text", to: OWNER_ID, text: reply, threadId, urgency: "push" });
+  }
+
+  private async handleSkillOfferCard(
+    msgId: string,
+    action: "skill_offer_accept" | "skill_offer_decline",
+    cardMsgId: string,
+  ): Promise<void> {
+    const row = this.ledger.outbound.rowForProviderMsg(cardMsgId);
+    const offerId = row !== null && row.id.startsWith("skilloffer:") ? row.id.slice("skilloffer:".length) : "";
+    const offer = offerId ? this.ledger.skillOffers.get(offerId) : null;
+    const threadId = offer?.threadId ?? row?.threadId ?? null;
+    if (threadId) this.ledger.threads.markRead(threadId);
+    if (!offer) {
+      await this.enqueueOutbound({ kind: "text", to: OWNER_ID, text: "这张技能提议卡片已失效。", threadId, urgency: "push" });
+      return;
+    }
+    const fallbackPath = `.agents/skills/${offer.slug}/SKILL.md`;
+    if (action === "skill_offer_decline") {
+      if (offer.status === "saved") {
+        await this.enqueueOutbound({
+          kind: "text",
+          to: OWNER_ID,
+          threadId,
+          urgency: "push",
+          text: `该技能此前已写入 \`${offer.savedPath ?? fallbackPath}\`；如需移除可在「记忆与调度 → 仓库技能」中删除。`,
+        });
+        return;
+      }
+      this.ledger.skillOffers.dismiss(offer.id);
+      this.ledger.ownerInputs.record("local", msgId, `忽略技能提议 ${offer.slug}`, threadId);
+      this.ledger.timeline.add(offer.threadId, "note", `用户忽略技能提议：${offer.slug}`, {
+        offerId: offer.id,
+        slug: offer.slug,
+      });
+      await this.enqueueOutbound({
+        kind: "text",
+        to: OWNER_ID,
+        threadId,
+        urgency: "push",
+        text: "好的，已忽略这次技能提议，未改动仓库文件。",
+      });
+      return;
+    }
+
+    if (offer.status === "saved") {
+      await this.enqueueOutbound({
+        kind: "text",
+        to: OWNER_ID,
+        threadId,
+        urgency: "push",
+        text: `该技能此前已写入 \`${offer.savedPath ?? fallbackPath}\`，不会重复写入。`,
+      });
+      return;
+    }
+    const claimed = this.ledger.skillOffers.beginSave(offer.id);
+    if (!claimed) {
+      await this.enqueueOutbound({
+        kind: "text",
+        to: OWNER_ID,
+        threadId,
+        urgency: "push",
+        text: offer.status === "saving" ? "正在写入仓库技能，请稍候。" : "这张技能提议已处理过。",
+      });
+      return;
+    }
+    this.ledger.ownerInputs.record("local", msgId, `写入仓库技能 ${offer.slug}`, threadId);
+    try {
+      const writeRes = await this.connectorProto.repoSkillOp(
+        offer.deviceId,
+        {
+          action: "write",
+          scope: { kind: "repo", repoId: offer.repoId },
+          target: offer.target,
+          slug: offer.slug,
+          markdown: offer.markdown,
+          overwrite: false,
+        },
+        AbortSignal.timeout(8_000),
+      );
+      if (writeRes.action !== "write") throw new WorkspaceError("io_failed", 502);
+      this.ledger.skillOffers.markSaved(offer.id, writeRes.summary.relativePath, writeRes.summary.sha256);
+      this.ledger.timeline.add(
+        offer.threadId,
+        "note",
+        `用户确认写入仓库技能：${writeRes.summary.relativePath}`,
+        { offerId: offer.id, slug: offer.slug, path: writeRes.summary.relativePath },
+      );
+      await this.enqueueOutbound({
+        kind: "text",
+        to: OWNER_ID,
+        threadId,
+        urgency: "push",
+        text: `✅ 已写入仓库技能 \`${writeRes.summary.relativePath}\`（后续新任务派发将自动纳入索引；可在「记忆与调度 → 仓库技能」中查看或编辑）。`,
+      });
+    } catch (err) {
+      const code = err instanceof WorkspaceError ? err.code : "io_failed";
+      this.ledger.skillOffers.markFailed(offer.id, code);
+      if (code === "already_exists") {
+        await this.enqueueOutbound({
+          kind: "text",
+          to: OWNER_ID,
+          threadId,
+          urgency: "push",
+          text: `⚠️ 目标仓库已存在同名技能 \`${fallbackPath}\`，核心未做静默覆盖。可点击卡片上的「预览与编辑」修改标识名或手动确认覆盖。`,
+        });
+        return;
+      }
+      const hint =
+        code === "machine_offline"
+          ? "目标机器当前离线；等机器上线后回到这张卡片再点一次「写入仓库技能」即可重试。"
+          : `错误码：${code}；稍后可回到这张卡片重试，或打开「预览与编辑」手动保存。`;
+      await this.enqueueOutbound({
+        kind: "text",
+        to: OWNER_ID,
+        threadId,
+        urgency: "push",
+        text: `⚠️ 仓库技能写入未完成（${hint}）`,
+      });
+    }
   }
 
   /**
