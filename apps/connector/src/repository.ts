@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import type { RegisterRepoResult } from "@isaac2ingrid/protocol";
 import { repoHookCapabilitySummary } from "./hooks.ts";
+import { scanRepoSkillBriefsSync } from "./repo-skills.ts";
 import type { LocalStore } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
 
@@ -37,6 +38,7 @@ export async function registerRepository({
         };
   const branch = identity.capability.kind === "git" ? identity.capability.defaultBranch : null;
   const remote = identity.capability.kind === "git" ? identity.capability.remote : null;
+  const skills = scanRepoSkillBriefsSync(repo.path);
   return {
     repoId: repo.repoId,
     name: repo.name,
@@ -48,5 +50,7 @@ export async function registerRepository({
     hasSetupHook: hookSummary.hasSetupHook,
     hasArchiveHook: hookSummary.hasArchiveHook,
     approved: hookSummary.approved,
+    projectApproved: stored?.approved === true,
+    ...(skills.length > 0 ? { skills } : {}),
   };
 }

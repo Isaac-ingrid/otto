@@ -3,14 +3,17 @@
 // segment-by-segment lstat symlink blocking, secret-leak preflight, and SHA-256 CAS writes.
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   isValidSkillSlug,
+  REPO_SKILL_HELLO_MAX_ITEMS,
   REPO_SKILL_LIST_MAX_BYTES,
   REPO_SKILL_LIST_MAX_ITEMS,
   REPO_SKILL_MAX_BYTES,
+  type RepoSkillBrief,
   type RepoSkillError,
   type RepoSkillGitStatus,
   type RepoSkillOpArgs,
@@ -29,6 +32,14 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\bAIza[0-9A-Za-z_-]{20,}\b/,
   /\bAQ\.[A-Za-z0-9._-]{20,}\b/,
 ];
+
+function redactSkillMetaText(text: string): string {
+  let out = text;
+  for (const re of SECRET_PATTERNS) {
+    out = out.replace(new RegExp(re.source, "g"), "[REDACTED]");
+  }
+  return out;
+}
 
 class SkillOpException extends Error {
   code: RepoSkillError;
@@ -130,6 +141,106 @@ export function parseSkillFrontmatter(markdown: string, fallbackSlug: string): {
     name: (name || fallbackSlug).replace(/\s+/g, " ").slice(0, 120),
     description: description.replace(/\s+/g, " ").slice(0, 280),
   };
+}
+
+function walkCheckedPathSync(
+  realRoot: string,
+  segments: readonly string[],
+  expectFinal: "file" | "dir",
+): string | null {
+  let curr = realRoot;
+  for (let i = 0; i < segments.length; i += 1) {
+    curr = join(curr, segments[i]!);
+    try {
+      const st = lstatSync(curr);
+      if (st.isSymbolicLink()) return null;
+      const isLast = i === segments.length - 1;
+      if (!isLast && !st.isDirectory()) return null;
+      if (isLast && expectFinal === "file" && !st.isFile()) return null;
+      if (isLast && expectFinal === "dir" && !st.isDirectory()) return null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const resolved = realpathSync(curr);
+    const prefix = realRoot.endsWith(sep) ? realRoot : `${realRoot}${sep}`;
+    if (resolved !== realRoot && !resolved.startsWith(prefix)) return null;
+  } catch {
+    return null;
+  }
+  return curr;
+}
+
+/**
+ * Fast, zero-subprocess, non-throwing metadata scan for `hello.repos` and `registerRepository`.
+ * Silently skips missing directories, symlinks, or oversized files so handshake never fails.
+ */
+export function scanRepoSkillBriefsSync(
+  rootDir: string,
+  maxItems: number = REPO_SKILL_HELLO_MAX_ITEMS,
+): RepoSkillBrief[] {
+  let realRoot: string;
+  try {
+    const st = lstatSync(rootDir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return [];
+    realRoot = realpathSync(rootDir);
+  } catch {
+    return [];
+  }
+
+  const briefs: RepoSkillBrief[] = [];
+  for (const slot of SLOTS) {
+    if (briefs.length >= maxItems) break;
+    const baseDir = walkCheckedPathSync(realRoot, slot.baseSegments, "dir");
+    if (!baseDir) continue;
+    let names: string[];
+    try {
+      names = readdirSync(baseDir);
+      names.sort((a, b) => a.localeCompare(b));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (briefs.length >= maxItems) break;
+      let entryStat: ReturnType<typeof lstatSync>;
+      try {
+        entryStat = lstatSync(join(baseDir, name));
+      } catch {
+        continue;
+      }
+      if (entryStat.isSymbolicLink()) continue;
+      let slug: string | null = null;
+      if (slot.ownsSubdir && entryStat.isDirectory() && isValidSkillSlug(name)) {
+        slug = name;
+      } else if (!slot.ownsSubdir && entryStat.isFile() && name.endsWith(".md")) {
+        const candidate = name.slice(0, -3);
+        if (isValidSkillSlug(candidate)) slug = candidate;
+      }
+      if (!slug) continue;
+      const filePath = walkCheckedPathSync(realRoot, slot.fileSegments(slug), "file");
+      if (!filePath) continue;
+      try {
+        const st = lstatSync(filePath);
+        if (st.isSymbolicLink() || !st.isFile() || st.size > REPO_SKILL_MAX_BYTES) continue;
+        const buf = readFileSync(filePath);
+        if (buf.byteLength > REPO_SKILL_MAX_BYTES) continue;
+        const meta = parseSkillFrontmatter(buf.toString("utf8"), slug);
+        const safeName = redactSkillMetaText(meta.name).replace(/[\r\n\t]+/g, " ").trim().slice(0, 80) || slug;
+        const safeDesc = redactSkillMetaText(meta.description).replace(/[\r\n\t]+/g, " ").trim().slice(0, 160);
+        briefs.push({
+          target: slot.target,
+          slug,
+          relativePath: slot.relativePath(slug),
+          name: safeName,
+          description: safeDesc,
+        });
+      } catch {
+        continue;
+      }
+    }
+  }
+  return briefs;
 }
 
 async function resolveCanonicalRoot(rootDir: string): Promise<string> {

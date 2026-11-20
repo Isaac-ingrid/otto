@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { executeRepoSkillOp } from "../src/repo-skills.ts";
+import { executeRepoSkillOp, scanRepoSkillBriefsSync } from "../src/repo-skills.ts";
 import { LocalStore } from "../src/store.ts";
 import { WorkerManager } from "../src/worker-manager.ts";
 import { fakePiAdapter, git, makeGitRepo, reportRun, tmpDir, waitFor, writeScenario } from "./helpers.ts";
@@ -269,4 +269,29 @@ describe("executeRepoSkillOp & WorkerManager.repoSkillOp (Direction 2B, Stage 1)
       store.close();
     }
   }, 30_000);
+
+  it("scanRepoSkillBriefsSync returns bounded, redacted metadata and silently skips symlinks", () => {
+    mkdirSync(join(repo, ".agents/skills/db-migrate"), { recursive: true });
+    const fakeKey = `sk-proj-${"Z9y8X7w6V5u4T3s2R1q0"}`;
+    writeFileSync(
+      join(repo, ".agents/skills/db-migrate/SKILL.md"),
+      `---\nname: DB Migrate\ndescription: Run migrations without leaking ${fakeKey}\n---\n\n# Body\n`,
+    );
+    const outside = join(dir, "secret.md");
+    writeFileSync(outside, "# secret\n");
+    mkdirSync(join(repo, ".claude/commands"), { recursive: true });
+    symlinkSync(outside, join(repo, ".claude/commands/evil-link.md"));
+
+    const briefs = scanRepoSkillBriefsSync(repo);
+    expect(briefs).toHaveLength(1);
+    expect(briefs[0]).toMatchObject({
+      target: "agents-skill",
+      slug: "db-migrate",
+      relativePath: ".agents/skills/db-migrate/SKILL.md",
+      name: "DB Migrate",
+    });
+    expect(briefs[0]!.description).toContain("[REDACTED]");
+    expect(briefs[0]!.description).not.toContain(fakeKey);
+    expect(scanRepoSkillBriefsSync(join(dir, "does-not-exist"))).toEqual([]);
+  });
 });

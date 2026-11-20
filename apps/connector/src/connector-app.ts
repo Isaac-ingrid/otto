@@ -12,6 +12,7 @@ import { RegisterRepoArgsSchema, type CmdMessage } from "@isaac2ingrid/protocol"
 import { registerRepository } from "./repository.ts";
 import { EventLog } from "./events.ts";
 import { repoHookCapabilitySummary } from "./hooks.ts";
+import { scanRepoSkillBriefsSync } from "./repo-skills.ts";
 import type { LocalStore, AntigravityApiKeyConfig } from "./store.ts";
 import type { StallWatchdogOptions } from "./watchdog.ts";
 import { CommandError, WorkerManager, type RecoveryOptions } from "./worker-manager.ts";
@@ -269,6 +270,7 @@ export class ConnectorApp {
       })),
       repos: this.store.listRepos().map((r) => {
         const hookSummary = repoHookCapabilitySummary(r, this.stateDir);
+        const skills = scanRepoSkillBriefsSync(r.path);
         return {
           repoId: r.repoId,
           name: r.name,
@@ -280,6 +282,8 @@ export class ConnectorApp {
           hasSetupHook: hookSummary.hasSetupHook,
           hasArchiveHook: hookSummary.hasArchiveHook,
           approved: hookSummary.approved,
+          projectApproved: r.approved === true,
+          ...(skills.length > 0 ? { skills } : {}),
         };
       }),
       limits: {
