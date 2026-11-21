@@ -64,6 +64,7 @@ export async function resetLedgerState(): Promise<void> {
     }
     await instance.setAmbientSkillRepliesForTest(null);
   await instance.setPrDiagnosisRepliesForTest(null);
+  await instance.setPrFeedbackRepliesForTest(null);
   });
 }
 

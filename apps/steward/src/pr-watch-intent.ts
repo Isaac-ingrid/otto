@@ -31,3 +31,11 @@ export function mentionsFullPrCi(text: string): boolean {
   const scoped = positive.replace(/\b(?:do not|don't|no|without|not)\s+(?:(?:check|verify|inspect)\s+)?(?:check[ -]?runs?|CI|Checks|Actions)\b/gi, ' ');
   return /check[ -]?runs?|\bchecks\b|\bactions\b|\bCI\b|全部检查/i.test(scoped);
 }
+
+/** Explicit authorization to keep a PR watch active past green CI until merge/close (reviews & conflicts). */
+export function hasExplicitPrUntilMergeIntent(text: string): boolean {
+  const cleaned = withoutPrUrls(text)
+    .replace(/(?:不要|不用|无需|不需要|不看|别)(?:跟进|看|查|关注|管)?\s*(?:评审|评论|review|冲突|conflict|合并)/gi, ' ')
+    .replace(/\b(?:do not|don't|no|without|not)\s+(?:watch|check|follow|track)?\s*(?:reviews?|comments?|conflicts?|merge)\b/gi, ' ');
+  return /(?:直到|直至|一直盯到|盯到|等到).{0,8}(?:合并|合入|关闭)|评审|review\s*(?:意见|评论|comments?|threads?|changes)?|合并冲突|\bconflicts?\b|\buntil\s+(?:merged|merge|closed)\b/i.test(cleaned);
+}

@@ -1235,4 +1235,30 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX IF NOT EXISTS sh_pr_watch_diagnosis_watch ON sh_pr_watch_diagnosis (watchId, updatedAt DESC)`;
     },
   },
+  {
+    // PR Watch Read-Only Review Feedback & Merge Conflict Triage (Direction B):
+    // Adds optional watchGoal ('ci_pass' | 'merged') on sh_pr_watch and standalone sh_pr_watch_feedback
+    // storing latest mergeability, trusted review decision, monotonic cursor, and bounded triage.
+    id: "045_pr_watch_review_and_conflict",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_pr_watch ADD COLUMN watchGoal TEXT NOT NULL DEFAULT 'ci_pass'`;
+      });
+      sql`CREATE TABLE IF NOT EXISTS sh_pr_watch_feedback (
+        watchId TEXT PRIMARY KEY,
+        head TEXT NOT NULL,
+        baseRef TEXT,
+        baseSha TEXT,
+        headRef TEXT,
+        mergeState TEXT NOT NULL DEFAULT 'unknown',
+        reviewDecision TEXT NOT NULL DEFAULT 'none',
+        reviewCursor TEXT NOT NULL DEFAULT '0:0',
+        snapshotJson TEXT NOT NULL,
+        triageJson TEXT,
+        triageStatus TEXT NOT NULL DEFAULT 'none',
+        updatedAt INTEGER NOT NULL
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_pr_watch_feedback_updated ON sh_pr_watch_feedback (updatedAt DESC)`;
+    },
+  },
 ];

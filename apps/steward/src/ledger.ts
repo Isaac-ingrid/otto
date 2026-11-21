@@ -37,8 +37,15 @@ import { escapeMarkers, eventWakeText, externalActivityWakeText, queueReturnedWa
 import { createMachineStatus, type MachineReliability } from "./machine-status.ts";
 import type { StartWorkerInput } from "./dispatch.ts";
 import type { QuietSection } from "./report-template.ts";
-import type { PrFailureSnapshot } from "./pr-evidence.ts";
-import { buildDeterministicPrDiagnosis, type PrDiagnosisStatus, type PrFailureDiagnosis } from "./pr-failure-diagnoser.ts";
+import type { PrFailureSnapshot, PrFeedbackSnapshot, PrMergeState, PrReviewDecision, PrWatchGoal } from "./pr-evidence.ts";
+import {
+  buildDeterministicPrDiagnosis,
+  buildDeterministicPrFeedbackTriage,
+  hasActionablePrFeedback,
+  type PrDiagnosisStatus,
+  type PrFailureDiagnosis,
+  type PrFeedbackTriage,
+} from "./pr-failure-diagnoser.ts";
 
 /** Tagged-template SQL over the DO's SQLite (same shape schema.ts migrations use). */
 export type LedgerSql = <T = Record<string, unknown>>(
@@ -3710,19 +3717,55 @@ export function createLedger(deps: LedgerDeps) {
               observedState: string | null;
               failed: number;
               pending: number;
+              watchGoal: PrWatchGoal | null;
               snapshotJson: string | null;
               diagnosisJson: string | null;
               diagnosisStatus: PrDiagnosisStatus | null;
+              fbHead: string | null;
+              fbMergeState: string | null;
+              fbReviewDecision: string | null;
+              fbSnapshotJson: string | null;
+              fbTriageJson: string | null;
+              fbTriageStatus: PrDiagnosisStatus | null;
             }>`
-              SELECT w.id, w.url, w.nextCheckAt, w.head, w.observedState, w.failed, w.pending,
-                     d.snapshotJson, d.diagnosisJson, d.diagnosisStatus
+              SELECT w.id, w.url, w.nextCheckAt, w.head, w.observedState, w.failed, w.pending, w.watchGoal,
+                     d.snapshotJson, d.diagnosisJson, d.diagnosisStatus,
+                     f.head AS fbHead, f.mergeState AS fbMergeState, f.reviewDecision AS fbReviewDecision,
+                     f.snapshotJson AS fbSnapshotJson, f.triageJson AS fbTriageJson, f.triageStatus AS fbTriageStatus
               FROM sh_pr_watch w
               LEFT JOIN sh_pr_watch_diagnosis d ON d.watchId = w.id AND d.head = w.head
+              LEFT JOIN sh_pr_watch_feedback f ON f.watchId = w.id
               WHERE w.threadId = ${thread.threadId} AND w.status = 'active'
               ORDER BY w.nextCheckAt, w.id
             `.map((r) => {
               const snap = r.observedState === 'failure' ? jsonOrNull<PrFailureSnapshot>(r.snapshotJson) : null;
               const diag = snap ? jsonOrNull<PrFailureDiagnosis>(r.diagnosisJson) : null;
+              const fbMatchesHead = r.fbHead !== null && (!r.head || r.fbHead === r.head);
+              const fbSnap = fbMatchesHead ? jsonOrNull<PrFeedbackSnapshot>(r.fbSnapshotJson) : null;
+              const fbTriage = fbSnap ? jsonOrNull<PrFeedbackTriage>(r.fbTriageJson) : null;
+              const mergeState: PrMergeState =
+                fbMatchesHead && (r.fbMergeState === 'mergeable' || r.fbMergeState === 'conflicted')
+                  ? r.fbMergeState
+                  : 'unknown';
+              const reviewDecision: PrReviewDecision =
+                fbMatchesHead &&
+                (r.fbReviewDecision === 'changes_requested' ||
+                  r.fbReviewDecision === 'approved' ||
+                  r.fbReviewDecision === 'commented')
+                  ? r.fbReviewDecision
+                  : 'none';
+              const failureHeadline = snap ? (diag?.headline ?? buildDeterministicPrDiagnosis(snap, r.url).headline) : null;
+              const fbActionable = fbSnap ? hasActionablePrFeedback(fbSnap) : false;
+              const fbHeadline = fbSnap ? (fbTriage?.headline ?? buildDeterministicPrFeedbackTriage(fbSnap, r.url).headline) : null;
+              const hasActionableFeedback = snap !== null || fbActionable;
+              let attentionHeadline: string | null = null;
+              if (mergeState === 'conflicted' && fbHeadline) {
+                attentionHeadline = failureHeadline ? `${fbHeadline} · ${failureHeadline}`.slice(0, 140) : fbHeadline;
+              } else if (failureHeadline) {
+                attentionHeadline = failureHeadline;
+              } else if (fbActionable && fbHeadline) {
+                attentionHeadline = fbHeadline;
+              }
               return {
                 id: r.id,
                 url: r.url,
@@ -3731,9 +3774,18 @@ export function createLedger(deps: LedgerDeps) {
                 observedState: r.observedState,
                 failed: r.failed,
                 pending: r.pending,
+                watchGoal: r.watchGoal === 'merged' ? 'merged' : 'ci_pass',
+                mergeState,
+                reviewDecision,
                 hasFailureDetail: snap !== null,
-                failureHeadline: snap ? (diag?.headline ?? buildDeterministicPrDiagnosis(snap, r.url).headline) : null,
-                diagnosisStatus: snap ? (r.diagnosisStatus ?? 'skipped_no_model') : null,
+                hasActionableFeedback,
+                failureHeadline,
+                attentionHeadline,
+                diagnosisStatus: snap
+                  ? (r.diagnosisStatus ?? 'skipped_no_model')
+                  : fbActionable
+                    ? (r.fbTriageStatus ?? 'skipped_no_model')
+                    : null,
               };
             }),
             routines: sql<Record<string, unknown>>`

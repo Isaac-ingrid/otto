@@ -33,8 +33,8 @@ import {
   type ControlPlaneDeps,
 } from "./control-plane.ts";
 import type { Ledger } from "./ledger.ts";
-import type { PrFailureSnapshot } from "./pr-evidence.ts";
-import type { PrDiagnosisStatus, PrFailureDiagnosis } from "./pr-failure-diagnoser.ts";
+import type { PrFailureSnapshot, PrFeedbackSnapshot, PrMergeState, PrReviewDecision } from "./pr-evidence.ts";
+import type { PrActionKind, PrDiagnosisStatus, PrFailureDiagnosis, PrFeedbackTriage } from "./pr-failure-diagnoser.ts";
 import type { PrWatchRow } from "./pr-watch.ts";
 import {
   WorkspaceError,
@@ -59,6 +59,20 @@ export interface PrWatchDiagnosisInput {
   refreshDiagnosis?: boolean;
 }
 
+export interface PrWatchFeedbackView {
+  head: string;
+  baseRef: string | null;
+  baseSha: string | null;
+  headRef: string | null;
+  mergeState: PrMergeState;
+  reviewDecision: PrReviewDecision;
+  reviewCursor: string;
+  snapshot: PrFeedbackSnapshot;
+  triage: PrFeedbackTriage | null;
+  triageStatus: PrDiagnosisStatus;
+  effectiveTriage: PrFeedbackTriage;
+}
+
 export interface PrWatchDiagnosisResponse {
   ok: true;
   watch: PrWatchRow;
@@ -67,6 +81,9 @@ export interface PrWatchDiagnosisResponse {
   diagnosis: PrFailureDiagnosis | null;
   diagnosisStatus: PrDiagnosisStatus | null;
   effectiveDiagnosis: PrFailureDiagnosis | null;
+  feedback: PrWatchFeedbackView | null;
+  actionKind: PrActionKind | null;
+  actionPrompt: string | null;
   repairPrompt: string | null;
 }
 

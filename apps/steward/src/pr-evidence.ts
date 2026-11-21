@@ -2,6 +2,10 @@
 import { escapeMarkers } from "./wake-text.ts";
 
 export type PrEvidenceMode = "checks-and-statuses" | "statuses-only";
+export type PrWatchGoal = "ci_pass" | "merged";
+export type PrMergeState = "mergeable" | "conflicted" | "unknown";
+export type PrReviewDecision = "changes_requested" | "approved" | "commented" | "none";
+
 export interface PrTarget { owner: string; repo: string; number: number; url: string }
 export interface PrEvidence {
   head: string;
@@ -9,6 +13,10 @@ export interface PrEvidence {
   checks: number;
   failed: number;
   pending: number;
+  mergeState?: PrMergeState;
+  baseRef?: string;
+  baseSha?: string;
+  headRef?: string;
 }
 export type EvidenceResult = { ok: true; evidence: PrEvidence } | { ok: false; reason: string };
 
@@ -67,11 +75,53 @@ export function parsePrUrl(value: unknown): PrTarget | null {
 }
 
 class EvidenceError extends Error {}
-type Pull = { head: { sha: string }; state: string; merged: boolean };
+type Pull = {
+  head: { sha: string; ref?: unknown };
+  base?: { sha?: unknown; ref?: unknown };
+  user?: { login?: unknown } | null;
+  state: string;
+  merged: boolean;
+  mergeable?: unknown;
+  mergeable_state?: unknown;
+};
 function pullOf(raw: unknown): Pull {
   const p = raw as Partial<Pull> | null;
   if (!p || !/^[a-f0-9]{40}$/i.test(p.head?.sha ?? "") || !["open", "closed"].includes(p.state ?? "") || typeof p.merged !== "boolean") throw new EvidenceError("invalid_pull_response");
   return p as Pull;
+}
+
+export function derivePrMergeState(mergeable: unknown, mergeableState: unknown): PrMergeState | undefined {
+  if (mergeable === false || mergeableState === "dirty") return "conflicted";
+  if (mergeable === true) return "mergeable";
+  if (mergeable === null || typeof mergeableState === "string") return "unknown";
+  return undefined;
+}
+
+function extractPullBranches(pull: Pull, token?: string): {
+  mergeState?: PrMergeState;
+  baseRef?: string;
+  baseSha?: string;
+  headRef?: string;
+} {
+  const mergeState = derivePrMergeState(pull.mergeable, pull.mergeable_state);
+  const baseRef =
+    typeof pull.base?.ref === "string" && pull.base.ref.trim()
+      ? sanitizeUntrustedCiText(pull.base.ref, { ...(token ? { token } : {}), maxChars: 120 })
+      : undefined;
+  const baseSha =
+    typeof pull.base?.sha === "string" && /^[a-f0-9]{40}$/i.test(pull.base.sha)
+      ? pull.base.sha.toLowerCase()
+      : undefined;
+  const headRef =
+    typeof pull.head?.ref === "string" && pull.head.ref.trim()
+      ? sanitizeUntrustedCiText(pull.head.ref, { ...(token ? { token } : {}), maxChars: 120 })
+      : undefined;
+  return {
+    ...(mergeState !== undefined ? { mergeState } : {}),
+    ...(baseRef ? { baseRef } : {}),
+    ...(baseSha ? { baseSha } : {}),
+    ...(headRef ? { headRef } : {}),
+  };
 }
 
 export async function readPrEvidence(target: PrTarget, options: { token?: string; fetch?: typeof fetch; mode?: PrEvidenceMode } = {}): Promise<EvidenceResult> {
@@ -139,7 +189,18 @@ export async function readPrEvidence(target: PrTarget, options: { token?: string
     const checks = checkRuns.length + statusesRaw.statuses.length;
     // All-neutral/skipped is not a green build. At least one real success is required.
     const successful = checkRuns.some(c => c.status === "completed" && c.conclusion === "success") || statusesRaw.statuses.some(s => s.state === "success");
-    return { ok: true, evidence: { head: sha, state: failed ? "failure" : pending || !successful ? "waiting" : "success", checks, failed, pending } };
+    const pullMeta = extractPullBranches(final, options.token);
+    return {
+      ok: true,
+      evidence: {
+        head: sha,
+        state: failed ? "failure" : pending || !successful ? "waiting" : "success",
+        checks,
+        failed,
+        pending,
+        ...pullMeta,
+      },
+    };
   } catch (error) {
     return { ok: false, reason: error instanceof EvidenceError ? error.message : "github_unavailable" };
   }
@@ -664,6 +725,431 @@ export async function readPrFailureDetail(
       ...(logNote ? { logNote } : {}),
       totalFailed,
       items,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// ---- Direction B: Bounded Read-Only PR Review & Merge Conflict Reader ---------------------------
+
+export interface PrReviewerSummary {
+  reviewId: number;
+  author: string;
+  authorAssociation: string;
+  isBot: boolean;
+  state: "CHANGES_REQUESTED" | "APPROVED" | "COMMENTED";
+  commitId: string | null;
+  onCurrentHead: boolean;
+  body: string | null;
+  htmlUrl: string | null;
+}
+
+export interface PrReviewThreadSnapshot {
+  rootCommentId: number;
+  author: string;
+  authorAssociation: string;
+  isBot: boolean;
+  path: string;
+  line: number;
+  diffHunkTail?: string | null;
+  body: string;
+  replyCount: number;
+  latestReplyAuthor?: string | null;
+  latestReplyBody?: string | null;
+  htmlUrl: string | null;
+  commitId?: string | null;
+}
+
+export interface PrFeedbackSnapshot {
+  head: string;
+  capturedAt: number;
+  baseRef: string | null;
+  baseSha: string | null;
+  headRef: string | null;
+  mergeState: PrMergeState;
+  reviewDecision: PrReviewDecision;
+  changesRequestedOnCurrentHead: boolean;
+  staleChangesRequestedReviewers: string[];
+  reviewCursor: string;
+  ignoredUntrustedCount: number;
+  truncated: boolean;
+  reviewers: PrReviewerSummary[];
+  threads: PrReviewThreadSnapshot[];
+}
+
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+const REVIEWS_PAGE_SIZE = 100;
+const COMMENTS_PAGE_SIZE = 50;
+
+function isTrustedPrParticipant(
+  authorLogin: string,
+  userType: unknown,
+  authorAssociation: unknown,
+  prAuthorLogin: string | null,
+): { trusted: boolean; isBot: boolean; association: string; isSelf: boolean } {
+  const normalizedLogin = authorLogin.trim();
+  const isSelf = Boolean(prAuthorLogin && normalizedLogin.toLowerCase() === prAuthorLogin.toLowerCase());
+  const isBot = userType === "Bot" || normalizedLogin.endsWith("[bot]");
+  const assoc = typeof authorAssociation === "string" ? authorAssociation.toUpperCase() : "NONE";
+  const trusted = !isSelf && (TRUSTED_AUTHOR_ASSOCIATIONS.has(assoc) || isBot);
+  return { trusted, isBot, association: assoc, isSelf };
+}
+
+function extractDiffHunkTail(rawHunk: unknown, token?: string): string | null {
+  if (typeof rawHunk !== "string" || !rawHunk.trim()) return null;
+  const cleaned = sanitizeUntrustedCiText(rawHunk, {
+    ...(token ? { token } : {}),
+    maxChars: 2_000,
+    preserveNewlines: true,
+  });
+  if (!cleaned) return null;
+  const lines = cleaned
+    .split("\n")
+    .map((line) => (line.length > 180 ? `${line.slice(0, 179)}…` : line));
+  const tail = lines.slice(Math.max(0, lines.length - 6)).join("\n").trim();
+  if (!tail) return null;
+  return tail.length > 360 ? `…${tail.slice(tail.length - 359)}` : tail;
+}
+
+function enforceFeedbackBudget(snapshot: PrFeedbackSnapshot): PrFeedbackSnapshot {
+  const encoder = new TextEncoder();
+  if (encoder.encode(JSON.stringify(snapshot)).byteLength <= MAX_SNAPSHOT_BYTES) return snapshot;
+  const trimmed: PrFeedbackSnapshot = {
+    ...snapshot,
+    reviewers: snapshot.reviewers.slice(0, 6).map((r) => ({
+      ...r,
+      body: r.body ? r.body.slice(0, 220) : null,
+    })),
+    threads: snapshot.threads.slice(0, 6).map((t) => ({
+      ...t,
+      body: t.body.slice(0, 240),
+      diffHunkTail: t.diffHunkTail ? t.diffHunkTail.slice(-200) : null,
+      latestReplyBody: t.latestReplyBody ? t.latestReplyBody.slice(0, 140) : null,
+    })),
+  };
+  if (encoder.encode(JSON.stringify(trimmed)).byteLength <= MAX_SNAPSHOT_BYTES) return trimmed;
+  return {
+    ...trimmed,
+    reviewers: trimmed.reviewers.slice(0, 4).map((r) => ({ ...r, body: r.body ? r.body.slice(0, 120) : null })),
+    threads: trimmed.threads.slice(0, 4).map((t) => ({
+      ...t,
+      body: t.body.slice(0, 150),
+      diffHunkTail: null,
+      latestReplyBody: null,
+    })),
+  };
+}
+
+interface RawPrReview {
+  id?: unknown;
+  user?: { id?: unknown; login?: unknown; type?: unknown } | null;
+  author_association?: unknown;
+  state?: unknown;
+  body?: unknown;
+  commit_id?: unknown;
+  html_url?: unknown;
+}
+
+interface RawPrComment {
+  id?: unknown;
+  in_reply_to_id?: unknown;
+  user?: { id?: unknown; login?: unknown; type?: unknown } | null;
+  author_association?: unknown;
+  path?: unknown;
+  line?: unknown;
+  diff_hunk?: unknown;
+  body?: unknown;
+  commit_id?: unknown;
+  html_url?: unknown;
+}
+
+/**
+ * Reads bounded, sanitized PR mergeability, review decisions, and live inline diff threads.
+ * - Only ingests reviews/comments from trusted collaborators (OWNER/MEMBER/COLLABORATOR) or Bots.
+ * - Untrusted outsider comments are discarded at the boundary (counted in ignoredUntrustedCount).
+ * - Never throws; returns null if unavailable or if the PR head drifted during collection.
+ */
+export async function readPrReviewAndConflictDetail(
+  target: PrTarget,
+  sha: string,
+  options: {
+    token?: string;
+    fetch?: typeof fetch;
+    now?: () => number;
+  } = {},
+): Promise<PrFeedbackSnapshot | null> {
+  const canonical = parsePrUrl(target.url);
+  if (
+    !canonical ||
+    canonical.owner !== target.owner ||
+    canonical.repo !== target.repo ||
+    canonical.number !== target.number ||
+    !/^[a-f0-9]{40}$/i.test(sha)
+  ) {
+    return null;
+  }
+
+  const send = options.fetch ?? fetch;
+  const token = options.token;
+  const repoPath = `/repos/${target.owner}/${target.repo}`;
+  const signal = AbortSignal.timeout(10_000);
+  const apiHeaders: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "Otto-PR-Watch",
+    "x-github-api-version": "2022-11-28",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  };
+
+  const getApiJson = async (suffix: string): Promise<{ ok: true; data: unknown } | { ok: false; status: number }> => {
+    const response = await send(`https://api.github.com${repoPath}${suffix}`, {
+      method: "GET",
+      redirect: "error",
+      signal,
+      headers: apiHeaders,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return { ok: false, status: response.status };
+    }
+    const { bytes } = await readStreamBounded(response, 2 * 1024 * 1024, "strict");
+    return { ok: true, data: JSON.parse(new TextDecoder().decode(bytes)) };
+  };
+
+  try {
+    const pullRes = await getApiJson(`/pulls/${target.number}`);
+    if (!pullRes.ok) return null;
+    const pull = pullOf(pullRes.data);
+    if (pull.head.sha.toLowerCase() !== sha.toLowerCase()) return null;
+
+    const prAuthorLogin =
+      typeof pull.user?.login === "string" && pull.user.login.trim() ? pull.user.login.trim() : null;
+    const pullBranches = extractPullBranches(pull, token);
+    const mergeState: PrMergeState = pullBranches.mergeState ?? "unknown";
+
+    const [reviewsRes, commentsRes] = await Promise.all([
+      getApiJson(`/pulls/${target.number}/reviews?per_page=${REVIEWS_PAGE_SIZE}`),
+      getApiJson(`/pulls/${target.number}/comments?sort=created&direction=desc&per_page=${COMMENTS_PAGE_SIZE}`),
+    ]);
+    if (!reviewsRes.ok || !Array.isArray(reviewsRes.data)) return null;
+    if (!commentsRes.ok || !Array.isArray(commentsRes.data)) return null;
+
+    let ignoredUntrustedCount = 0;
+    const truncated =
+      reviewsRes.data.length >= REVIEWS_PAGE_SIZE || commentsRes.data.length >= COMMENTS_PAGE_SIZE;
+
+    const rawReviews = (reviewsRes.data as RawPrReview[])
+      .filter((r): r is RawPrReview & { id: number } => Boolean(r && typeof r.id === "number" && Number.isSafeInteger(r.id) && r.id > 0))
+      .sort((a, b) => a.id - b.id);
+
+    type ReviewerTrack = {
+      decisive: PrReviewerSummary | null;
+      latestCommentOnHead: PrReviewerSummary | null;
+    };
+    const byReviewer = new Map<string, ReviewerTrack>();
+    let maxActionableReviewId = 0;
+
+    for (const r of rawReviews) {
+      const rawState = typeof r.state === "string" ? r.state.toUpperCase() : "";
+      if (rawState === "PENDING" || !rawState) continue;
+      const rawLogin = typeof r.user?.login === "string" ? r.user.login.trim() : "";
+      if (!rawLogin) continue;
+      const trust = isTrustedPrParticipant(rawLogin, r.user?.type, r.author_association, prAuthorLogin);
+      if (trust.isSelf) continue;
+      if (!trust.trusted) {
+        ignoredUntrustedCount += 1;
+        continue;
+      }
+
+      const key = rawLogin.toLowerCase();
+      const track = byReviewer.get(key) ?? { decisive: null, latestCommentOnHead: null };
+      const author = sanitizeUntrustedCiText(rawLogin, { ...(token ? { token } : {}), maxChars: 80 });
+      const commitId =
+        typeof r.commit_id === "string" && /^[a-f0-9]{40}$/i.test(r.commit_id) ? r.commit_id.toLowerCase() : null;
+      const onCurrentHead = commitId === sha.toLowerCase();
+      const body =
+        typeof r.body === "string" && r.body.trim()
+          ? sanitizeUntrustedCiText(r.body, { ...(token ? { token } : {}), maxChars: 400 })
+          : null;
+      const htmlUrl = safeHttpsUrl(r.html_url);
+
+      if (rawState === "DISMISSED") {
+        track.decisive = null;
+      } else if (rawState === "CHANGES_REQUESTED" || rawState === "APPROVED") {
+        track.decisive = {
+          reviewId: r.id,
+          author,
+          authorAssociation: trust.association,
+          isBot: trust.isBot,
+          state: rawState,
+          commitId,
+          onCurrentHead,
+          body,
+          htmlUrl,
+        };
+      } else if (rawState === "COMMENTED" && body && onCurrentHead) {
+        track.latestCommentOnHead = {
+          reviewId: r.id,
+          author,
+          authorAssociation: trust.association,
+          isBot: trust.isBot,
+          state: "COMMENTED",
+          commitId,
+          onCurrentHead: true,
+          body,
+          htmlUrl,
+        };
+      }
+      byReviewer.set(key, track);
+    }
+
+    const reviewers: PrReviewerSummary[] = [];
+    const staleChangesRequestedReviewers: string[] = [];
+    let changesRequestedCount = 0;
+    let changesRequestedOnCurrentHead = false;
+    let approvedCount = 0;
+
+    for (const track of byReviewer.values()) {
+      if (track.decisive) {
+        reviewers.push(track.decisive);
+        if (track.decisive.state === "CHANGES_REQUESTED") {
+          changesRequestedCount += 1;
+          maxActionableReviewId = Math.max(maxActionableReviewId, track.decisive.reviewId);
+          if (track.decisive.onCurrentHead) {
+            changesRequestedOnCurrentHead = true;
+          } else {
+            staleChangesRequestedReviewers.push(track.decisive.author);
+          }
+        } else if (track.decisive.state === "APPROVED") {
+          approvedCount += 1;
+        }
+      } else if (track.latestCommentOnHead) {
+        reviewers.push(track.latestCommentOnHead);
+        maxActionableReviewId = Math.max(maxActionableReviewId, track.latestCommentOnHead.reviewId);
+      }
+    }
+
+    // Parse inline diff comments: group by root id, keep only live diff positions (line !== null).
+    const rawComments = (commentsRes.data as RawPrComment[])
+      .filter((c): c is RawPrComment & { id: number } => Boolean(c && typeof c.id === "number" && Number.isSafeInteger(c.id) && c.id > 0))
+      .sort((a, b) => a.id - b.id);
+
+    type ThreadBuilder = {
+      root: PrReviewThreadSnapshot;
+      lastActivityId: number;
+    };
+    const threadMap = new Map<number, ThreadBuilder>();
+    let maxTrustedLiveCommentId = 0;
+
+    for (const c of rawComments) {
+      const rawLogin = typeof c.user?.login === "string" ? c.user.login.trim() : "";
+      if (!rawLogin) continue;
+      const trust = isTrustedPrParticipant(rawLogin, c.user?.type, c.author_association, prAuthorLogin);
+      const replyTo =
+        typeof c.in_reply_to_id === "number" && Number.isSafeInteger(c.in_reply_to_id) && c.in_reply_to_id > 0
+          ? c.in_reply_to_id
+          : null;
+
+      if (replyTo === null) {
+        if (trust.isSelf) continue;
+        if (!trust.trusted) {
+          ignoredUntrustedCount += 1;
+          continue;
+        }
+        // Outdated diff comments have line === null on GitHub REST v3; skip outdated roots.
+        if (typeof c.line !== "number" || !Number.isInteger(c.line) || c.line <= 0) continue;
+        const body =
+          typeof c.body === "string" && c.body.trim()
+            ? sanitizeUntrustedCiText(c.body, { ...(token ? { token } : {}), maxChars: 400 })
+            : "";
+        if (!body) continue;
+        const path =
+          typeof c.path === "string" && c.path.trim()
+            ? sanitizeUntrustedCiText(c.path, { ...(token ? { token } : {}), maxChars: 180 })
+            : "unknown";
+        const author = sanitizeUntrustedCiText(rawLogin, { ...(token ? { token } : {}), maxChars: 80 });
+        const commitId =
+          typeof c.commit_id === "string" && /^[a-f0-9]{40}$/i.test(c.commit_id) ? c.commit_id.toLowerCase() : null;
+        threadMap.set(c.id, {
+          root: {
+            rootCommentId: c.id,
+            author,
+            authorAssociation: trust.association,
+            isBot: trust.isBot,
+            path,
+            line: c.line,
+            diffHunkTail: extractDiffHunkTail(c.diff_hunk, token),
+            body,
+            replyCount: 0,
+            htmlUrl: safeHttpsUrl(c.html_url),
+            commitId,
+          },
+          lastActivityId: c.id,
+        });
+        maxTrustedLiveCommentId = Math.max(maxTrustedLiveCommentId, c.id);
+      } else {
+        const existing = threadMap.get(replyTo);
+        if (!existing) {
+          if (!trust.isSelf && !trust.trusted) ignoredUntrustedCount += 1;
+          continue;
+        }
+        if (!trust.isSelf && !trust.trusted) {
+          ignoredUntrustedCount += 1;
+          continue;
+        }
+        const replyBody =
+          typeof c.body === "string" && c.body.trim()
+            ? sanitizeUntrustedCiText(c.body, { ...(token ? { token } : {}), maxChars: 240 })
+            : "";
+        existing.root.replyCount += 1;
+        if (replyBody) {
+          existing.root.latestReplyAuthor = sanitizeUntrustedCiText(rawLogin, {
+            ...(token ? { token } : {}),
+            maxChars: 80,
+          });
+          existing.root.latestReplyBody = replyBody;
+        }
+        existing.lastActivityId = Math.max(existing.lastActivityId, c.id);
+        if (trust.trusted) maxTrustedLiveCommentId = Math.max(maxTrustedLiveCommentId, c.id);
+      }
+    }
+
+    // Re-read PR head SHA at the end so mid-flight head pushes never publish mismatched review snapshots.
+    const verifyPullRes = await getApiJson(`/pulls/${target.number}`);
+    if (!verifyPullRes.ok) return null;
+    const verifyPull = pullOf(verifyPullRes.data);
+    if (verifyPull.head.sha.toLowerCase() !== sha.toLowerCase()) return null;
+
+    const threads = [...threadMap.values()]
+      .sort((a, b) => b.lastActivityId - a.lastActivityId)
+      .slice(0, 8)
+      .map((entry) => entry.root);
+
+    const hasTrustedCommentReview = reviewers.some((r) => r.state === "COMMENTED");
+    const reviewDecision: PrReviewDecision =
+      changesRequestedCount > 0
+        ? "changes_requested"
+        : threads.length > 0 || hasTrustedCommentReview
+          ? "commented"
+          : approvedCount > 0
+            ? "approved"
+            : "none";
+
+    return enforceFeedbackBudget({
+      head: sha.toLowerCase(),
+      capturedAt: options.now?.() ?? Date.now(),
+      baseRef: pullBranches.baseRef ?? null,
+      baseSha: pullBranches.baseSha ?? null,
+      headRef: pullBranches.headRef ?? null,
+      mergeState,
+      reviewDecision,
+      changesRequestedOnCurrentHead,
+      staleChangesRequestedReviewers,
+      reviewCursor: `${maxActionableReviewId}:${maxTrustedLiveCommentId}`,
+      ignoredUntrustedCount,
+      truncated,
+      reviewers,
+      threads,
     });
   } catch {
     return null;

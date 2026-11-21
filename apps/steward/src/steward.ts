@@ -41,8 +41,16 @@ import {
 import { bearer, resolveKeySecrets } from "./auth.ts";
 import { PrWatchInputError, PrWatchService, type PrWatchDeps } from "./pr-watch.ts";
 import { PrWatchApprovals, approvalText, approvalThread, PR_WATCH_APPROVAL_FAILURE, type PrWatchRequest, type PrWatchDecision } from './pr-watch-approval.ts';
-import { readPrEvidence, readPrFailureDetail, type PrEvidenceMode, type PrFailureSnapshot, type PrTarget } from "./pr-evidence.ts";
-import { diagnosePrFailureWithLlm } from "./pr-failure-diagnoser.ts";
+import {
+  readPrEvidence,
+  readPrFailureDetail,
+  readPrReviewAndConflictDetail,
+  type PrEvidenceMode,
+  type PrFailureSnapshot,
+  type PrFeedbackSnapshot,
+  type PrTarget,
+} from "./pr-evidence.ts";
+import { diagnosePrFailureWithLlm, diagnosePrFeedbackWithLlm } from "./pr-failure-diagnoser.ts";
 import {
   formatUsd,
   renderOverBudgetNote,
@@ -2647,6 +2655,11 @@ export class Steward extends Agent<Env> {
           ? Promise.resolve(null)
           : readPrFailureDetail(target, head, { token: this.env.OTTO_GITHUB_READ_TOKEN, mode }),
       diagnoseFailure: (snapshot, url) => this.diagnosePrFailure(snapshot, url),
+      readFeedbackDetail: (target, head) =>
+        deps.read !== defaultRead
+          ? Promise.resolve(null)
+          : readPrReviewAndConflictDetail(target, head, { token: this.env.OTTO_GITHUB_READ_TOKEN }),
+      diagnoseFeedback: (snapshot, url) => this.diagnosePrFeedback(snapshot, url),
       record: (threadId, text, data) => { this.ledger.timeline.add(threadId, "note", text, data); },
       notify: async (notice) => {
         const owner = this.ownerOpenIdSync();
@@ -2705,7 +2718,7 @@ export class Steward extends Agent<Env> {
       this.ledger.ownerInputs.record('local', msgId, match[2] === 'confirm' ? '确认此 PR 跟进操作' : '不执行此 PR 跟进操作', threadId);
       let text = result.status === 'applied' ? (result.command.action === 'cancel' ? '已确认取消此 PR 跟进；不影响 worker、turn 或其他计划。' : '已确认此 PR 跟进；范围和期限按确认卡执行。') : result.status === 'declined' ? '未执行此 PR 跟进操作。' : '确认已过期，请重新发起提案。';
       if (result.appliedNow && result.command.action === 'cancel' && result.watch) text += ` 编号：${result.watch.id}。`;
-      if (result.appliedNow && result.command.action !== 'cancel' && result.watch) text += ` 编号：${result.watch.id}；到期：${new Date(result.watch.expiresAt).toISOString()}。${result.watch.evidenceMode === 'statuses-only' ? '仅验证 commit statuses，未验证 Checks/Actions。' : '验证 check runs 和 commit statuses，不代表需求验收。'}`;
+      if (result.appliedNow && result.command.action !== 'cancel' && result.watch) text += ` 编号：${result.watch.id}；到期：${new Date(result.watch.expiresAt).toISOString()}。${result.watch.evidenceMode === 'statuses-only' ? '仅验证 commit statuses，未验证 Checks/Actions。' : '验证 check runs 和 commit statuses，不代表需求验收。'}${result.watch.watchGoal === 'merged' ? ' 持续跟进至 PR 合并或关闭。' : ''}`;
       if (result.status === 'applied' && !result.appliedNow) text = `该确认已处理，不重复执行；当前跟进状态：${result.watch?.status ?? '不存在'}。`;
       if (result.appliedNow && result.command.action !== 'cancel' && result.watch?.status === 'active') {
         try { await this.armPrWatches(); } catch { text = 'PR 跟进已保存，但调度尚未确认；请管理员检查或重启恢复，不代表已经开始轮询。'; this.logChannel('pr_watch_schedule', 'approval_rearm_failed'); }
@@ -2787,7 +2800,8 @@ export class Steward extends Agent<Env> {
     if (body.action !== "create") return json({ error: "invalid_action" }, 400);
     try {
       const watch = this.prWatches.create({ id: body.id, threadId: body.threadId, url: body.url,
-        expiresAt: body.expiresAt, intervalSeconds: body.intervalSeconds, evidenceMode: body.evidenceMode });
+        expiresAt: body.expiresAt, intervalSeconds: body.intervalSeconds, evidenceMode: body.evidenceMode,
+        ...(body.watchGoal !== undefined ? { watchGoal: body.watchGoal } : {}) });
       // Persist first; retrying the same owner id repairs a failed schedule write.
       await this.armPrWatches();
       return json({ watch });
@@ -3227,6 +3241,7 @@ export class Steward extends Agent<Env> {
   private readonly skillTriageInFlight = new Map<string, Promise<void>>();
   private ambientSkillRepliesForTest: string[] | null = null;
   private prDiagnosisRepliesForTest: string[] | null = null;
+  private prFeedbackRepliesForTest: string[] | null = null;
 
   async setAmbientSkillRepliesForTest(replies: string[] | null): Promise<void> {
     this.ambientSkillRepliesForTest = replies ? [...replies] : null;
@@ -3234,6 +3249,10 @@ export class Steward extends Agent<Env> {
 
   async setPrDiagnosisRepliesForTest(replies: string[] | null): Promise<void> {
     this.prDiagnosisRepliesForTest = replies ? [...replies] : null;
+  }
+
+  async setPrFeedbackRepliesForTest(replies: string[] | null): Promise<void> {
+    this.prFeedbackRepliesForTest = replies ? [...replies] : null;
   }
 
   async waitSkillTriageIdleForTest(): Promise<void> {
@@ -3267,6 +3286,74 @@ export class Steward extends Agent<Env> {
     );
   }
 
+  private async diagnosePrFeedback(
+    snapshot: PrFeedbackSnapshot,
+    prUrl: string,
+    signal: AbortSignal = AbortSignal.timeout(15_000),
+  ) {
+    await this.syncUsageQuietly();
+    return diagnosePrFeedbackWithLlm(
+      {
+        budget: () => this.budgetState(),
+        completeText: async ({ systemPrompt, userPrompt, signal: sig, maxTokens }) => {
+          if (this.prFeedbackRepliesForTest !== null) {
+            const scripted = this.prFeedbackRepliesForTest.shift();
+            if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
+            return scripted;
+          }
+          if (this.prDiagnosisRepliesForTest !== null) {
+            const scripted = this.prDiagnosisRepliesForTest.shift();
+            if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
+            return scripted;
+          }
+          return this.completeBackgroundText({ systemPrompt, userPrompt, signal: sig, maxTokens });
+        },
+        audit: (reason, detail) => this.logChannel(reason, detail),
+      },
+      snapshot,
+      prUrl,
+      signal,
+    );
+  }
+
+  private buildDiagnosisResponse(
+    watch: ReturnType<PrWatchService["get"]> & object,
+    targetHead: string | null,
+  ): PrWatchDiagnosisResponse {
+    const record = targetHead ? this.prWatches.getDiagnosis(watch.id, targetHead) : null;
+    const fb = this.prWatches.getFeedback(watch.id);
+    const activeFb = fb && (!targetHead || fb.head === targetHead) ? fb : null;
+    const combined = this.prWatches.buildCombinedAction(watch, targetHead);
+    const actionPrompt = combined.prompt ?? record?.repairPrompt ?? null;
+    return {
+      ok: true,
+      watch,
+      head: targetHead ?? activeFb?.head ?? null,
+      snapshot: record?.snapshot ?? null,
+      diagnosis: record?.diagnosis ?? null,
+      diagnosisStatus: record?.diagnosisStatus ?? (activeFb ? activeFb.triageStatus : null),
+      effectiveDiagnosis: record?.effectiveDiagnosis ?? null,
+      feedback: activeFb
+        ? {
+            head: activeFb.head,
+            baseRef: activeFb.baseRef,
+            baseSha: activeFb.baseSha,
+            headRef: activeFb.headRef,
+            mergeState: activeFb.mergeState,
+            reviewDecision: activeFb.reviewDecision,
+            reviewCursor: activeFb.reviewCursor,
+            snapshot: activeFb.snapshot,
+            triage: activeFb.triage,
+            triageStatus: activeFb.triageStatus,
+            effectiveTriage: activeFb.effectiveTriage,
+          }
+        : null,
+      actionKind: combined.kind ?? (record?.repairPrompt ? "fix_ci" : null),
+      actionPrompt,
+      repairPrompt: actionPrompt,
+    };
+  }
+
   private async diagnosePrWatchForWorkspace(
     input: PrWatchDiagnosisInput,
     signal: AbortSignal,
@@ -3275,17 +3362,7 @@ export class Steward extends Agent<Env> {
     if (!watch) throw new WorkspaceError("not_found", 404);
     const targetHead = input.head ?? watch.head;
     if (input.refreshDiagnosis !== true) {
-      const record = targetHead ? this.prWatches.getDiagnosis(watch.id, targetHead) : null;
-      return {
-        ok: true,
-        watch,
-        head: targetHead,
-        snapshot: record?.snapshot ?? null,
-        diagnosis: record?.diagnosis ?? null,
-        diagnosisStatus: record?.diagnosisStatus ?? null,
-        effectiveDiagnosis: record?.effectiveDiagnosis ?? null,
-        repairPrompt: record?.repairPrompt ?? null,
-      };
+      return this.buildDiagnosisResponse(watch, targetHead);
     }
 
     if (!input.id) throw new WorkspaceError("bad_request", 400);
@@ -3298,11 +3375,13 @@ export class Steward extends Agent<Env> {
       if (previous.status === "done" && parsedPrev.res !== undefined) return parsedPrev.res;
     }
 
-    const existing = targetHead ? this.prWatches.getDiagnosis(watch.id, targetHead) : null;
-    if (!existing) throw new WorkspaceError("no_failure_snapshot", 404);
+    const existingDiag = targetHead ? this.prWatches.getDiagnosis(watch.id, targetHead) : null;
+    const existingFb = this.prWatches.getFeedback(watch.id);
+    const hasFb = Boolean(existingFb && (!targetHead || existingFb.head === targetHead));
+    if (!existingDiag && !hasFb) throw new WorkspaceError("no_failure_snapshot", 404);
     if (signal.aborted) throw new WorkspaceError("aborted", 499);
 
-    const refreshed = await this.prWatches.refreshDiagnosis(watch.id, existing.head);
+    const refreshed = await this.prWatches.refreshDiagnosis(watch.id, targetHead);
     if (!refreshed.ok) {
       if (refreshed.code === "not_found") throw new WorkspaceError("not_found", 404);
       if (refreshed.code === "no_snapshot") throw new WorkspaceError("no_failure_snapshot", 404);
@@ -3312,21 +3391,13 @@ export class Steward extends Agent<Env> {
     }
 
     const latestWatch = this.prWatches.get(watch.id) ?? watch;
-    const res: PrWatchDiagnosisResponse = {
-      ok: true,
-      watch: latestWatch,
-      head: refreshed.record.head,
-      snapshot: refreshed.record.snapshot,
-      diagnosis: refreshed.record.diagnosis,
-      diagnosisStatus: refreshed.record.diagnosisStatus,
-      effectiveDiagnosis: refreshed.record.effectiveDiagnosis,
-      repairPrompt: refreshed.record.repairPrompt,
-    };
+    const effectiveHead = refreshed.record?.head ?? refreshed.feedback?.head ?? targetHead;
+    const res = this.buildDiagnosisResponse(latestWatch, effectiveHead);
     this.ctx.storage.transactionSync(() => {
       this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res }));
       this.ledger.webRequests.complete(key);
     });
-    this.logChannel("web_pr_watch_diagnosed", `${watch.id}:${refreshed.record.head.slice(0, 12)}`);
+    this.logChannel("web_pr_watch_diagnosed", `${watch.id}:${(effectiveHead ?? "none").slice(0, 12)}`);
     this.notifyWorkspaces();
     return res;
   }
@@ -5004,6 +5075,7 @@ export class Steward extends Agent<Env> {
     this.ctx.storage.sql.exec('DELETE FROM sh_pr_watch_approval');
     this.prWatchApprovals_ = undefined;
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_diagnosis");
+    this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_feedback");
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch_notice");
     this.ctx.storage.sql.exec("DELETE FROM sh_pr_watch");
     this.prWatches_ = undefined;

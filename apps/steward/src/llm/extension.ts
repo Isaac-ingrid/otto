@@ -36,7 +36,7 @@ import { describeSchedule, parseAtIso, type RoutineService, type RoutineSpecInpu
 import { parsePrUrl, type PrEvidenceMode } from "../pr-evidence.ts";
 import type { PrWatchFailureBrief, PrWatchRow } from "../pr-watch.ts";
 import { approvalText, type PrWatchRequest, type PrWatchApproval } from "../pr-watch-approval.ts";
-import { hasExplicitPrWatchIntent, hasExplicitPrCancelIntent, mentionsFullPrCi, withoutPrUrls } from "../pr-watch-intent.ts";
+import { hasExplicitPrWatchIntent, hasExplicitPrCancelIntent, hasExplicitPrUntilMergeIntent, mentionsFullPrCi, withoutPrUrls } from "../pr-watch-intent.ts";
 import { MAX_CONCLUSION, MAX_DID_ITEM, MAX_DID_ITEMS, MAX_NEEDS_YOU, type Tone } from "../report-template.ts";
 
 /** What the tools may reach. Implemented by the Steward DO; faked nowhere else. */
@@ -1341,6 +1341,7 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
     parameters: Type.Object({
       threadId: Type.String(), url: Type.Optional(Type.String()),
       evidenceMode: Type.Union([Type.Literal("checks-and-statuses"), Type.Literal("statuses-only")]),
+      watchGoal: Type.Optional(Type.Union([Type.Literal("ci_pass"), Type.Literal("merged")], { description: "默认省略（ci_pass）；仅当用户明确要求跟进评审/冲突或盯到合并时填 merged" })),
       expiresInMinutes: Type.Optional(Type.Number({ description: "仅在用户指定时长时填写；否则省略（默认1440分钟），不要自行选7天上限。>0且至多10080分钟。" })),
       intervalSeconds: Type.Optional(Type.Number({ description: "检查间隔 60–3600 秒；默认 900 秒" })),
       basis: Type.Literal("user_explicit"),
@@ -1370,8 +1371,10 @@ export function buildStewardExtension(ctx: StewardExtensionContext): Extension {
       const limited = !negatedLimit && /\bstatuses-only\b|\bonly\s+commit\s+statuses?\b|(?:仅|只)(?:看|查|检查|跟进|验证|关注)?[^。\n]{0,12}(?:commit\s+statuses?|提交状态)/i.test(scopeText);
       if (mentionsStatuses && !limited && !mentionsChecks) return err("refused: 请用 ask_user 明确是仅 commit statuses，还是同时检查 check runs；不能替用户选范围。");
       if ((args.evidenceMode === "statuses-only") !== limited) return err("refused: 验证范围与用户原话不一致；仅看 commit statuses 需要明确说明，权限不足不能静默降级，用 ask_user 确认。");
+      if (args.watchGoal === "merged" && !hasExplicitPrUntilMergeIntent(owner.text)) return err("refused: 用户未明确要求跟进评审/冲突或盯到合并；请省略 watchGoal（默认 ci_pass）或先用 ask_user 确认。");
       if (args.expiresInMinutes !== undefined && (!Number.isFinite(args.expiresInMinutes) || args.expiresInMinutes <= 0 || args.expiresInMinutes > 10080)) return err("refused: 到期时间须大于 0 且不超过 7 天。");
       return requestPrApproval({ action: 'create', threadId: args.threadId, url, evidenceMode: args.evidenceMode,
+        ...(args.watchGoal !== undefined ? { watchGoal: args.watchGoal } : {}),
         ...(args.expiresInMinutes !== undefined ? { expiresInMinutes: args.expiresInMinutes } : {}),
         ...(args.intervalSeconds !== undefined ? { intervalSeconds: args.intervalSeconds } : {}),
       }, String(api.taskId));

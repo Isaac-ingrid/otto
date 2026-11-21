@@ -1,15 +1,15 @@
 // The model can request a proposal, never apply it. Only a bound owner button applies it.
 import type { Ledger } from './ledger.ts';
 import type { SqlExecutor } from './schema.ts';
-import { parsePrUrl, type PrEvidenceMode } from './pr-evidence.ts';
+import { parsePrUrl, type PrEvidenceMode, type PrWatchGoal } from './pr-evidence.ts';
 import type { PrWatchRow, PrWatchService } from './pr-watch.ts';
 
 export type PrWatchRequest =
-  | { action: 'create'; threadId: string; url: string; evidenceMode: PrEvidenceMode; expiresInMinutes?: number; intervalSeconds?: number }
+  | { action: 'create'; threadId: string; url: string; evidenceMode: PrEvidenceMode; watchGoal?: PrWatchGoal; expiresInMinutes?: number; intervalSeconds?: number }
   | { action: 'cancel'; watchId: string };
-type Identity = Pick<PrWatchRow, 'id' | 'threadId' | 'url' | 'evidenceMode' | 'createdAt' | 'expiresAt' | 'intervalMs'>;
+type Identity = Pick<PrWatchRow, 'id' | 'threadId' | 'url' | 'evidenceMode' | 'watchGoal' | 'createdAt' | 'expiresAt' | 'intervalMs'>;
 export type PrWatchDecision =
-  | { action: 'create'; threadId: string; url: string; evidenceMode: PrEvidenceMode; expiresInMinutes: number; intervalSeconds: number }
+  | { action: 'create'; threadId: string; url: string; evidenceMode: PrEvidenceMode; watchGoal?: PrWatchGoal; expiresInMinutes: number; intervalSeconds: number }
   | { action: 'cancel' | 'reuse'; watch: Identity };
 export interface PrWatchApproval {
   id: string; sourceRef: string; taskId: string; request: string; command: string;
@@ -25,13 +25,14 @@ export interface ApprovalDeps {
 }
 export const PR_WATCH_APPROVAL_FAILURE = '未确认执行成功（目标可能已变化或后端拒绝）；不会派 worker 或设置其他计划。请刷新后重试，或重新发起提案。';
 const identity = (w: PrWatchRow): Identity => ({ id: w.id, threadId: w.threadId, url: w.url,
-  evidenceMode: w.evidenceMode, createdAt: w.createdAt, expiresAt: w.expiresAt, intervalMs: w.intervalMs });
+  evidenceMode: w.evidenceMode, watchGoal: w.watchGoal ?? 'ci_pass', createdAt: w.createdAt, expiresAt: w.expiresAt, intervalMs: w.intervalMs });
 export const approvalThread = (c: PrWatchDecision): string => c.action === 'create' ? c.threadId : c.watch.threadId;
 export function approvalText(c: PrWatchDecision): string {
   const target = c.action === 'create' ? c : c.watch;
   const scope = target.evidenceMode === 'statuses-only' ? '仅 commit statuses；未验证 Checks/Actions，不代表完整 CI 通过' : 'check runs + commit statuses；不代表需求验收';
-  if (c.action === 'create') return `确认创建持续只读 PR 跟进？\nPR：${c.url}\nThread：${c.threadId}\n范围：${scope}\n间隔：${c.intervalSeconds} 秒\n期限：确认后 ${c.expiresInMinutes} 分钟\n确认前不会开始跟进。`;
-  return `确认${c.action === 'cancel' ? '取消' : '复用并恢复调度（不延长期限）'} PR 跟进？\n编号：${c.watch.id}\nPR：${c.watch.url}\nThread：${c.watch.threadId}\n范围：${scope}\n间隔：${c.watch.intervalMs / 1000} 秒\n到期：${new Date(c.watch.expiresAt).toISOString()}\n${c.action === 'cancel' ? '只取消此 watch，不停止 worker、turn 或其他计划；已发送的消息不能撤回。' : '不会创建第二条 watch，也不会改变范围或期限。'}`;
+  const goalLine = target.watchGoal === 'merged' ? '\n结束条件：PR 合并或关闭（CI 通过后继续跟进评审与合并冲突）' : '';
+  if (c.action === 'create') return `确认创建持续只读 PR 跟进？\nPR：${c.url}\nThread：${c.threadId}\n范围：${scope}${goalLine}\n间隔：${c.intervalSeconds} 秒\n期限：确认后 ${c.expiresInMinutes} 分钟\n确认前不会开始跟进。`;
+  return `确认${c.action === 'cancel' ? '取消' : '复用并恢复调度（不延长期限）'} PR 跟进？\n编号：${c.watch.id}\nPR：${c.watch.url}\nThread：${c.watch.threadId}\n范围：${scope}${goalLine}\n间隔：${c.watch.intervalMs / 1000} 秒\n到期：${new Date(c.watch.expiresAt).toISOString()}\n${c.action === 'cancel' ? '只取消此 watch，不停止 worker、turn 或其他计划；已发送的消息不能撤回。' : '不会创建第二条 watch，也不会改变范围或期限。'}`;
 }
 
 export class PrWatchApprovals {
@@ -48,20 +49,27 @@ export class PrWatchApprovals {
     const parsed = parsePrUrl(input.url);
     if (!parsed || !this.deps.ledger.threads.get(input.threadId)) throw new Error('invalid_target');
     if (!['checks-and-statuses', 'statuses-only'].includes(input.evidenceMode)) throw new Error('invalid_scope');
+    const watchGoal: PrWatchGoal = input.watchGoal ?? 'ci_pass';
+    if (watchGoal !== 'ci_pass' && watchGoal !== 'merged') throw new Error('invalid_goal');
     const intervalSeconds = input.intervalSeconds ?? 900, expiresInMinutes = input.expiresInMinutes ?? 1440;
     if (!Number.isInteger(intervalSeconds) || intervalSeconds < 60 || intervalSeconds > 3600 ||
       !Number.isFinite(expiresInMinutes) || expiresInMinutes <= 0 || expiresInMinutes > 10080 || !Number.isSafeInteger(expiresInMinutes * 60000)) throw new Error('invalid_interval_or_expiry');
     const active = this.deps.watches.list().filter(w => w.status === 'active' && w.threadId === input.threadId && w.url === parsed.url);
     if (active.length) {
-      if (active.length !== 1 || active[0]!.evidenceMode !== input.evidenceMode || input.expiresInMinutes !== undefined || (input.intervalSeconds !== undefined && intervalSeconds * 1000 !== active[0]!.intervalMs)) throw new Error('active_watch_conflict');
+      if (active.length !== 1 || active[0]!.evidenceMode !== input.evidenceMode || (active[0]!.watchGoal ?? 'ci_pass') !== watchGoal || input.expiresInMinutes !== undefined || (input.intervalSeconds !== undefined && intervalSeconds * 1000 !== active[0]!.intervalMs)) throw new Error('active_watch_conflict');
       return { action: 'reuse', watch: identity(active[0]!) };
     }
-    return { action: 'create', threadId: input.threadId, url: parsed.url, evidenceMode: input.evidenceMode, expiresInMinutes, intervalSeconds };
+    return {
+      action: 'create', threadId: input.threadId, url: parsed.url, evidenceMode: input.evidenceMode,
+      ...(watchGoal === 'merged' ? { watchGoal } : {}),
+      expiresInMinutes, intervalSeconds,
+    };
   }
   propose(input: PrWatchRequest, sourceRef: string, taskId: string): PrWatchApproval {
     if (!sourceRef.startsWith('user:') || !taskId) throw new Error('owner_turn_required');
     const request = JSON.stringify(input.action === 'cancel' ? { action: 'cancel', watchId: input.watchId } : {
       action: 'create', threadId: input.threadId, url: parsePrUrl(input.url)?.url ?? input.url, evidenceMode: input.evidenceMode,
+      ...(input.watchGoal !== undefined ? { watchGoal: input.watchGoal } : {}),
       expiresInMinutes: input.expiresInMinutes ?? null, intervalSeconds: input.intervalSeconds ?? null,
     });
     const now = this.now();
@@ -107,7 +115,8 @@ export class PrWatchApprovals {
       if (command.action === 'create') {
         if (!this.deps.ledger.threads.get(command.threadId) || this.deps.watches.list().some(w => w.status === 'active' && w.threadId === command.threadId && w.url === command.url)) throw new Error('target_changed');
         watch = this.deps.watches.create({ id: `pw_${id.slice(6)}`, threadId: command.threadId, url: command.url,
-          evidenceMode: command.evidenceMode, intervalSeconds: command.intervalSeconds, expiresAt: this.now() + command.expiresInMinutes * 60000 });
+          evidenceMode: command.evidenceMode, watchGoal: command.watchGoal ?? 'ci_pass',
+          intervalSeconds: command.intervalSeconds, expiresAt: this.now() + command.expiresInMinutes * 60000 });
         if (watch.status !== 'active') throw new Error('target_changed');
       } else {
         const current = this.deps.watches.list().find(w => w.id === command.watch.id);

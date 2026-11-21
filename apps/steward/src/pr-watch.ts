@@ -1,5 +1,5 @@
 // Durable, owner-authorized read-only commissions. No worker dispatch or GitHub writes;
-// optional failure diagnosis runs out-of-band via a tool-less text completion callback.
+// optional CI failure & review/conflict triage runs out-of-band via tool-less completion callbacks.
 import type { SqlExecutor } from "./schema.ts";
 import {
   parsePrUrl,
@@ -7,22 +7,33 @@ import {
   type EvidenceResult,
   type PrEvidenceMode,
   type PrFailureSnapshot,
+  type PrFeedbackSnapshot,
+  type PrMergeState,
+  type PrReviewDecision,
   type PrTarget,
+  type PrWatchGoal,
 } from "./pr-evidence.ts";
 import {
   buildDeterministicPrDiagnosis,
+  buildDeterministicPrFeedbackTriage,
+  buildPrActionPrompt,
   buildPrRepairPrompt,
   formatPrFailureNoticeDetails,
+  formatPrFeedbackNoticeDetails,
+  hasActionablePrFeedback,
+  type PrActionKind,
   type PrDiagnoseOutcome,
   type PrDiagnosisStatus,
   type PrFailureDiagnosis,
+  type PrFeedbackTriage,
+  type PrFeedbackTriageOutcome,
 } from "./pr-failure-diagnoser.ts";
 
 export interface PrWatchRow {
   id: string; threadId: string; url: string; status: "active" | "completed" | "cancelled" | "expired";
   createdAt: number; expiresAt: number; intervalMs: number; nextCheckAt: number; generation: number;
   head: string | null; observedState: string | null; checkedAt: number | null; lastError: string | null;
-  checks: number; failed: number; pending: number; evidenceMode: PrEvidenceMode;
+  checks: number; failed: number; pending: number; evidenceMode: PrEvidenceMode; watchGoal: PrWatchGoal;
 }
 
 export interface PrWatchDiagnosisRecord {
@@ -37,11 +48,32 @@ export interface PrWatchDiagnosisRecord {
   updatedAt: number;
 }
 
+export interface PrWatchFeedbackRecord {
+  watchId: string;
+  head: string;
+  baseRef: string | null;
+  baseSha: string | null;
+  headRef: string | null;
+  mergeState: PrMergeState;
+  reviewDecision: PrReviewDecision;
+  reviewCursor: string;
+  snapshot: PrFeedbackSnapshot;
+  triage: PrFeedbackTriage | null;
+  triageStatus: PrDiagnosisStatus;
+  effectiveTriage: PrFeedbackTriage;
+  updatedAt: number;
+}
+
 export interface PrWatchFailureBrief {
   hasFailureDetail: boolean;
   failureHeadline: string | null;
   diagnosisStatus: PrDiagnosisStatus | null;
   failedChecks?: string[];
+  watchGoal: PrWatchGoal;
+  mergeState: PrMergeState;
+  reviewDecision: PrReviewDecision;
+  hasActionableFeedback: boolean;
+  attentionHeadline: string | null;
 }
 
 interface StoredDiagnosisRow {
@@ -51,6 +83,21 @@ interface StoredDiagnosisRow {
   diagnosisJson: string | null;
   diagnosisStatus: string;
   createdAt: number;
+  updatedAt: number;
+}
+
+interface StoredFeedbackRow {
+  watchId: string;
+  head: string;
+  baseRef: string | null;
+  baseSha: string | null;
+  headRef: string | null;
+  mergeState: string;
+  reviewDecision: string;
+  reviewCursor: string;
+  snapshotJson: string;
+  triageJson: string | null;
+  triageStatus: string;
   updatedAt: number;
 }
 
@@ -64,6 +111,8 @@ export interface PrWatchDeps {
   read?(target: PrTarget, mode: PrEvidenceMode): Promise<EvidenceResult>;
   readFailureDetail?(target: PrTarget, head: string, mode: PrEvidenceMode): Promise<PrFailureSnapshot | null>;
   diagnoseFailure?(snapshot: PrFailureSnapshot, url: string): Promise<PrDiagnoseOutcome>;
+  readFeedbackDetail?(target: PrTarget, head: string): Promise<PrFeedbackSnapshot | null>;
+  diagnoseFeedback?(snapshot: PrFeedbackSnapshot, url: string): Promise<PrFeedbackTriageOutcome>;
   now?: () => number;
 }
 export class PrWatchInputError extends Error {}
@@ -89,6 +138,16 @@ function normalizeDiagnosisStatus(raw: unknown): PrDiagnosisStatus {
   ) {
     return raw;
   }
+  return "none";
+}
+
+function normalizeMergeState(raw: unknown): PrMergeState {
+  if (raw === "mergeable" || raw === "conflicted") return raw;
+  return "unknown";
+}
+
+function normalizeReviewDecision(raw: unknown): PrReviewDecision {
+  if (raw === "changes_requested" || raw === "approved" || raw === "commented") return raw;
   return "none";
 }
 
@@ -132,6 +191,29 @@ export class PrWatchService {
     };
   }
 
+  private hydrateFeedback(watch: PrWatchRow, row: StoredFeedbackRow): PrWatchFeedbackRecord | null {
+    const snapshot = parseJsonSafe<PrFeedbackSnapshot>(row.snapshotJson);
+    if (!snapshot) return null;
+    const triage = parseJsonSafe<PrFeedbackTriage>(row.triageJson);
+    const triageStatus = normalizeDiagnosisStatus(row.triageStatus);
+    const effectiveTriage = triage ?? buildDeterministicPrFeedbackTriage(snapshot, watch.url);
+    return {
+      watchId: row.watchId,
+      head: row.head,
+      baseRef: row.baseRef,
+      baseSha: row.baseSha,
+      headRef: row.headRef,
+      mergeState: normalizeMergeState(row.mergeState),
+      reviewDecision: normalizeReviewDecision(row.reviewDecision),
+      reviewCursor: row.reviewCursor,
+      snapshot,
+      triage,
+      triageStatus,
+      effectiveTriage,
+      updatedAt: row.updatedAt,
+    };
+  }
+
   getDiagnosis(watchId: string, head?: string | null): PrWatchDiagnosisRecord | null {
     const watch = this.get(watchId);
     if (!watch) return null;
@@ -144,19 +226,79 @@ export class PrWatchService {
     return this.hydrateDiagnosis(watch, row);
   }
 
+  getFeedback(watchId: string): PrWatchFeedbackRecord | null {
+    const watch = this.get(watchId);
+    if (!watch) return null;
+    const row = this.sql<StoredFeedbackRow>`
+      SELECT * FROM sh_pr_watch_feedback WHERE watchId = ${watchId}
+    `[0];
+    if (!row) return null;
+    return this.hydrateFeedback(watch, row);
+  }
+
+  buildCombinedAction(
+    watch: PrWatchRow,
+    targetHead?: string | null,
+  ): { kind: PrActionKind | null; prompt: string | null } {
+    const head = targetHead ?? watch.head;
+    if (!head) return { kind: null, prompt: null };
+    const diag =
+      watch.observedState === "failure" || targetHead
+        ? this.getDiagnosis(watch.id, head)
+        : null;
+    const fb = this.getFeedback(watch.id);
+    const activeFb = fb && fb.head === head ? fb : null;
+    const built = buildPrActionPrompt({
+      url: watch.url,
+      head,
+      ciFailure: diag ? { snapshot: diag.snapshot, diagnosis: diag.diagnosis } : null,
+      feedback: activeFb ? { snapshot: activeFb.snapshot, triage: activeFb.triage } : null,
+    });
+    return built ?? { kind: null, prompt: null };
+  }
+
   summaryForWatch(watch: PrWatchRow): PrWatchFailureBrief {
-    if (watch.observedState !== "failure" || !watch.head) {
-      return { hasFailureDetail: false, failureHeadline: null, diagnosisStatus: null };
+    const watchGoal: PrWatchGoal = watch.watchGoal ?? "ci_pass";
+    const diagRecord =
+      watch.observedState === "failure" && watch.head
+        ? this.getDiagnosis(watch.id, watch.head)
+        : null;
+    const fbRecord = this.getFeedback(watch.id);
+    const currentFb = fbRecord && (!watch.head || fbRecord.head === watch.head) ? fbRecord : null;
+    const mergeState: PrMergeState = currentFb?.mergeState ?? "unknown";
+    const reviewDecision: PrReviewDecision = currentFb?.reviewDecision ?? "none";
+    const fbActionable = currentFb ? hasActionablePrFeedback(currentFb.snapshot) : false;
+    const hasFailureDetail = diagRecord !== null;
+    const failureHeadline = diagRecord ? diagRecord.effectiveDiagnosis.headline : null;
+    const hasActionableFeedback = hasFailureDetail || fbActionable;
+
+    let attentionHeadline: string | null = null;
+    if (mergeState === "conflicted" && currentFb) {
+      attentionHeadline = failureHeadline
+        ? `${currentFb.effectiveTriage.headline} · ${failureHeadline}`.slice(0, 140)
+        : currentFb.effectiveTriage.headline;
+    } else if (failureHeadline) {
+      attentionHeadline = failureHeadline;
+    } else if (fbActionable && currentFb) {
+      attentionHeadline = currentFb.effectiveTriage.headline;
     }
-    const record = this.getDiagnosis(watch.id, watch.head);
-    if (!record) {
-      return { hasFailureDetail: false, failureHeadline: null, diagnosisStatus: null };
-    }
+
     return {
-      hasFailureDetail: true,
-      failureHeadline: record.effectiveDiagnosis.headline,
-      diagnosisStatus: record.diagnosisStatus,
-      failedChecks: record.snapshot.items.map((it) => (it.failedStep ? `${it.name} (${it.failedStep})` : it.name)),
+      hasFailureDetail,
+      failureHeadline,
+      diagnosisStatus: diagRecord ? diagRecord.diagnosisStatus : null,
+      ...(diagRecord
+        ? {
+            failedChecks: diagRecord.snapshot.items.map((it) =>
+              it.failedStep ? `${it.name} (${it.failedStep})` : it.name,
+            ),
+          }
+        : {}),
+      watchGoal,
+      mergeState,
+      reviewDecision,
+      hasActionableFeedback,
+      attentionHeadline,
     };
   }
 
@@ -164,46 +306,101 @@ export class PrWatchService {
     watchId: string,
     head?: string | null,
   ): Promise<
-    | { ok: true; record: PrWatchDiagnosisRecord }
+    | { ok: true; record: PrWatchDiagnosisRecord | null; feedback: PrWatchFeedbackRecord | null }
     | { ok: false; code: "not_found" | "no_snapshot" | "over_budget" | "no_model" | "failed" }
   > {
     const watch = this.get(watchId);
     if (!watch) return { ok: false, code: "not_found" };
-    const existing = this.getDiagnosis(watchId, head);
-    if (!existing) return { ok: false, code: "no_snapshot" };
-    if (!this.deps.diagnoseFailure) return { ok: false, code: "no_model" };
+    const existingDiag = this.getDiagnosis(watchId, head);
+    const existingFb = this.getFeedback(watchId);
+    const hasReviewContent =
+      existingFb &&
+      (!head || existingFb.head === head) &&
+      (existingFb.snapshot.changesRequestedOnCurrentHead ||
+        existingFb.snapshot.threads.length > 0 ||
+        existingFb.snapshot.reviewers.some((r) => r.state === "COMMENTED" && Boolean(r.body)));
 
-    let outcome: PrDiagnoseOutcome;
-    try {
-      outcome = await this.deps.diagnoseFailure(existing.snapshot, watch.url);
-    } catch {
-      outcome = { status: "failed" };
+    if (!existingDiag && !hasReviewContent) {
+      return { ok: false, code: "no_snapshot" };
     }
+    if (!this.deps.diagnoseFailure && !this.deps.diagnoseFeedback) {
+      return { ok: false, code: "no_model" };
+    }
+
     const ts = this.now();
-    if (outcome.status === "ready") {
-      this.deps.tx(() => {
-        this.sql`
-          UPDATE sh_pr_watch_diagnosis
-          SET diagnosisJson = ${JSON.stringify(outcome.diagnosis)},
-              diagnosisStatus = 'ready',
-              updatedAt = ${ts}
-          WHERE watchId = ${watchId} AND head = ${existing.head}
-        `;
-      });
-      const updated = this.getDiagnosis(watchId, existing.head);
-      return updated ? { ok: true, record: updated } : { ok: false, code: "no_snapshot" };
+    let anyReady = false;
+    let lastErrorCode: "over_budget" | "no_model" | "failed" = "failed";
+
+    if (existingDiag && this.deps.diagnoseFailure) {
+      let outcome: PrDiagnoseOutcome;
+      try {
+        outcome = await this.deps.diagnoseFailure(existingDiag.snapshot, watch.url);
+      } catch {
+        outcome = { status: "failed" };
+      }
+      if (outcome.status === "ready") {
+        anyReady = true;
+        this.deps.tx(() => {
+          this.sql`
+            UPDATE sh_pr_watch_diagnosis
+            SET diagnosisJson = ${JSON.stringify(outcome.diagnosis)},
+                diagnosisStatus = 'ready',
+                updatedAt = ${ts}
+            WHERE watchId = ${watchId} AND head = ${existingDiag.head}
+          `;
+        });
+      } else {
+        this.deps.tx(() => {
+          this.sql`
+            UPDATE sh_pr_watch_diagnosis
+            SET diagnosisStatus = ${outcome.status},
+                updatedAt = ${ts}
+            WHERE watchId = ${watchId} AND head = ${existingDiag.head} AND diagnosisJson IS NULL
+          `;
+        });
+        if (outcome.status === "skipped_over_budget") lastErrorCode = "over_budget";
+        else if (outcome.status === "skipped_no_model") lastErrorCode = "no_model";
+      }
     }
-    this.deps.tx(() => {
-      this.sql`
-        UPDATE sh_pr_watch_diagnosis
-        SET diagnosisStatus = ${outcome.status},
-            updatedAt = ${ts}
-        WHERE watchId = ${watchId} AND head = ${existing.head} AND diagnosisJson IS NULL
-      `;
-    });
-    if (outcome.status === "skipped_over_budget") return { ok: false, code: "over_budget" };
-    if (outcome.status === "skipped_no_model") return { ok: false, code: "no_model" };
-    return { ok: false, code: "failed" };
+
+    if (hasReviewContent && existingFb && this.deps.diagnoseFeedback) {
+      let fbOutcome: PrFeedbackTriageOutcome;
+      try {
+        fbOutcome = await this.deps.diagnoseFeedback(existingFb.snapshot, watch.url);
+      } catch {
+        fbOutcome = { status: "failed" };
+      }
+      if (fbOutcome.status === "ready") {
+        anyReady = true;
+        this.deps.tx(() => {
+          this.sql`
+            UPDATE sh_pr_watch_feedback
+            SET triageJson = ${JSON.stringify(fbOutcome.triage)},
+                triageStatus = 'ready',
+                updatedAt = ${ts}
+            WHERE watchId = ${watchId}
+          `;
+        });
+      } else {
+        this.deps.tx(() => {
+          this.sql`
+            UPDATE sh_pr_watch_feedback
+            SET triageStatus = ${fbOutcome.status},
+                updatedAt = ${ts}
+            WHERE watchId = ${watchId} AND triageJson IS NULL
+          `;
+        });
+        if (fbOutcome.status === "skipped_over_budget") lastErrorCode = "over_budget";
+        else if (fbOutcome.status === "skipped_no_model") lastErrorCode = "no_model";
+      }
+    }
+
+    if (!anyReady) return { ok: false, code: lastErrorCode };
+    return {
+      ok: true,
+      record: existingDiag ? this.getDiagnosis(watchId, existingDiag.head) : null,
+      feedback: this.getFeedback(watchId),
+    };
   }
 
   targetsForThread(threadId: string): string[] {
@@ -219,7 +416,7 @@ export class PrWatchService {
   hasWork(): boolean {
     return this.sql<{ n: number }>`SELECT (SELECT COUNT(*) FROM sh_pr_watch WHERE status = 'active') + (SELECT COUNT(*) FROM sh_pr_watch_notice WHERE deliveredAt IS NULL) AS n`[0]!.n > 0;
   }
-  create(input: { id: unknown; threadId: unknown; url: unknown; expiresAt?: unknown; intervalSeconds?: unknown; evidenceMode?: unknown }): PrWatchRow {
+  create(input: { id: unknown; threadId: unknown; url: unknown; expiresAt?: unknown; intervalSeconds?: unknown; evidenceMode?: unknown; watchGoal?: unknown }): PrWatchRow {
     const now = this.now();
     if (typeof input.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(input.id) || typeof input.threadId !== "string" || !this.deps.threadExists(input.threadId)) throw new PrWatchInputError("invalid_id_or_thread");
     const target = parsePrUrl(input.url);
@@ -229,20 +426,24 @@ export class PrWatchService {
     const intervalMs = Number(intervalSeconds) * 1000;
     const evidenceMode = input.evidenceMode ?? 'checks-and-statuses';
     if (evidenceMode !== 'checks-and-statuses' && evidenceMode !== 'statuses-only') throw new PrWatchInputError('invalid_evidence_mode');
+    const watchGoal = input.watchGoal ?? 'ci_pass';
+    if (watchGoal !== 'ci_pass' && watchGoal !== 'merged') throw new PrWatchInputError('invalid_watch_goal');
     const existing = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${input.id}`[0];
     // Default expiration is chosen once, not recomputed on an idempotent retry.
     const expiresAt = input.expiresAt ?? existing?.expiresAt ?? now + DAY;
     if (existing) {
-      if (existing.threadId !== input.threadId || existing.url !== target.url || existing.intervalMs !== intervalMs || existing.expiresAt !== expiresAt || existing.evidenceMode !== evidenceMode) throw new PrWatchInputError("id_conflict");
+      if (existing.threadId !== input.threadId || existing.url !== target.url || existing.intervalMs !== intervalMs || existing.expiresAt !== expiresAt || existing.evidenceMode !== evidenceMode || (existing.watchGoal ?? 'ci_pass') !== watchGoal) throw new PrWatchInputError("id_conflict");
       return existing; // never resurrect completed/cancelled/expired commissions
     }
     if (!Number.isSafeInteger(expiresAt) || Number(expiresAt) <= now || Number(expiresAt) > now + 7 * DAY) throw new PrWatchInputError("expiry_must_be_within_seven_days");
     const { id, threadId } = input;
     return this.deps.tx(() => {
       if (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM sh_pr_watch WHERE status = 'active'`[0]!.n >= MAX_ACTIVE) throw new PrWatchInputError("active_watch_limit");
-      this.sql`INSERT INTO sh_pr_watch (id, threadId, url, status, createdAt, expiresAt, intervalMs, nextCheckAt, generation, checks, failed, pending, evidenceMode)
-        VALUES (${id}, ${threadId}, ${target.url}, 'active', ${now}, ${Number(expiresAt)}, ${intervalMs}, ${now}, 0, 0, 0, 0, ${evidenceMode})`;
-      this.deps.record?.(threadId, `开始只读跟进 PR：${target.url}${evidenceMode === 'statuses-only' ? '（仅 commit statuses，未验证 Checks/Actions）' : ''}`, { watchId: id, expiresAt, intervalMs, evidenceMode });
+      this.sql`INSERT INTO sh_pr_watch (id, threadId, url, status, createdAt, expiresAt, intervalMs, nextCheckAt, generation, checks, failed, pending, evidenceMode, watchGoal)
+        VALUES (${id}, ${threadId}, ${target.url}, 'active', ${now}, ${Number(expiresAt)}, ${intervalMs}, ${now}, 0, 0, 0, 0, ${evidenceMode}, ${watchGoal})`;
+      const modeSuffix = evidenceMode === 'statuses-only' ? '（仅 commit statuses，未验证 Checks/Actions）' : '';
+      const goalSuffix = watchGoal === 'merged' ? '（持续跟进至 PR 合并或关闭）' : '';
+      this.deps.record?.(threadId, `开始只读跟进 PR：${target.url}${modeSuffix}${goalSuffix}`, { watchId: id, expiresAt, intervalMs, evidenceMode, watchGoal });
       return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${id}`[0]!;
     });
   }
@@ -262,13 +463,16 @@ export class PrWatchService {
     this.running = run;
     try { await run; } finally { if (this.running === run) this.running = undefined; }
   }
+  private noticeByKey(row: PrWatchRow, dedupeId: string, kind: string, text: string): void {
+    if (this.sql`SELECT id FROM sh_pr_watch_notice WHERE id = ${dedupeId}`.length > 0) return;
+    this.sql`INSERT OR IGNORE INTO sh_pr_watch_notice (id, watchId, threadId, text)
+      VALUES (${dedupeId}, ${row.id}, ${row.threadId}, ${text})`;
+    this.deps.record?.(row.threadId, text, { watchId: row.id, head: row.head, observation: kind, evidenceMode: row.evidenceMode });
+  }
   private notice(row: PrWatchRow, kind: string, text: string): void {
     // Stable id by commission × head × observation kind; never a timestamp/random retry id.
     const id = `pr-watch:${row.id}:${row.head ?? 'none'}:${kind}`;
-    if (this.sql`SELECT id FROM sh_pr_watch_notice WHERE id = ${id}`.length > 0) return;
-    this.sql`INSERT OR IGNORE INTO sh_pr_watch_notice (id, watchId, threadId, text)
-      VALUES (${id}, ${row.id}, ${row.threadId}, ${text})`;
-    this.deps.record?.(row.threadId, text, { watchId: row.id, head: row.head, observation: kind, evidenceMode: row.evidenceMode });
+    this.noticeByKey(row, id, kind, text);
   }
   private expire(): void {
     this.deps.tx(() => {
@@ -305,7 +509,7 @@ export class PrWatchService {
       try { result = target ? await (this.deps.read ? this.deps.read(target, claim.evidenceMode) : readPrEvidence(target, { mode: claim.evidenceMode })) : { ok: false, reason: 'invalid_target' }; }
       catch { result = { ok: false, reason: 'github_unavailable' }; }
 
-      // Bounded once-per-(watchId, head) failure detail & zero-tool diagnosis outside tx.
+      // 1. Bounded once-per-(watchId, head) CI failure detail & zero-tool diagnosis outside tx.
       let diagSnapshot: PrFailureSnapshot | null = null;
       let diagValue: PrFailureDiagnosis | null = null;
       let diagStatus: PrDiagnosisStatus = "none";
@@ -344,6 +548,102 @@ export class PrWatchService {
         }
       }
 
+      // 2. Bounded PR review & merge-conflict detail collection outside tx (Direction B).
+      const prevFeedback = this.getFeedback(claim.id);
+      let fbSnapshot: PrFeedbackSnapshot | null = null;
+      let fbTriage: PrFeedbackTriage | null = null;
+      let fbTriageStatus: PrDiagnosisStatus = "none";
+      let persistFeedback = false;
+
+      if (
+        result.ok &&
+        result.evidence.state !== "closed" &&
+        result.evidence.state !== "merged" &&
+        this.claimStillValid(claim)
+      ) {
+        const watchGoal = claim.watchGoal ?? "ci_pass";
+        const shouldFetchReviews =
+          Boolean(target && this.deps.readFeedbackDetail) &&
+          (result.evidence.state === "success" ||
+            watchGoal === "merged" ||
+            result.evidence.mergeState === "conflicted" ||
+            prevFeedback !== null);
+
+        if (shouldFetchReviews && target && this.deps.readFeedbackDetail) {
+          try {
+            fbSnapshot = await this.deps.readFeedbackDetail(target, result.evidence.head);
+          } catch {
+            fbSnapshot = null;
+          }
+        }
+
+        // Synthesize lightweight merge-conflict snapshot from /pulls/{n} evidence if reviews were not fetched.
+        if (!fbSnapshot && result.evidence.mergeState !== undefined) {
+          fbSnapshot = {
+            head: result.evidence.head,
+            capturedAt: this.now(),
+            baseRef: result.evidence.baseRef ?? null,
+            baseSha: result.evidence.baseSha ?? null,
+            headRef: result.evidence.headRef ?? null,
+            mergeState: result.evidence.mergeState,
+            reviewDecision:
+              prevFeedback && prevFeedback.head === result.evidence.head
+                ? prevFeedback.reviewDecision
+                : "none",
+            changesRequestedOnCurrentHead:
+              prevFeedback && prevFeedback.head === result.evidence.head
+                ? prevFeedback.snapshot.changesRequestedOnCurrentHead
+                : false,
+            staleChangesRequestedReviewers:
+              prevFeedback && prevFeedback.head === result.evidence.head
+                ? prevFeedback.snapshot.staleChangesRequestedReviewers
+                : [],
+            reviewCursor: prevFeedback?.reviewCursor ?? "0:0",
+            ignoredUntrustedCount: 0,
+            truncated: false,
+            reviewers:
+              prevFeedback && prevFeedback.head === result.evidence.head
+                ? prevFeedback.snapshot.reviewers
+                : [],
+            threads:
+              prevFeedback && prevFeedback.head === result.evidence.head
+                ? prevFeedback.snapshot.threads
+                : [],
+          };
+        }
+
+        if (fbSnapshot && this.claimStillValid(claim)) {
+          persistFeedback = true;
+          const hasReviewItems =
+            fbSnapshot.changesRequestedOnCurrentHead ||
+            fbSnapshot.threads.length > 0 ||
+            fbSnapshot.reviewers.some((r) => r.state === "COMMENTED" && Boolean(r.body));
+          const sameCursor =
+            prevFeedback !== null &&
+            prevFeedback.reviewCursor === fbSnapshot.reviewCursor &&
+            prevFeedback.mergeState === fbSnapshot.mergeState;
+
+          if (sameCursor && prevFeedback) {
+            fbTriage = prevFeedback.triage;
+            fbTriageStatus = prevFeedback.triageStatus;
+          } else if (hasReviewItems && this.deps.diagnoseFeedback) {
+            try {
+              const outcome = await this.deps.diagnoseFeedback(fbSnapshot, claim.url);
+              if (outcome.status === "ready") {
+                fbTriage = outcome.triage;
+                fbTriageStatus = "ready";
+              } else {
+                fbTriageStatus = outcome.status;
+              }
+            } catch {
+              fbTriageStatus = "failed";
+            }
+          } else if (hasReviewItems) {
+            fbTriageStatus = "skipped_no_model";
+          }
+        }
+      }
+
       this.expire();
       this.deps.tx(() => {
         const current = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${claim.id}`[0];
@@ -357,10 +657,24 @@ export class PrWatchService {
         }
         const evidence = result.evidence;
         const tsNow = this.now();
-        const terminal = ['success', 'closed', 'merged'].includes(evidence.state);
+        const watchGoal: PrWatchGoal = current.watchGoal ?? "ci_pass";
+        const effectiveMergeState: PrMergeState =
+          fbSnapshot?.mergeState ?? evidence.mergeState ?? "unknown";
+        const mergeConflicted = effectiveMergeState === "conflicted";
+        const blockedByCurrentReview = fbSnapshot?.changesRequestedOnCurrentHead === true;
+
+        const terminal =
+          evidence.state === "closed" ||
+          evidence.state === "merged" ||
+          (evidence.state === "success" &&
+            watchGoal !== "merged" &&
+            !mergeConflicted &&
+            !blockedByCurrentReview);
+
         this.sql`UPDATE sh_pr_watch SET head = ${evidence.head}, observedState = ${evidence.state}, checkedAt = ${tsNow}, lastError = NULL,
           checks = ${evidence.checks}, failed = ${evidence.failed}, pending = ${evidence.pending},
           status = ${terminal ? 'completed' : 'active'}, nextCheckAt = ${tsNow + current.intervalMs} WHERE id = ${claim.id}`;
+
         if (persistNewDiag && diagSnapshot) {
           this.sql`
             INSERT OR IGNORE INTO sh_pr_watch_diagnosis (
@@ -377,12 +691,120 @@ export class PrWatchService {
             )
           `;
         }
-        if (evidence.state !== 'waiting' && (current.head !== evidence.head || current.observedState !== evidence.state)) {
-          const limited = current.evidenceMode === 'statuses-only';
-          const subject = limited ? 'commit statuses' : 'CI 检查';
-          const label = evidence.state === 'success' ? `已观察到 ${subject}通过（不代表需求验收通过）`
-            : evidence.state === 'failure' ? `${subject}失败：${evidence.failed} 项失败、${evidence.pending} 项等待，继续只读跟进`
-            : evidence.state === 'merged' ? 'PR 已被合并，跟进结束' : 'PR 已关闭，跟进结束';
+
+        if (persistFeedback && fbSnapshot) {
+          this.sql`
+            INSERT INTO sh_pr_watch_feedback (
+              watchId, head, baseRef, baseSha, headRef, mergeState, reviewDecision, reviewCursor,
+              snapshotJson, triageJson, triageStatus, updatedAt
+            )
+            VALUES (
+              ${claim.id},
+              ${fbSnapshot.head},
+              ${fbSnapshot.baseRef},
+              ${fbSnapshot.baseSha},
+              ${fbSnapshot.headRef},
+              ${fbSnapshot.mergeState},
+              ${fbSnapshot.reviewDecision},
+              ${fbSnapshot.reviewCursor},
+              ${JSON.stringify(fbSnapshot)},
+              ${fbTriage ? JSON.stringify(fbTriage) : null},
+              ${fbTriageStatus},
+              ${tsNow}
+            )
+            ON CONFLICT (watchId) DO UPDATE SET
+              head = excluded.head,
+              baseRef = excluded.baseRef,
+              baseSha = excluded.baseSha,
+              headRef = excluded.headRef,
+              mergeState = excluded.mergeState,
+              reviewDecision = excluded.reviewDecision,
+              reviewCursor = excluded.reviewCursor,
+              snapshotJson = excluded.snapshotJson,
+              triageJson = excluded.triageJson,
+              triageStatus = excluded.triageStatus,
+              updatedAt = excluded.updatedAt
+          `;
+        }
+
+        const limited = current.evidenceMode === 'statuses-only';
+        const subject = limited ? 'commit statuses' : 'CI 检查';
+        const limitedFooter = limited ? '\n仅验证 commit statuses；未验证 Checks/Actions，不代表完整 CI 通过。' : '';
+        const watchRowWithHead = { ...current, head: evidence.head };
+
+        // A) Merge conflict notification (breaks silent waiting & blocks premature completion)
+        if (mergeConflicted && fbSnapshot) {
+          const baseKey = (fbSnapshot.baseSha ?? fbSnapshot.baseRef ?? "base").slice(0, 12);
+          const conflictNoticeId = `pr-watch:${claim.id}:${evidence.head}:conflict:${baseKey}`;
+          const ciNote =
+            evidence.state === "waiting"
+              ? "（冲突可能阻断 PR 检查工作流启动，继续只读跟进）"
+              : evidence.state === "success"
+                ? `（${subject}已通过，但因合并冲突保持跟进）`
+                : "";
+          const fbDetail = formatPrFeedbackNoticeDetails({
+            snapshot: fbSnapshot,
+            triage: fbTriage,
+            triageStatus: fbTriageStatus,
+            url: current.url,
+          });
+          this.noticeByKey(
+            watchRowWithHead,
+            conflictNoticeId,
+            "conflict",
+            `PR 存在合并冲突${ciNote}\n${fbDetail}${limitedFooter}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`,
+          );
+        }
+
+        // B) Cursor-deduplicated review feedback notification (never re-alerts stale review on fix push)
+        const hasNewReviewCursor =
+          fbSnapshot !== null &&
+          fbSnapshot.reviewCursor !== "0:0" &&
+          fbSnapshot.reviewCursor !== (prevFeedback?.reviewCursor ?? "0:0");
+        const shouldNotifyReview =
+          hasNewReviewCursor &&
+          fbSnapshot !== null &&
+          (fbSnapshot.changesRequestedOnCurrentHead ||
+            (watchGoal === "merged" &&
+              (fbSnapshot.reviewDecision === "changes_requested" || fbSnapshot.reviewDecision === "commented")));
+
+        if (shouldNotifyReview && fbSnapshot) {
+          const reviewNoticeId = `pr-watch:${claim.id}:review:${fbSnapshot.reviewCursor}`;
+          const fbDetail = formatPrFeedbackNoticeDetails({
+            snapshot: fbSnapshot,
+            triage: fbTriage,
+            triageStatus: fbTriageStatus,
+            url: current.url,
+          });
+          const header = fbSnapshot.changesRequestedOnCurrentHead
+            ? "PR 审阅人要求修改代码，继续只读跟进"
+            : "PR 收到新的代码评审意见，继续只读跟进";
+          this.noticeByKey(
+            watchRowWithHead,
+            reviewNoticeId,
+            "review",
+            `${header}\n${fbDetail}${limitedFooter}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`,
+          );
+        }
+
+        // C) Standard CI / closed / merged state transition notification
+        const suppressGreenForBlocker =
+          evidence.state === "success" && (mergeConflicted || blockedByCurrentReview);
+        if (
+          evidence.state !== 'waiting' &&
+          !suppressGreenForBlocker &&
+          (current.head !== evidence.head || current.observedState !== evidence.state)
+        ) {
+          const label =
+            evidence.state === 'success'
+              ? watchGoal === "merged"
+                ? `已观察到 ${subject}通过，继续只读跟进评审与合并状态（不代表需求验收通过）`
+                : `已观察到 ${subject}通过（不代表需求验收通过）`
+              : evidence.state === 'failure'
+                ? `${subject}失败：${evidence.failed} 项失败、${evidence.pending} 项等待，继续只读跟进`
+                : evidence.state === 'merged'
+                  ? 'PR 已被合并，跟进结束'
+                  : 'PR 已关闭，跟进结束';
           const detailBlock =
             evidence.state === 'failure' && diagSnapshot
               ? `\n${formatPrFailureNoticeDetails({
@@ -392,8 +814,17 @@ export class PrWatchService {
                   url: current.url,
                 })}`
               : '';
-          this.notice({ ...current, head: evidence.head }, evidence.state,
-            `${label}${detailBlock}${limited ? '\n仅验证 commit statuses；未验证 Checks/Actions，不代表完整 CI 通过。' : ''}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`);
+          const staleReviewNote =
+            evidence.state === 'success' &&
+            fbSnapshot &&
+            fbSnapshot.staleChangesRequestedReviewers.length > 0
+              ? `\n审阅状态：等待 ${fbSnapshot.staleChangesRequestedReviewers.map((a) => `@${a}`).join('、')} 复审（上次要求修改针对旧提交）`
+              : '';
+          this.notice(
+            watchRowWithHead,
+            evidence.state,
+            `${label}${detailBlock}${staleReviewNote}${limitedFooter}\n${current.url}\n提交 ${evidence.head}\n仅检查外部状态；未修改、重跑或合并。`,
+          );
         }
       });
     }
