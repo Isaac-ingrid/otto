@@ -796,6 +796,12 @@ function threadPlansSection(thread) {
     }),
     prWatches.map((w) => {
       const busy = state.stoppingThreadPlans.has(`w:${w.id}`);
+      const actionable = Boolean(w.hasActionableFeedback || w.hasFailureDetail);
+      const headline = w.attentionHeadline || w.failureHeadline || t('prDiagFallbackHeadline');
+      const viewLabel =
+        w.hasFailureDetail && w.mergeState !== 'conflicted' && w.reviewDecision !== 'changes_requested'
+          ? t('prDiagViewLogsBtn')
+          : t('prDiagViewTriageBtn');
       return h('div', { class: 'thread-plan-card' },
         h('div', { class: 'thread-plan-top' },
           h('span', null, icon('branch'), ' ', t('threadPlanWatchLabel', { when: formatClock(w.nextCheckAt) })),
@@ -805,16 +811,24 @@ function threadPlansSection(thread) {
             disabled: busy ? true : null,
             dataset: { action: 'cancel-thread-watch', watch: w.id, focus: `cancel-w:${w.id}` },
           }, t('threadPlanCancelOne'))),
+        (w.watchGoal === 'merged' || w.mergeState === 'conflicted' || (w.reviewDecision && w.reviewDecision !== 'none'))
+          ? h('div', { class: 'cp-badges thread-plan-badges' },
+            w.watchGoal === 'merged' ? h('span', { class: 'cp-badge' }, t('prWatchGoalMerged')) : null,
+            w.mergeState === 'conflicted' ? h('span', { class: 'cp-badge warn' }, t('prMergeConflictedBadge')) : null,
+            w.reviewDecision === 'changes_requested' ? h('span', { class: 'cp-badge warn' }, t('prRev_changes_requested')) : null,
+            w.reviewDecision === 'commented' ? h('span', { class: 'cp-badge' }, t('prRev_commented')) : null,
+            w.reviewDecision === 'approved' ? h('span', { class: 'cp-badge accent' }, t('prRev_approved')) : null)
+          : null,
         h('p', { class: 'thread-plan-body' }, h('a', { href: w.url, target: '_blank', rel: 'noopener noreferrer' }, w.url)),
-        w.hasFailureDetail
+        actionable
           ? [
-            h('div', { class: 'thread-plan-failure' }, icon('alert'), h('span', null, w.failureHeadline || t('prDiagFallbackHeadline'))),
+            h('div', { class: 'thread-plan-failure' }, icon('alert'), h('span', null, headline)),
             h('div', { class: 'thread-plan-actions' },
               h('button', {
                 type: 'button',
                 class: 'button quiet',
                 dataset: { action: 'open-pr-diagnosis', watch: w.id, thread: thread.id, head: w.head ?? '', url: w.url, focus: `diag-w:${w.id}` },
-              }, t('prDiagViewLogsBtn')),
+              }, viewLabel),
               h('button', {
                 type: 'button',
                 class: 'button quiet',

@@ -10,7 +10,7 @@ import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline,
 import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, threadMatches, withPending, workOn } from "../ui/model.js";
 import { formatCheckpointPlainText } from "../ui/checkpoint.js";
 import { CONTROL_PLANE_I18N_KEYS, controlPlaneCounts, skillErrorKey, skillTargetI18nKey } from "../ui/control-plane.js";
-import { PR_DIAGNOSIS_I18N_KEYS, formatPrDiagnosisPlainText, prDiagnosisCategoryKey, prDiagnosisSkipKey, prDiagnosisSourceKey } from "../ui/pr-diagnosis.js";
+import { PR_DIAGNOSIS_I18N_KEYS, formatPrDiagnosisPlainText, prActionButtonKey, prDiagnosisCategoryKey, prDiagnosisSkipKey, prDiagnosisSourceKey, prReviewDecisionKey } from "../ui/pr-diagnosis.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -587,6 +587,12 @@ describe("control plane counts", () => {
     expect(prDiagnosisSourceKey("actions_logs")).toBe("prDiagSource_actions_logs");
     expect(prDiagnosisSkipKey("skipped_over_budget")).toBe("prDiagSkip_over_budget");
     expect(prDiagnosisSkipKey("ready")).toBeNull();
+    expect(prReviewDecisionKey("changes_requested")).toBe("prRev_changes_requested");
+    expect(prReviewDecisionKey("none")).toBeNull();
+    expect(prActionButtonKey("resolve_conflict")).toBe("prAct_resolve_conflict");
+    expect(prActionButtonKey("address_review")).toBe("prAct_address_review");
+    expect(prActionButtonKey("combined")).toBe("prAct_combined");
+    expect(prActionButtonKey(null)).toBe("prDiagDispatchBtn");
     const diagPlain = formatPrDiagnosisPlainText({
       watch: { url: "https://github.com/acme/repo/pull/7" },
       snapshot: {
@@ -600,8 +606,21 @@ describe("control plane counts", () => {
         }],
       },
       effectiveDiagnosis: { headline: "Unit test failed", rootCauses: ["boom at line 9"] },
+      feedback: {
+        head: "1".repeat(40),
+        headRef: "feat/x",
+        baseRef: "main",
+        mergeState: "conflicted",
+        reviewDecision: "changes_requested",
+        effectiveTriage: { headline: "Guard null input", actionItems: ["src/b.ts:4"] },
+        snapshot: {
+          threads: [{ author: "alice", path: "src/b.ts", line: 4, body: "Check null" }],
+        },
+      },
     });
     expect(diagPlain).toContain("Run vitest");
     expect(diagPlain).toContain("src/a.ts:9");
+    expect(diagPlain).toContain("Merge conflict: feat/x -> main");
+    expect(diagPlain).toContain("@alice src/b.ts:4");
   });
 });

@@ -782,11 +782,22 @@ export function createControlPlane(deps) {
     const busy = Boolean(cp.schedules.busyKey);
     const active = w.status === 'active';
     const href = safeUrl(w.url);
+    const actionable = Boolean(w.hasActionableFeedback || w.hasFailureDetail);
+    const headline = w.attentionHeadline || w.failureHeadline || t('prDiagFallbackHeadline');
+    const viewLabel =
+      w.hasFailureDetail && w.mergeState !== 'conflicted' && w.reviewDecision !== 'changes_requested'
+        ? t('prDiagViewLogsBtn')
+        : t('prDiagViewTriageBtn');
     return h('article', { class: `cp-card${active ? '' : ' muted'}` },
       h('div', { class: 'cp-card-head' },
         h('div', { class: 'cp-badges' },
           h('span', { class: `cp-badge status-${w.status}` }, tOr(`cpWatchStatus_${w.status}`, w.status)),
           h('span', { class: 'cp-badge' }, w.evidenceMode === 'statuses-only' ? t('cpWatchStatusesOnly') : t('cpWatchFullChecks')),
+          w.watchGoal === 'merged' ? h('span', { class: 'cp-badge' }, t('prWatchGoalMerged')) : null,
+          w.mergeState === 'conflicted' ? h('span', { class: 'cp-badge warn' }, t('prMergeConflictedBadge')) : null,
+          w.reviewDecision === 'changes_requested' ? h('span', { class: 'cp-badge warn' }, t('prRev_changes_requested')) : null,
+          w.reviewDecision === 'commented' ? h('span', { class: 'cp-badge' }, t('prRev_commented')) : null,
+          w.reviewDecision === 'approved' ? h('span', { class: 'cp-badge accent' }, t('prRev_approved')) : null,
           w.head ? h('code', { class: 'cp-sha' }, w.head.slice(0, 7)) : null),
         active ? h('span', { class: 'cp-meta' }, t('cpWatchNextPoll', { when: formatStamp(w.nextCheckAt), expires: formatStamp(w.expiresAt) })) : null),
       h('p', { class: 'cp-note-text' },
@@ -794,21 +805,21 @@ export function createControlPlane(deps) {
       h('div', { class: 'cp-submeta' },
         h('span', null, t('cpWatchChecks', { total: w.checks ?? 0, failed: w.failed ?? 0, pending: w.pending ?? 0 })),
         w.lastError ? h('span', { class: 'cp-warn-text' }, w.lastError) : null),
-      w.hasFailureDetail
+      actionable
         ? h('div', { class: 'cp-failure-banner' },
           icon('alert'),
-          h('span', null, w.failureHeadline || t('prDiagFallbackHeadline')))
+          h('span', null, headline))
         : null,
       h('div', { class: 'cp-card-actions' },
         threadLinkBtn(w.threadId, w.threadTitle),
-        w.hasFailureDetail && openPrDiagnosis
+        actionable && openPrDiagnosis
           ? h('button', {
             type: 'button',
             class: 'cp-action-btn',
             onclick: () => openPrDiagnosis(w.id, { head: w.head, threadId: w.threadId, url: w.url, fromControlPlane: true }),
-          }, t('prDiagViewLogsBtn'))
+          }, viewLabel)
           : null,
-        w.hasFailureDetail && prefillPrFix
+        actionable && prefillPrFix
           ? h('button', {
             type: 'button',
             class: 'cp-action-btn',

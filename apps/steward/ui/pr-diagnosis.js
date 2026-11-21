@@ -1,5 +1,5 @@
-// Read-only PR CI failure diagnosis dialog & composer prefill helper (Direction A).
-// Built strictly with dom.js h() text nodes — never parses untrusted CI strings as HTML.
+// Read-only PR CI failure, merge conflict & code review triage dialog (Directions A & B).
+// Built strictly with dom.js h() text nodes — never parses untrusted CI or PR comments as HTML.
 import { h, icon } from './dom.js';
 import { safeUrl } from './format.js';
 import { t } from './i18n.js';
@@ -26,6 +26,19 @@ const SKIP_KEYS = {
   failed: 'prDiagSkip_failed',
 };
 
+const REVIEW_DECISION_KEYS = {
+  changes_requested: 'prRev_changes_requested',
+  approved: 'prRev_approved',
+  commented: 'prRev_commented',
+};
+
+const ACTION_BUTTON_KEYS = {
+  fix_ci: 'prDiagDispatchBtn',
+  resolve_conflict: 'prAct_resolve_conflict',
+  address_review: 'prAct_address_review',
+  combined: 'prAct_combined',
+};
+
 const LOG_NOTE_KEYS = [
   'prDiagNote_auth_required',
   'prDiagNote_truncated',
@@ -37,6 +50,8 @@ export const PR_DIAGNOSIS_I18N_KEYS = [
   ...Object.values(CATEGORY_KEYS),
   ...Object.values(SOURCE_KEYS),
   ...Object.values(SKIP_KEYS),
+  ...Object.values(REVIEW_DECISION_KEYS),
+  ...Object.values(ACTION_BUTTON_KEYS),
   ...LOG_NOTE_KEYS,
 ];
 
@@ -52,6 +67,14 @@ export function prDiagnosisSkipKey(status) {
   return (status && SKIP_KEYS[status]) || null;
 }
 
+export function prReviewDecisionKey(decision) {
+  return (decision && REVIEW_DECISION_KEYS[decision]) || null;
+}
+
+export function prActionButtonKey(actionKind) {
+  return (actionKind && ACTION_BUTTON_KEYS[actionKind]) || 'prDiagDispatchBtn';
+}
+
 export function prDiagnosisLogNoteText(logNote) {
   if (!logNote || typeof logNote !== 'string') return null;
   if (/^actions_(?:logs|job)_http_(?:401|403|404)$/.test(logNote)) return t('prDiagNote_auth_required');
@@ -62,15 +85,29 @@ export function prDiagnosisLogNoteText(logNote) {
 }
 
 export function formatPrDiagnosisPlainText(data) {
-  if (!data?.snapshot) return '';
-  const snap = data.snapshot;
-  const diag = data.effectiveDiagnosis;
+  const snap = data?.snapshot;
+  const fb = data?.feedback;
+  if (!snap && !fb) return '';
   const lines = [];
   if (data.watch?.url) lines.push(`PR: ${data.watch.url}`);
-  if (snap.head) lines.push(`Commit: ${snap.head}`);
-  if (diag?.headline) lines.push(`Headline: ${diag.headline}`);
-  for (const cause of diag?.rootCauses ?? []) lines.push(`- ${cause}`);
-  for (const item of snap.items ?? []) {
+  const head = snap?.head || fb?.head || data.head;
+  if (head) lines.push(`Commit: ${head}`);
+  if (fb?.mergeState === 'conflicted') {
+    lines.push(`Merge conflict: ${fb.headRef || 'head'} -> ${fb.baseRef || 'base'}`);
+  }
+  if (fb?.effectiveTriage?.headline && fb.reviewDecision !== 'none') {
+    lines.push(`Review: ${fb.effectiveTriage.headline}`);
+    for (const item of fb.effectiveTriage.actionItems ?? []) lines.push(`- ${item}`);
+  }
+  for (const thread of fb?.snapshot?.threads ?? []) {
+    lines.push(`  @${thread.author} ${thread.path}:${thread.line} — ${thread.body}`);
+  }
+  const diag = data.effectiveDiagnosis;
+  if (snap && diag?.headline) {
+    lines.push(`Headline: ${diag.headline}`);
+    for (const cause of diag.rootCauses ?? []) lines.push(`- ${cause}`);
+  }
+  for (const item of snap?.items ?? []) {
     lines.push(`\n[${item.name}] (${item.conclusion})${item.failedStep ? ` — step: ${item.failedStep}` : ''}`);
     for (const ann of item.annotations ?? []) {
       lines.push(`  ${ann.path}:${ann.line} ${ann.title ? `[${ann.title}] ` : ''}${ann.message}`);
@@ -173,10 +210,11 @@ export function createPrDiagnosisModal(deps) {
     if (!watchId) return;
     try {
       const { status, data } = await fetchDiagnosis(watchId, opts.head);
-      if (status === 200 && data?.repairPrompt) {
+      const promptText = data?.actionPrompt || data?.repairPrompt;
+      if (status === 200 && promptText) {
         const targetThread = data.watch?.threadId || opts.threadId;
         if (targetThread) {
-          fillContinuation(targetThread, data.repairPrompt);
+          fillContinuation(targetThread, promptText);
           toast(t('prDiagPrefilledToast'));
           return;
         }
@@ -189,6 +227,119 @@ export function createPrDiagnosisModal(deps) {
     } catch {
       toast(t('cpActionFailed'));
     }
+  }
+
+  function renderConflictSection(fb) {
+    if (fb?.mergeState !== 'conflicted') return null;
+    const baseRef = fb.baseRef || 'main';
+    const desc = fb.headRef
+      ? t('prConflictBranches', { head: fb.headRef, base: baseRef })
+      : t('prConflictBaseOnly', { base: baseRef });
+    return h('section', { class: 'cp-card pr-diag-conflict' },
+      h('div', { class: 'cp-card-head' },
+        h('div', { class: 'cp-badges' },
+          h('span', { class: 'cp-badge warn' }, t('prMergeConflictedBadge'))),
+        fb.baseSha ? h('code', { class: 'cp-sha' }, `${baseRef}@${fb.baseSha.slice(0, 7)}`) : null),
+      h('p', { class: 'pr-diag-headline' }, desc),
+      h('p', { class: 'cp-meta pr-diag-note' }, t('prConflictWorktreeHint', { base: baseRef })));
+  }
+
+  function renderReviewThreadCard(thread) {
+    const commentHref = safeUrl(thread.htmlUrl);
+    return h('article', { class: 'cp-card pr-diag-item pr-diag-review-thread' },
+      h('div', { class: 'cp-card-head' },
+        h('div', { class: 'cp-badges' },
+          h('strong', { class: 'pr-diag-item-name' }, `@${thread.author}`),
+          h('span', { class: 'cp-badge' }, thread.isBot ? 'BOT' : thread.authorAssociation),
+          h('code', { class: 'cp-sha' }, `${thread.path}:${thread.line}`)),
+        commentHref
+          ? h('a', { class: 'cp-ext-link', href: commentHref, target: '_blank', rel: 'noopener noreferrer' }, t('prDiagOpenGithubBtn'), icon('external'))
+          : null),
+      thread.diffHunkTail
+        ? h('pre', { class: 'pr-diag-diff-hunk' }, thread.diffHunkTail)
+        : null,
+      h('p', { class: 'cp-note-text' }, thread.body),
+      thread.replyCount > 0 && thread.latestReplyBody
+        ? h('p', { class: 'cp-meta pr-diag-reply' },
+          t('prReviewLatestReply', {
+            count: thread.replyCount,
+            author: thread.latestReplyAuthor || thread.author,
+            text: thread.latestReplyBody,
+          }))
+        : null);
+  }
+
+  function renderReviewSection(fb, hasCiSnap) {
+    if (!fb) return null;
+    const snap = fb.snapshot;
+    const threads = Array.isArray(snap?.threads) ? snap.threads : [];
+    const reviewersWithNotes = (snap?.reviewers ?? []).filter(
+      (r) => r.state === 'CHANGES_REQUESTED' || (r.state === 'COMMENTED' && r.body),
+    );
+    const staleList = snap?.staleChangesRequestedReviewers ?? [];
+    const hasContent =
+      fb.reviewDecision !== 'none' ||
+      threads.length > 0 ||
+      reviewersWithNotes.length > 0 ||
+      staleList.length > 0;
+    if (!hasContent && !(snap?.ignoredUntrustedCount > 0)) return null;
+
+    const revKey = prReviewDecisionKey(fb.reviewDecision);
+    const triage = fb.effectiveTriage;
+    const skipKey = !hasCiSnap ? prDiagnosisSkipKey(fb.triageStatus) : null;
+
+    return h('section', { class: 'cp-section pr-diag-reviews' },
+      h('div', { class: 'cp-tabs-bar pr-diag-meta' },
+        h('div', { class: 'cp-badges' },
+          h('strong', { class: 'pr-diag-section-label' }, t('prReviewSectionTitle')),
+          revKey
+            ? h('span', { class: `cp-badge${fb.reviewDecision === 'changes_requested' ? ' warn' : fb.reviewDecision === 'approved' ? ' accent' : ''}` }, t(revKey))
+            : null,
+          fb.triageStatus !== 'none'
+            ? h('span', { class: 'cp-badge' }, fb.triageStatus === 'ready' ? t('prDiagAiBadge') : t('prDiagDetBadge'))
+            : null),
+        snap?.ignoredUntrustedCount > 0
+          ? h('span', { class: 'cp-meta' }, t('prReviewIgnoredUntrusted', { count: snap.ignoredUntrustedCount }))
+          : null),
+      staleList.length > 0
+        ? h('p', { class: 'cp-meta pr-diag-note' }, t('prReviewAwaitingRereview', { reviewers: staleList.map((a) => `@${a}`).join(', ') }))
+        : null,
+      triage && (fb.reviewDecision === 'changes_requested' || fb.reviewDecision === 'commented')
+        ? h('div', { class: 'cp-card pr-diag-summary' },
+          h('p', { class: 'pr-diag-headline' }, triage.headline),
+          Array.isArray(triage.actionItems) && triage.actionItems.length > 0
+            ? h('ul', { class: 'pr-diag-causes' }, triage.actionItems.map((item) => h('li', null, item)))
+            : null,
+          skipKey
+            ? h('div', { class: 'pr-diag-skip-bar' },
+              h('span', { class: 'cp-meta' }, t(skipKey)),
+              h('button', {
+                type: 'button',
+                class: 'cp-mini-btn',
+                disabled: state.refreshing ? true : null,
+                onclick: () => void regenerateSummary(),
+              }, icon('sparkle'), ' ', state.refreshing ? t('prDiagRegenerating') : t('prDiagRegenerateBtn')))
+            : null)
+        : null,
+      reviewersWithNotes.length > 0
+        ? h('div', { class: 'cp-list' },
+          reviewersWithNotes.map((rev) => {
+            const revHref = safeUrl(rev.htmlUrl);
+            return h('article', { class: 'cp-card pr-diag-item' },
+              h('div', { class: 'cp-card-head' },
+                h('div', { class: 'cp-badges' },
+                  h('strong', { class: 'pr-diag-item-name' }, `@${rev.author}`),
+                  h('span', { class: `cp-badge${rev.state === 'CHANGES_REQUESTED' ? ' warn' : ''}` }, rev.state),
+                  !rev.onCurrentHead ? h('span', { class: 'cp-badge' }, t('prReviewPriorCommitBadge')) : null),
+                revHref
+                  ? h('a', { class: 'cp-ext-link', href: revHref, target: '_blank', rel: 'noopener noreferrer' }, t('prDiagOpenGithubBtn'), icon('external'))
+                  : null),
+              rev.body ? h('p', { class: 'cp-note-text' }, rev.body) : null);
+          }))
+        : null,
+      threads.length > 0
+        ? h('div', { class: 'cp-list' }, threads.map(renderReviewThreadCard))
+        : null);
   }
 
   function renderItemCard(item) {
@@ -243,10 +394,13 @@ export function createPrDiagnosisModal(deps) {
 
     const data = state.data;
     const snap = data?.snapshot;
+    const fb = data?.feedback;
     const watch = data?.watch;
     const prHref = safeUrl(watch?.url || state.prUrl);
+    const conflictNode = renderConflictSection(fb);
+    const reviewNode = renderReviewSection(fb, Boolean(snap));
 
-    if (!snap) {
+    if (!snap && !conflictNode && !reviewNode) {
       return h('div', { class: 'cp-pane' },
         h('p', { class: 'cp-empty' }, t('prDiagEmptySnapshot')),
         prHref
@@ -255,24 +409,29 @@ export function createPrDiagnosisModal(deps) {
           : null);
     }
 
-    const diag = data.effectiveDiagnosis;
-    const diagStatus = data.diagnosisStatus;
-    const skipKey = prDiagnosisSkipKey(diagStatus);
+    const headSha = snap?.head || fb?.head || data?.head;
+    const diag = data?.effectiveDiagnosis;
+    const diagStatus = data?.diagnosisStatus;
+    const skipKey = snap ? prDiagnosisSkipKey(diagStatus) : null;
     const targetThread = watch?.threadId || state.threadId;
-    const repairPrompt = data.repairPrompt;
+    const actionPrompt = data?.actionPrompt || data?.repairPrompt;
+    const dispatchLabelKey = prActionButtonKey(data?.actionKind);
 
     return h('div', { class: 'cp-pane pr-diag-pane' },
       h('div', { class: 'cp-tabs-bar pr-diag-meta' },
         h('div', { class: 'cp-badges' },
-          snap.head ? h('code', { class: 'cp-sha' }, snap.head.slice(0, 12)) : null,
-          h('span', { class: 'cp-badge accent' }, t(prDiagnosisSourceKey(snap.logSource))),
-          diag ? h('span', { class: 'cp-badge warn' }, t(prDiagnosisCategoryKey(diag.category))) : null,
-          h('span', { class: 'cp-badge' }, diagStatus === 'ready' ? t('prDiagAiBadge') : t('prDiagDetBadge'))),
+          headSha ? h('code', { class: 'cp-sha' }, headSha.slice(0, 12)) : null,
+          watch?.watchGoal === 'merged' ? h('span', { class: 'cp-badge' }, t('prWatchGoalMerged')) : null,
+          snap ? h('span', { class: 'cp-badge accent' }, t(prDiagnosisSourceKey(snap.logSource))) : null,
+          snap && diag ? h('span', { class: 'cp-badge warn' }, t(prDiagnosisCategoryKey(diag.category))) : null,
+          snap ? h('span', { class: 'cp-badge' }, diagStatus === 'ready' ? t('prDiagAiBadge') : t('prDiagDetBadge')) : null),
         prHref
           ? h('a', { class: 'cp-ext-link', href: prHref, target: '_blank', rel: 'noopener noreferrer' }, watch?.url || state.prUrl, icon('external'))
           : null),
-      snap.logNote ? h('p', { class: 'cp-meta pr-diag-note' }, prDiagnosisLogNoteText(snap.logNote)) : null,
-      diag
+      conflictNode,
+      reviewNode,
+      snap?.logNote ? h('p', { class: 'cp-meta pr-diag-note' }, prDiagnosisLogNoteText(snap.logNote)) : null,
+      snap && diag
         ? h('section', { class: 'cp-card pr-diag-summary' },
           h('p', { class: 'pr-diag-headline' }, diag.headline),
           Array.isArray(diag.rootCauses) && diag.rootCauses.length > 0
@@ -289,25 +448,27 @@ export function createPrDiagnosisModal(deps) {
               }, icon('sparkle'), ' ', state.refreshing ? t('prDiagRegenerating') : t('prDiagRegenerateBtn')))
             : null)
         : null,
-      h('section', { class: 'cp-section' },
-        h('div', { class: 'cp-list' }, (snap.items ?? []).map(renderItemCard))),
+      snap
+        ? h('section', { class: 'cp-section' },
+          h('div', { class: 'cp-list' }, (snap.items ?? []).map(renderItemCard)))
+        : null,
       h('div', { class: 'pr-diag-footer' },
         h('div', { class: 'cp-form-actions' },
-          repairPrompt && targetThread
+          actionPrompt && targetThread
             ? h('button', {
               type: 'button',
               class: 'cp-primary-btn',
               onclick: () => {
-                fillContinuation(targetThread, repairPrompt);
+                fillContinuation(targetThread, actionPrompt);
                 toast(t('prDiagPrefilledToast'));
               },
-            }, icon('chat'), ' ', t('prDiagDispatchBtn'))
+            }, icon('chat'), ' ', t(dispatchLabelKey))
             : null,
-          repairPrompt
+          actionPrompt
             ? h('button', {
               type: 'button',
               class: 'cp-mini-btn',
-              onclick: () => void copyText(repairPrompt),
+              onclick: () => void copyText(actionPrompt),
             }, t('prDiagCopyPromptBtn'))
             : null,
           prHref
@@ -326,6 +487,8 @@ export function createPrDiagnosisModal(deps) {
       state.refreshing,
       state.data?.head,
       state.data?.diagnosisStatus,
+      state.data?.feedback?.reviewCursor,
+      state.data?.feedback?.mergeState,
     ],
     title: () => t('prDiagTitle'),
     open(watchId, opts = {}) {

@@ -794,6 +794,23 @@ export const STRINGS = {
   prDiagNote_truncated: ['Actions log stream exceeded 256 KiB and was safely truncated to the failure excerpt.', 'Actions 原始日志超过 256 KiB，已安全截断并提取失败片段。'],
   prDiagNote_redirect_blocked: ['Actions log redirect host was outside the GitHub allowlist and was blocked.', 'Actions 日志重定向域名不在 GitHub 官方白名单内，已安全拦截。'],
   prDiagNote_unavailable: ['Raw Actions log stream was temporarily unavailable; showing Check summary and annotations.', 'Actions 原始日志流暂不可用，当前展示 Check 摘要与注解。'],
+  prDiagViewTriageBtn: ['View PR blockers', '查看阻塞详情'],
+  prWatchGoalMerged: ['Until merged', '盯至合并'],
+  prMergeConflictedBadge: ['Merge conflict', '合并冲突'],
+  prRev_changes_requested: ['Changes requested', '要求修改'],
+  prRev_approved: ['Approved', '已批准'],
+  prRev_commented: ['Review comments', '评审意见'],
+  prAct_resolve_conflict: ['Fill composer to resolve conflicts', '填入输入框解决冲突'],
+  prAct_address_review: ['Fill composer to address reviews', '填入输入框派发修订'],
+  prAct_combined: ['Fill composer to resolve all blockers', '填入输入框综合修复'],
+  prConflictBranches: ['Branch {head} has merge conflicts with base {base}.', '源分支 {head} 与基准分支 {base} 存在代码合并冲突。'],
+  prConflictBaseOnly: ['This PR has merge conflicts with base branch {base}.', '当前 PR 与基准分支 {base} 存在代码合并冲突。'],
+  prConflictWorktreeHint: ['GitHub REST API does not list individual conflicting filenames — prefilling composer will instruct your local isolated worktree to fetch origin/{base} and inspect exact conflicts safely.', 'GitHub 只读接口不直接列出冲突文件名；点击下方预填后，本地隔离工作树会拉取 origin/{base} 精确检出冲突文件。'],
+  prReviewSectionTitle: ['Code Review Feedback', '代码评审意见'],
+  prReviewIgnoredUntrusted: ['Ignored {count} non-collaborator comment(s)', '已忽略 {count} 条非仓库协作者评论'],
+  prReviewAwaitingRereview: ['Awaiting re-review from {reviewers} (previous changes requested on an older commit).', '等待 {reviewers} 复审（上次要求修改针对旧提交）。'],
+  prReviewPriorCommitBadge: ['Older commit', '旧提交'],
+  prReviewLatestReply: ['{count} replie(s) · latest by @{author}: {text}', '{count} 条回复 · 最新 @{author}：{text}'],
 };
 
 const LOCALE_KEY = 'pip.locale';
