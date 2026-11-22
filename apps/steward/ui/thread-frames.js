@@ -39,13 +39,25 @@ export function mergeTimeline(timeline, events) {
  *  told to refetch instead of inventing one. */
 export function applyThreadState(thread, frame) {
   const known = new Set(thread.workers.map((worker) => worker.id));
-  const states = new Map((frame.workers ?? []).map((worker) => [worker.workerId, worker.state]));
+  const patches = new Map((frame.workers ?? []).map((worker) => [worker.workerId, worker]));
   return {
     thread: {
       ...thread,
       state: frame.state,
       openQuestions: frame.openQuestions,
-      workers: thread.workers.map((worker) => (states.has(worker.id) ? { ...worker, state: states.get(worker.id) } : worker)),
+      workers: thread.workers.map((worker) => {
+        const patch = patches.get(worker.id);
+        if (!patch) return worker;
+        return {
+          ...worker,
+          state: patch.state,
+          ...(patch.contextPercent !== undefined ? { contextPercent: patch.contextPercent } : {}),
+          ...(patch.contextTokens !== undefined ? { contextTokens: patch.contextTokens } : {}),
+          ...(patch.contextWindow !== undefined ? { contextWindow: patch.contextWindow } : {}),
+          ...(patch.compactionCount !== undefined ? { compactionCount: patch.compactionCount } : {}),
+          ...(patch.lastToolDurationMs !== undefined ? { lastToolDurationMs: patch.lastToolDurationMs } : {}),
+        };
+      }),
     },
     unknownWorkers: (frame.workers ?? []).some((worker) => !known.has(worker.workerId)),
   };

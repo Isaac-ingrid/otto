@@ -32,6 +32,20 @@ export function append(parent, children) {
   return parent;
 }
 
+/** Namespace-safe declarative SVG element builder (`svg`, `g`, `rect`, `line`, `text`, `title`) — zero markup parsing, zero inline styles. */
+export function svg(tag, props, ...children) {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(props ?? {})) {
+    if (value === undefined || value === null || value === false) continue;
+    if (name === 'dataset') Object.assign(element.dataset, value);
+    else if (name.startsWith('on')) element.addEventListener(name.slice(2), value);
+    else if (value === true) element.setAttribute(name, '');
+    else element.setAttribute(name, String(value));
+  }
+  append(element, children);
+  return element;
+}
+
 // Stroke icons on a 24px grid: [tag, attributes] pairs.
 const ICONS = {
   plus: [['path', { d: 'M12 5v14M5 12h14' }]],

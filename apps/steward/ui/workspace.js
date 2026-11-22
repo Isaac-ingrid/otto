@@ -15,6 +15,8 @@ import { createCheckpointModal } from './checkpoint.js';
 import { controlPlaneCounts, createControlPlane } from './control-plane.js';
 import { createPrDiagnosisModal } from './pr-diagnosis.js';
 import { applyThreadState, lastTimelineId, mergeTimeline } from './thread-frames.js';
+import { createSearchPalette } from './search-palette.js';
+import { classifyWorkerContext, formatCompactTokens } from './telemetry.js';
 import { mountSessionViewer } from './session.js';
 import {
   ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, attentionFor, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, isActiveWorker, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, withPending, workOn,
@@ -68,6 +70,7 @@ const state = {
   stoppingThreadPlans: new Set(),
   workerDiffs: new Map(),
   diffRev: 0,
+  historySlice: null,
 };
 
 // ---- small pieces ---------------------------------------------------------------------------------
@@ -295,13 +298,28 @@ function workingNode() {
     hasRunningAgents ? h('span', { class: 'working-subnote' }, t('workingAgentsSeparate')) : null);
 }
 
+function threadContextBadge(thread) {
+  if (!thread?.workers?.length) return null;
+  const sorted = [...thread.workers].sort((a, b) => (isActiveWorker(b) ? 1 : 0) - (isActiveWorker(a) ? 1 : 0) || b.createdAt - a.createdAt);
+  const candidate = sorted.find((w) => classifyWorkerContext(w).hasTelemetry);
+  if (!candidate) return null;
+  const ctx = classifyWorkerContext(candidate);
+  if (ctx.percent === null && !(ctx.tokens > 0)) return null;
+  const label = ctx.percent !== null
+    ? t('ctxHeaderBadgePct', { percent: ctx.percent })
+    : t('ctxHeaderBadgeTok', { tokens: formatCompactTokens(ctx.tokens) });
+  return h('span', { class: `state-badge context-pill level-${ctx.level}` }, label);
+}
+
 function renderFeed(stick) {
   const snapshot = state.snapshot;
   const feed = $('#feed');
   const thread = state.selected ? threadById(state.selected) : null;
   const titles = snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, Boolean(entry.archived)]);
-  const live = state.live && (!state.selected || state.live.threadId === state.selected) ? state.live : null;
-  redraw('feed', [getLocale(), state.selected, snapshot.messages, snapshot.busy, state.stopping, [...state.pending.values()], [...state.busyCards], titles, dayKey(serverNow()), live?.text], () => {
+  const threadCtxSig = thread ? thread.workers.map((w) => [w.id, w.state, w.contextPercent, w.contextTokens, w.compactionCount]) : null;
+  const slice = state.historySlice;
+  const live = !slice && state.live && (!state.selected || state.live.threadId === state.selected) ? state.live : null;
+  redraw('feed', [getLocale(), state.selected, slice, snapshot.messages, snapshot.busy, state.stopping, [...state.pending.values()], [...state.busyCards], titles, threadCtxSig, dayKey(serverNow()), live?.text], () => {
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
     const oldTop = feed.scrollTop;
 
@@ -314,13 +332,20 @@ function renderFeed(stick) {
     if (thread) {
       $('.heading-line').append(stateBadge(thread.state));
       if (thread.archived) $('.heading-line').append(stateBadge('archived'));
+      const ctxBadge = threadContextBadge(thread);
+      if (ctxBadge) $('.heading-line').append(ctxBadge);
     }
     const banner = $('#scope-banner');
     banner.hidden = !thread;
     banner.replaceChildren(...(thread ? [h('span', null, t('scopeNotice')), h('button', { type: 'button', dataset: { action: 'all' } }, `${t('backToAll')} ↗`)] : []));
 
-    const messages = messagesFor(withPending(snapshot.messages, state.pending), state.selected);
+    const messages = slice ? slice.messages : messagesFor(withPending(snapshot.messages, state.pending), state.selected);
     const body = [];
+    if (slice) {
+      body.push(h('div', { class: 'history-slice-banner', role: 'status' },
+        h('span', { class: 'history-slice-copy' }, icon('clock'), t('historySliceNotice', { count: slice.messages.length })),
+        h('button', { type: 'button', dataset: { action: 'exit-history-slice' } }, t('historySliceBackLatest'))));
+    }
     if (messages.length === 0) {
       body.push(h('div', { class: 'empty-state' }, icon('chat'), h('strong', null, t(thread ? 'emptyThreadMessages' : 'emptyMessages')), h('p', null, t(thread ? 'emptyThreadHelp' : 'emptyMessagesHelp'))));
     }
@@ -328,11 +353,13 @@ function renderFeed(stick) {
       body.push(h('div', { class: 'date-divider' }, dayLabel(group.at)));
       for (const message of group.messages) body.push(message.role === 'user' ? userMessage(message) : assistantMessage(message));
     }
-    if (live) body.push(liveMessage(live));
-    else if (working()) body.push(workingNode());
+    if (!slice) {
+      if (live) body.push(liveMessage(live));
+      else if (working()) body.push(workingNode());
+    }
 
     preservingFocus(feed, () => feed.replaceChildren(h('div', { class: 'feed-inner' }, body)));
-    feed.scrollTop = stick || nearBottom ? feed.scrollHeight : oldTop;
+    feed.scrollTop = slice ? oldTop : (stick || nearBottom ? feed.scrollHeight : oldTop);
   });
 }
 
@@ -546,7 +573,7 @@ async function changeComposerModel(input) {
 
 function activityItem(entry) {
   const label = tOr(`kind_${entry.kind}`, entry.kind);
-  const body = h('div', { class: 'activity-item' }, h('time', null, ago(entry.at)), h('p', null, h('span', { class: 'timeline-kind' }, label), entry.text));
+  const body = h('div', { class: 'activity-item', ...(entry.id != null ? { dataset: { timelineId: String(entry.id) } } : {}) }, h('time', null, ago(entry.at)), h('p', null, h('span', { class: 'timeline-kind' }, label), entry.text));
   const thread = entry.threadId ? threadById(entry.threadId) : null;
   return thread ? h('a', { class: 'activity-link', href: `/app/threads/${thread.id}`, dataset: { nav: thread.id } }, body) : body;
 }
@@ -974,6 +1001,47 @@ function archiveConfirmSection() {
       h('button', { type: 'button', class: 'button', disabled: busy, dataset: { action: 'close-dialog', focus: 'archive-cancel' } }, t('actionCancel'))));
 }
 
+function workerContextNode(thread, worker, hasCheckpoint) {
+  const ctx = classifyWorkerContext(worker);
+  if (!ctx.hasTelemetry) return null;
+
+  const headline = ctx.percent !== null && ctx.tokens !== null && ctx.window !== null
+    ? t('ctxMeterWindow', { percent: ctx.percent, used: formatCompactTokens(ctx.tokens), max: formatCompactTokens(ctx.window) })
+    : ctx.percent !== null
+      ? t('ctxMeterPercentOnly', { percent: ctx.percent })
+      : ctx.tokens !== null
+        ? t('ctxMeterTokensOnly', { used: formatCompactTokens(ctx.tokens) })
+        : null;
+
+  const chips = [];
+  if (ctx.compacting) chips.push(h('span', { class: 'ctx-chip compacting' }, t('ctxCompactingNow')));
+  if (ctx.compactionCount > 0) chips.push(h('span', { class: 'ctx-chip' }, t('ctxCompactedCount', { count: ctx.compactionCount })));
+  if (ctx.slowToolMs !== null) chips.push(h('span', { class: 'ctx-chip' }, t('ctxSlowTool', { seconds: (ctx.slowToolMs / 1000).toFixed(1) })));
+
+  return h('div', { class: `worker-context-box level-${ctx.level}` },
+    headline || chips.length
+      ? h('div', { class: 'worker-context-head' },
+        headline ? h('span', { class: 'worker-context-label' }, headline) : null,
+        chips.length ? h('div', { class: 'worker-context-chips' }, chips) : null)
+      : null,
+    ctx.percent !== null
+      ? h('progress', { class: `worker-context-meter level-${ctx.level}`, value: ctx.percent, max: 100 })
+      : null,
+    ctx.level === 'warn'
+      ? h('p', { class: 'worker-context-note warn' }, t('ctxWarnNotice'))
+      : ctx.level === 'high'
+        ? h('div', { class: 'worker-context-alert' },
+          h('span', null, icon('alert'), t('ctxHighNotice', { percent: ctx.percent })),
+          hasCheckpoint
+            ? h('button', {
+              type: 'button',
+              class: 'cp-mini-btn',
+              dataset: { action: 'open-checkpoint', worker: worker.id, thread: thread.id },
+            }, t('checkpointOpen'))
+            : null)
+        : null);
+}
+
 function workerNode(thread, worker) {
   const active = isActiveWorker(worker);
   const progress = worker.progress ? [worker.progress.phase, worker.progress.tool, worker.progress.target].filter(Boolean).join(' ') : '';
@@ -988,7 +1056,6 @@ function workerNode(thread, worker) {
     }
     facts.push(parts.join(' · '));
   }
-  if (worker.contextPercent !== null && worker.contextPercent !== undefined) facts.push(t('context', { percent: worker.contextPercent }));
   const outcome = worker.outcome ? tOr(`outcome_${worker.outcome}`, worker.outcome) : '';
   const pr = worker.pr;
   const worktreeKey = WORKTREE_STATUS_KEYS[worker.worktreeStatus];
@@ -996,7 +1063,7 @@ function workerNode(thread, worker) {
   const diffOpen = Boolean(state.workerDiffs.get(worker.id)?.open);
   const hasSession = worker.sessionId !== null || active;
   const hasCheckpoint = Boolean(worker.sessionId || worker.outcome || worker.progress);
-  return h('div', { class: 'worker-card' },
+  return h('div', { class: 'worker-card', dataset: { workerCard: worker.id } },
     h('div', { class: 'worker-title' },
       h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent === 'codex' ? '⌘' : worker.agent === 'antigravity' ? '✦' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
       h('span', { class: 'worker-state' }, h('span', { class: `status-dot ${active ? 'green' : 'gray'}` }), tOr(`worker${cap(worker.state)}`, worker.state))),
@@ -1008,6 +1075,7 @@ function workerNode(thread, worker) {
     worker.branch || worktreeKey ? h('div', { class: 'thread-badge-row' },
       worker.branch ? h('code', null, worker.branch) : null,
       worktreeKey ? h('span', { class: `worktree-badge ${worker.worktreeStatus}` }, t(worktreeKey)) : null) : null,
+    workerContextNode(thread, worker, hasCheckpoint),
     progress ? h('div', { class: 'worker-facts' }, t('progress', { what: progress })) : null,
     outcome ? h('div', { class: 'worker-facts' }, outcome) : null,
     facts.length ? h('div', { class: 'worker-facts' }, facts.join(' · ')) : null,
@@ -1809,6 +1877,9 @@ function dialogContent() {
   if (state.dialog.type === 'pr-diagnosis') {
     return { title: prDiagnosisModal.title(), body: prDiagnosisModal.render() };
   }
+  if (state.dialog.type === 'search') {
+    return { title: searchPalette.title(), body: searchPalette.render() };
+  }
   return { title: t('accountTitle'), body: accountSection() };
 }
 
@@ -1846,7 +1917,15 @@ const controlPlane = createControlPlane({
   toast,
   bump: () => bumpDialog(),
   refreshWorkspace: () => refresh(),
-  openThread: (threadId) => { closeDialog(); select(threadId); },
+  openThread: async (threadId, archived = false) => {
+    if (archived && !state.showArchived) {
+      state.showArchived = true;
+      renderSidebar();
+      await refresh();
+    }
+    closeDialog();
+    select(threadId);
+  },
   openPrDiagnosis: (watchId, opts) => openPrDiagnosisDialog(watchId, opts),
   prefillPrFix: (watchId, opts) => prDiagnosisModal.prefillQuickFix(watchId, opts),
   serverNow,
@@ -1867,6 +1946,127 @@ const checkpointModal = createCheckpointModal({
   fillContinuation: fillThreadComposer,
 });
 
+const searchPalette = createSearchPalette({
+  fetchSearch: (path, signal) => fetchSearch(path, signal),
+  getSnapshot: () => state.snapshot,
+  getSelectedThread: () => (state.selected ? threadById(state.selected) : null),
+  bump: () => bumpDialog(),
+  activateHit: (hit) => void activateSearchHit(hit),
+  close: () => closeDialog(),
+  serverNow,
+});
+
+function openSearchPalette() {
+  if (!state.snapshot || state.onboarding || state.fatal) return;
+  if (state.dialog?.saving || securityState()?.passkeyAdd === 'creating') return;
+  releaseDetailsOverlay({ restoreFocus: false });
+  state.dialog = { type: 'search', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+  drawn.delete('dialog');
+  searchPalette.open();
+  renderDialog();
+  searchPalette.focusInput();
+}
+
+function flashElement(target) {
+  if (!target) return;
+  target.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+  target.classList.remove('flash');
+  void target.offsetWidth;
+  target.classList.add('flash');
+  setTimeout(() => target.classList.remove('flash'), 1600);
+}
+
+async function activateSearchHit(hit) {
+  if (!hit || typeof hit !== 'object') return;
+  if (hit.threadArchived && !state.showArchived) {
+    state.showArchived = true;
+    renderSidebar();
+    await refresh();
+  }
+  if (hit.kind === 'thread') {
+    const targetThreadId = hit.anchor?.threadId ?? hit.threadId;
+    closeDialog();
+    state.historySlice = null;
+    if (targetThreadId) select(targetThreadId);
+    return;
+  }
+  if (hit.kind === 'message') {
+    const messageId = hit.anchor?.messageId;
+    if (!messageId) return;
+    const targetThreadId = hit.threadId ?? null;
+    const inSnapshot = Boolean(state.snapshot?.messages?.some((entry) => entry.id === messageId));
+    if (inSnapshot) {
+      closeDialog();
+      state.historySlice = null;
+      go({ thread: targetThreadId });
+      drawn.delete('feed');
+      renderFeed(false);
+      requestAnimationFrame(() => flashElement(document.getElementById(messageId)));
+      return;
+    }
+    const params = new URLSearchParams({ messageId, limit: '30' });
+    if (targetThreadId) params.set('threadId', targetThreadId);
+    const { status, data } = await request(`/app/api/messages/around?${params.toString()}`);
+    closeDialog();
+    if (status === 200 && data && Array.isArray(data.messages) && data.messages.length > 0) {
+      go({ thread: targetThreadId });
+      state.historySlice = {
+        anchorId: data.anchorId ?? messageId,
+        threadId: targetThreadId,
+        messages: data.messages,
+        hasOlder: Boolean(data.hasOlder),
+        hasNewer: Boolean(data.hasNewer),
+      };
+      drawn.delete('feed');
+      renderFeed(false);
+      requestAnimationFrame(() => flashElement(document.getElementById(data.anchorId ?? messageId)));
+    } else {
+      go({ thread: targetThreadId });
+      toast(t('historySliceNotFound'));
+    }
+    return;
+  }
+  if (hit.kind === 'report') {
+    closeDialog();
+    state.historySlice = null;
+    if (hit.threadId) go({ thread: hit.threadId });
+    openDetails();
+    drawn.delete('context');
+    renderContext();
+    requestAnimationFrame(() => {
+      const panel = $('#context-panel');
+      const target = (hit.anchor?.timelineId != null
+        ? panel?.querySelector(`[data-timeline-id="${CSS.escape(String(hit.anchor.timelineId))}"]`)
+        : null)
+        ?? (hit.anchor?.workerId
+          ? panel?.querySelector(`[data-worker-card="${CSS.escape(String(hit.anchor.workerId))}"]`)
+          : null);
+      flashElement(target);
+    });
+    return;
+  }
+  if (hit.kind === 'pr_watch') {
+    if (!hit.anchor?.watchId) return;
+    openPrDiagnosisDialog(hit.anchor.watchId, {
+      head: hit.anchor.head ?? null,
+      threadId: hit.threadId ?? null,
+      url: hit.anchor.url ?? null,
+    });
+    return;
+  }
+  if (hit.kind === 'memory') {
+    if (!hit.anchor?.noteId) return;
+    state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+    drawn.delete('dialog');
+    controlPlane.open('memory', {
+      noteId: hit.anchor.noteId,
+      layer: hit.anchor.layer === 'archive' ? 'archive' : 'active',
+      q: hit.query ?? '',
+    });
+    renderDialog();
+  }
+}
+
 /** Rebuilds the open dialog only when what it shows changed, so a typed key or a selected command survives a refresh. */
 function renderDialog() {
   if (!state.dialog) return;
@@ -1880,6 +2080,7 @@ function renderDialog() {
     type === 'control-plane' ? [controlPlane.signature(), snapshot?.controlPlaneSummary, minuteBucket()] : null,
     type === 'checkpoint' ? [checkpointModal.signature()] : null,
     type === 'pr-diagnosis' ? [prDiagnosisModal.signature()] : null,
+    type === 'search' ? [searchPalette.signature(), snapshot?.threads?.length ?? 0] : null,
     type === 'archive-confirm' ? [state.dialog.threadId, state.dialog.unmergedWorkers, [...state.archivingThreads]] : null,
     type === 'account' ? [state.settings, state.dialog.passkeyAdd, state.changingModel, working(), state.modelDraftNotice, state.savingAgentModel, state.refreshingAgentModels, state.agentModelNotice, state.snapshot?.machines.map(machine => [machine.id, machine.online])] : null];
   redraw('dialog', signature, () => {
@@ -1891,6 +2092,7 @@ function renderDialog() {
     $('#dialog').classList.toggle('settings-dialog', type === 'account');
     $('#dialog').classList.toggle('directory-dialog', type === 'directory');
     $('#dialog').classList.toggle('diff-dialog', type === 'diff');
+    $('#dialog').classList.toggle('search-dialog', type === 'search');
     $('#dialog').classList.toggle('control-dialog', type === 'control-plane' || type === 'checkpoint' || type === 'pr-diagnosis');
     $('#dialog-title').replaceChildren(...(type === 'provider' ? [providerIcon(state.modelDraft.provider), document.createTextNode(title)] : [document.createTextNode(title)]));
     preservingFocus(bodyNode, () => bodyNode.replaceChildren(...[body].flat(Infinity).filter(Boolean)));
@@ -1901,7 +2103,10 @@ function renderDialog() {
       if (nextPane) nextPane.scrollTop = paneTop;
     }
   });
-  if (!$('#dialog').open) $('#dialog').showModal();
+  if (!$('#dialog').open) {
+    $('#dialog').showModal();
+    if (type === 'search') searchPalette.focusInput();
+  }
 }
 
 /** A local change to the dialog's own state (a pairing command arrived, a confirmation opened). */
@@ -1913,6 +2118,7 @@ function bumpDialog() {
 }
 
 function openDialog(type) {
+  if (type === 'search') return openSearchPalette();
   state.dialog = { type, rev: 0, pairing: null, confirm: null, passkeyAdd: null };
   state.modelDraftNotice = null;
   state.pushNotice = null; // a fresh visit shows the current state, not the last attempt's result
@@ -1927,6 +2133,7 @@ function openDialog(type) {
 
 function closeDialog() {
   if (state.dialog?.saving || securityState()?.passkeyAdd === 'creating') return;
+  if (state.dialog?.type === 'search') searchPalette.abort();
   if (state.dialog?.type === 'directory' && state.directoryForms.get(state.dialog.deviceId)?.state === 'editing') state.directoryForms.delete(state.dialog.deviceId);
   const returnTo = state.dialog?.returnTo;
   const returnFocus = state.dialog?.returnFocus;
@@ -2013,6 +2220,41 @@ async function request(path, body) {
     renderFatal();
   }
   return { status: response.status, data };
+}
+
+async function fetchSearch(path, signal) {
+  try {
+    const response = await fetch(path, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'manual',
+      signal,
+    });
+    if (response.type === 'opaqueredirect') {
+      if (state.fatal !== 'logged_out' && !reloadForSignIn()) {
+        state.fatal = 'signed_out';
+        renderFatal();
+      }
+      return { status: 401, data: null };
+    }
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      // Proxy error pages are not JSON.
+    }
+    if (response.status === 401 && state.fatal !== 'logged_out') {
+      state.fatal = 'signed_out';
+      renderFatal();
+    }
+    return { status: response.status, data };
+  } catch (err) {
+    if (err?.name === 'AbortError' || signal?.aborted) {
+      return { status: 0, data: null, aborted: true };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2261,6 +2503,7 @@ function send() {
   const input = $('#message-input');
   const text = input.value;
   if (!text.trim() || state.changingModel) return;
+  state.historySlice = null;
   const entry = { id: uuid(), text, threadId: state.selected, replyTo: state.replyTo, at: Date.now(), status: 'sending' };
   state.pending.set(entry.id, entry);
   input.value = '';
@@ -2806,6 +3049,7 @@ function go({ thread = null, worker = null } = {}, { push = true } = {}) {
   const input = $('#message-input');
   state.drafts.set(scopeKey(), input.value);
   const changed = next !== state.selected || nextWorker !== state.session;
+  state.historySlice = null;
   state.selected = next;
   state.session = nextWorker;
   input.value = state.drafts.get(scopeKey()) ?? '';
@@ -2967,7 +3211,13 @@ document.addEventListener('visibilitychange', () => {
   void refresh();
   if (socket && socket.readyState > 1 && !state.fatal) connect();
 });
-$('#dialog').addEventListener('close', () => { if (!$('#dialog').open) { state.dialog = null; state.modelDraft = null; } });
+$('#dialog').addEventListener('close', () => {
+  if (!$('#dialog').open) {
+    searchPalette.abort();
+    state.dialog = null;
+    state.modelDraft = null;
+  }
+});
 $('#dialog').addEventListener('cancel', (event) => { event.preventDefault(); closeDialog(); });
 $('#dialog').addEventListener('click', (event) => {
   if (event.target !== $('#dialog')) return;
@@ -2975,12 +3225,25 @@ $('#dialog').addEventListener('click', (event) => {
   if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeDialog();
 });
 document.addEventListener('keydown', (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !$('#dialog').open && !state.onboarding) {
-    event.preventDefault();
-    releaseDetailsOverlay({ restoreFocus: false });
-    if (!matchMedia('(max-width: 650px)').matches && !sidebarOpen()) toggleSidebar();
-    setMobile('threads');
-    $('#thread-search').focus();
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+    if (!state.onboarding && !state.fatal && !(state.dialog?.saving || securityState()?.passkeyAdd === 'creating')) {
+      event.preventDefault();
+      if ($('#dialog').open && state.dialog?.type === 'search') closeDialog();
+      else openSearchPalette();
+    }
+    return;
+  }
+  if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !$('#dialog').open && !state.onboarding && !state.fatal) {
+    const active = document.activeElement;
+    const inField = active && (active.matches?.('input, textarea, select, [contenteditable="true"]') || active.isContentEditable);
+    if (!inField) {
+      event.preventDefault();
+      releaseDetailsOverlay({ restoreFocus: false });
+      if (!matchMedia('(max-width: 650px)').matches && !sidebarOpen()) toggleSidebar();
+      setMobile('threads');
+      $('#thread-search').focus();
+      return;
+    }
   }
   if (!detailsOverlay || $('#dialog').open) return;
   if (event.key === 'Escape') {
@@ -3051,12 +3314,22 @@ document.addEventListener('click', (event) => {
     case 'setup-back': return setSetupStep('model');
     case 'setup-next': return setSetupStep('security');
     case 'setup-finish': return finishSetup();
+    case 'global-search': return openSearchPalette();
+    case 'exit-history-slice':
+      state.historySlice = null;
+      drawn.delete('feed');
+      return renderFeed(true);
     case 'all': return select(null);
     case 'new':
       select(null);
       $('#message-input').focus();
       return toast(t('newTaskHint'));
     case 'control-plane': return openDialog('control-plane');
+    case 'telemetry':
+      state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      controlPlane.open('telemetry');
+      return renderDialog();
     case 'repo-skills':
       state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
       drawn.delete('dialog');

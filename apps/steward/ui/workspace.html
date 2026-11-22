@@ -28,7 +28,8 @@
         <button class="status-button control-status" data-action="control-plane"><span class="status-dot gray" id="control-dot"></span><span data-i18n="controlPlaneShort">Memory &amp; Auto</span><strong id="control-count">0</strong></button>
       </div>
       <div class="topbar-end">
-        <span class="spend" id="spend" hidden><span data-i18n="today">Today</span> <strong id="spend-value">$0.00</strong></span>
+        <button type="button" class="status-button global-search-trigger" data-action="global-search" data-i18n-label="globalSearchOpen" data-i18n-title="globalSearchOpen" aria-label="Search workspace (⌘K)" title="Search workspace (⌘K)"><span data-icon="search"></span><span class="search-trigger-label" data-i18n="globalSearchBtn">Search</span><kbd class="shortcut">⌘ K</kbd></button>
+        <button type="button" class="status-button spend" id="spend" data-action="telemetry" hidden><span data-i18n="today">Today</span> <strong id="spend-value">$0.00</strong></button>
         <div class="language-switch" role="group" data-i18n-label="language" aria-label="Language"><button type="button" data-locale="en" lang="en" aria-label="English" aria-pressed="true">EN</button><button type="button" data-locale="zh" lang="zh-CN" aria-label="简体中文" aria-pressed="false">中文</button></div>
         <button class="avatar" data-action="account" data-i18n-label="account" data-i18n-title="account" aria-label="Account" title="Account" data-icon="user"></button>
       </div>
@@ -36,11 +37,12 @@
 
     <aside class="sidebar" id="threads-panel" data-i18n-label="threads" aria-label="Threads">
       <div class="sidebar-top"><button type="button" class="icon-button sidebar-mobile-close" data-mobile-view="chat" data-i18n-label="backToChat" aria-label="Back to chat" data-icon="chevron-left"></button><span class="eyebrow" data-i18n="threads">Threads</span><button class="icon-button" data-action="new" data-i18n-title="newThread" data-i18n-label="newThread" title="New task" aria-label="New task" data-icon="plus"></button></div>
-      <a class="all-conversation active" href="/app" data-nav="all"><span data-icon="chat"></span><span data-i18n="allMessages">All messages</span><span class="shortcut">⌘ K</span></a>
+      <a class="all-conversation active" href="/app" data-nav="all"><span data-icon="chat"></span><span data-i18n="allMessages">All messages</span></a>
       <label class="search-box"><span data-icon="search"></span><input id="thread-search" type="search" data-i18n-placeholder="searchThreads" data-i18n-label="searchThreads" placeholder="Search threads" aria-label="Search threads" autocomplete="off"></label>
       <nav id="thread-list" class="thread-list" data-i18n-label="threadNavigation" aria-label="Threads by status"></nav>
       <div class="sidebar-bottom">
         <button class="machine-heading" data-action="control-plane"><span class="eyebrow"><span data-i18n="controlPlaneShort">Memory &amp; Auto</span><span id="sidebar-control-count"></span></span><span data-icon="chevron-right"></span></button>
+        <button class="machine-heading" data-action="telemetry"><span class="eyebrow"><span data-i18n="cpTabTelemetry">Budget &amp; Telemetry</span></span><span data-icon="chevron-right"></span></button>
         <button class="machine-heading" data-action="repo-skills"><span class="eyebrow"><span data-i18n="cpTabSkills">Repo Skills</span></span><span data-icon="chevron-right"></span></button>
         <button class="machine-heading" data-action="machines"><span class="eyebrow"><span data-i18n="machines">Machines</span><span id="online-count"></span></span><span data-icon="chevron-right"></span></button>
         <div id="machine-list"></div>

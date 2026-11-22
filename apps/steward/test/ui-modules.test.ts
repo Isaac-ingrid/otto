@@ -11,6 +11,8 @@ import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS
 import { formatCheckpointPlainText } from "../ui/checkpoint.js";
 import { CONTROL_PLANE_I18N_KEYS, controlPlaneCounts, skillErrorKey, skillTargetI18nKey } from "../ui/control-plane.js";
 import { PR_DIAGNOSIS_I18N_KEYS, formatPrDiagnosisPlainText, prActionButtonKey, prDiagnosisCategoryKey, prDiagnosisSkipKey, prDiagnosisSourceKey, prReviewDecisionKey } from "../ui/pr-diagnosis.js";
+import { SEARCH_PALETTE_I18N_KEYS, SEARCH_PALETTE_SCOPES, buildLocalSuggestions, highlightSegments, normalizeHighlightRanges } from "../ui/search-palette.js";
+import { TELEMETRY_CATEGORIES, TELEMETRY_I18N_KEYS, classifyWorkerContext, computeStackedChartGeometry, formatCompactTokens } from "../ui/telemetry.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -29,7 +31,7 @@ const asset = async (name: string): Promise<string> => (await fetchAsset(name)).
 // design §6) — it is included here for the sink scan and the import-export check (it has no
 // imports, so that check is a no-op for it) but NOT in the i18n-completeness scan below, whose
 // own file list is separate and intentionally does not reach it.
-const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
+const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "search-palette.js", "telemetry.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
 
 /** The text between the parentheses of every call to `fn(…)` (not `x.fn(…)`, not `prefixfn(…)`). */
 function callArguments(source: string, fn: string): string[] {
@@ -141,7 +143,7 @@ describe("interface copy", () => {
 
   it("covers every string the page asks for, including the data-driven ones", async () => {
     const used = new Set<string>();
-    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js"]) {
+    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "search-palette.js", "telemetry.js"]) {
       const source = await asset(name);
       for (const args of callArguments(source, "t")) for (const key of args.matchAll(/'([A-Za-z_:]+)'/g)) used.add(key[1]!);
       for (const attribute of source.matchAll(/data-i18n(?:-[a-z]+)?="([A-Za-z_:]+)"/g)) used.add(attribute[1]!);
@@ -153,7 +155,7 @@ describe("interface copy", () => {
     for (const state of ["connecting", "live", "reconnecting", "disconnected"]) used.add(state);
     // The session viewer labels the bookkeeping entries an agent writes by kind (session-model.js).
     for (const kind of ["session", "model", "thinking_level", "compaction", "branch_summary", "custom", "label", "session_info", "usage", "context_edit", "system", "summary", "info", "error"]) used.add(`svMeta_${kind}`);
-    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS), ...CONTROL_PLANE_I18N_KEYS, ...PR_DIAGNOSIS_I18N_KEYS]) used.add(key);
+    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS), ...CONTROL_PLANE_I18N_KEYS, ...PR_DIAGNOSIS_I18N_KEYS, ...SEARCH_PALETTE_I18N_KEYS, ...TELEMETRY_I18N_KEYS]) used.add(key);
     expect(used.size).toBeGreaterThan(60);
     expect([...used].filter((key) => !(key in STRINGS))).toEqual([]);
   });
@@ -622,5 +624,177 @@ describe("control plane counts", () => {
     expect(diagPlain).toContain("src/a.ts:9");
     expect(diagPlain).toContain("Merge conflict: feat/x -> main");
     expect(diagPlain).toContain("@alice src/b.ts:4");
+  });
+});
+
+describe("global search palette helpers", () => {
+  it("exposes all six Command-K search scopes and normalizes UTF-16 highlight intervals", () => {
+    expect(SEARCH_PALETTE_SCOPES).toEqual(["all", "threads", "messages", "reports", "pr", "memory"]);
+    expect(normalizeHighlightRanges(10, [[-3, 2], [2, 5], [4, 7], [9, 15], [6, 6]])).toEqual([[0, 7], [9, 10]]);
+    expect(normalizeHighlightRanges(0, [[0, 1]])).toEqual([]);
+  });
+
+  it("splits CJK, ASCII, and raw markup-like strings into plain and matched text segments safely", () => {
+    const text = "排查 <img onerror=alert(1)> 死锁超时";
+    const target = "死锁";
+    const idx = text.indexOf(target);
+    const segments = highlightSegments(text, [[idx, idx + target.length]]);
+    expect(segments).toEqual([
+      { text: "排查 <img onerror=alert(1)> ", match: false },
+      { text: "死锁", match: true },
+      { text: "超时", match: false },
+    ]);
+    expect(segments.map((s) => s.text).join("")).toBe(text);
+  });
+
+  it("ranks local suggestions by waiting_you, running, then recent active threads", () => {
+    const suggestions = buildLocalSuggestions({
+      threads: [
+        { id: "t-idle", title: "Refactor auth", state: "idle", archived: false, repos: ["otto"], machine: "m1", lastActivityAt: 300, summary: "done", workers: [] },
+        { id: "t-run", title: "Build search", state: "running", archived: false, repos: ["otto"], machine: "m1", lastActivityAt: 100, summary: "indexing", workers: [] },
+        { id: "t-wait", title: "Approve PR", state: "waiting_you", archived: false, repos: ["otto"], machine: "m1", lastActivityAt: 50, summary: "needs review", workers: [] },
+        { id: "t-arch", title: "Old task", state: "archived", archived: true, repos: ["otto"], machine: "m1", lastActivityAt: 999, summary: "old", workers: [] },
+      ],
+    }, "", 8);
+    expect(suggestions.map((s) => s.threadId)).toEqual(["t-wait", "t-run", "t-idle"]);
+    expect(suggestions.map((s) => s.suggestGroup)).toEqual(["waiting", "running", "recent"]);
+    const oneChar = buildLocalSuggestions({
+      threads: [
+        { id: "t-arch", title: "限流排查", state: "archived", archived: true, repos: ["otto"], machine: "m1", lastActivityAt: 999, summary: "修复限流", workers: [] },
+      ],
+    }, "限", 8);
+    expect(oneChar).toHaveLength(1);
+    expect(oneChar[0]?.titleHighlights).toEqual([[0, 1]]);
+  });
+});
+
+describe("budget telemetry and worker context helpers", () => {
+  it("formats token counts compactly across ones, thousands, and millions", () => {
+    expect(formatCompactTokens(0)).toBe("0");
+    expect(formatCompactTokens(840)).toBe("840");
+    expect(formatCompactTokens(12_400)).toBe("12.4k");
+    expect(formatCompactTokens(200_000)).toBe("200k");
+    expect(formatCompactTokens(1_250_000)).toBe("1.25M");
+    expect(formatCompactTokens(Number.NaN)).toBe("0");
+  });
+
+  it("classifies worker context watermarks into normal, warn (80%+), high (90%+), and honest unknown", () => {
+    expect(classifyWorkerContext(null)).toMatchObject({ hasTelemetry: false, level: "unknown", percent: null });
+    expect(classifyWorkerContext({ contextPercent: 64, contextTokens: 128_000, contextWindow: 200_000, lastToolDurationMs: 900 })).toEqual({
+      hasTelemetry: true,
+      percent: 64,
+      tokens: 128_000,
+      window: 200_000,
+      compactionCount: 0,
+      slowToolMs: null,
+      compacting: false,
+      level: "normal",
+    });
+    expect(classifyWorkerContext({ contextPercent: 80, compactionCount: 1, lastToolDurationMs: 2450 })).toMatchObject({
+      hasTelemetry: true,
+      percent: 80,
+      compactionCount: 1,
+      slowToolMs: 2450,
+      level: "warn",
+    });
+    expect(classifyWorkerContext({ contextPercent: 93, progress: { phase: "compacting" } })).toMatchObject({
+      hasTelemetry: true,
+      percent: 93,
+      compacting: true,
+      level: "high",
+    });
+    expect(classifyWorkerContext({ contextPercent: null, contextTokens: 54_000, contextWindow: null })).toMatchObject({
+      hasTelemetry: true,
+      percent: null,
+      tokens: 54_000,
+      window: null,
+      level: "unknown",
+    });
+  });
+
+  it("computes stacked SVG chart geometry, daily budget line, and $0 free-model token fallback", () => {
+    expect(TELEMETRY_CATEGORIES).toEqual(["chat", "wake", "schedule", "pr_triage", "memory_skill", "unattributed"]);
+    const usdSeries = [
+      {
+        day: "2026-11-21",
+        totalCostUsd: 0.4,
+        totalTokens: 20_000,
+        overLimit: false,
+        byCategory: {
+          chat: { costUsd: 0.25, tokens: 12_000 },
+          wake: { costUsd: 0, tokens: 0 },
+          schedule: { costUsd: 0.15, tokens: 8_000 },
+          pr_triage: { costUsd: 0, tokens: 0 },
+          memory_skill: { costUsd: 0, tokens: 0 },
+          unattributed: { costUsd: 0, tokens: 0 },
+        },
+        worker: { totalTokens: 90_000, settledRuns: 2 },
+      },
+      {
+        day: "2026-11-22",
+        totalCostUsd: 1.2,
+        totalTokens: 55_000,
+        overLimit: true,
+        byCategory: {
+          chat: { costUsd: 0.5, tokens: 20_000 },
+          wake: { costUsd: 0, tokens: 0 },
+          schedule: { costUsd: 0, tokens: 0 },
+          pr_triage: { costUsd: 0.7, tokens: 35_000 },
+          memory_skill: { costUsd: 0, tokens: 0 },
+          unattributed: { costUsd: 0, tokens: 0 },
+        },
+        worker: { totalTokens: 140_000, settledRuns: 3 },
+      },
+    ];
+    const usdGeom = computeStackedChartGeometry(usdSeries, { mode: "steward_usd", limitUsd: 1.0 });
+    expect(usdGeom.unit).toBe("steward_usd");
+    expect(usdGeom.limitLineY).not.toBeNull();
+    expect(usdGeom.bars[0]?.segments.map((s: { category: string }) => s.category)).toEqual(["chat", "schedule"]);
+    expect(usdGeom.bars[1]?.overLimit).toBe(true);
+
+    const freeModelSeries = usdSeries.map((point) => ({
+      ...point,
+      totalCostUsd: 0,
+      byCategory: Object.fromEntries(Object.entries(point.byCategory).map(([k, v]) => [k, { costUsd: 0, tokens: v.tokens }])) as typeof point.byCategory,
+    }));
+    const fallbackGeom = computeStackedChartGeometry(freeModelSeries, { mode: "steward_usd", limitUsd: 1.0 });
+    expect(fallbackGeom.unit).toBe("steward_tokens");
+    expect(fallbackGeom.limitLineY).toBeNull();
+    expect(fallbackGeom.bars[0]?.segments.map((s: { category: string }) => s.category)).toEqual(["chat", "schedule"]);
+
+    const workerGeom = computeStackedChartGeometry(usdSeries, { mode: "worker_tokens", limitUsd: 1.0 });
+    expect(workerGeom.unit).toBe("worker_tokens");
+    expect(workerGeom.limitLineY).toBeNull();
+    expect(workerGeom.bars[1]?.segments[0]).toMatchObject({ category: "worker", value: 140_000 });
+  });
+
+  it("merges live worker context telemetry in applyThreadState frames", () => {
+    const thread = {
+      id: "t_ctx",
+      state: "running",
+      workers: [{ id: "w_ctx", state: "running", agent: "pi", contextPercent: null, contextTokens: null, contextWindow: null, compactionCount: 0, lastToolDurationMs: null }],
+    };
+    const { thread: updated, unknownWorkers } = applyThreadState(thread, {
+      state: "running",
+      openQuestions: 0,
+      workers: [{
+        workerId: "w_ctx",
+        state: "running",
+        contextPercent: 86,
+        contextTokens: 172_000,
+        contextWindow: 200_000,
+        compactionCount: 2,
+        lastToolDurationMs: 4120,
+      }],
+    });
+    expect(unknownWorkers).toBe(false);
+    expect(updated.workers[0]).toMatchObject({
+      id: "w_ctx",
+      contextPercent: 86,
+      contextTokens: 172_000,
+      contextWindow: 200_000,
+      compactionCount: 2,
+      lastToolDurationMs: 4120,
+    });
   });
 });

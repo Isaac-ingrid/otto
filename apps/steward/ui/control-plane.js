@@ -3,6 +3,7 @@
 import { h, icon } from './dom.js';
 import { formatClock, formatDay, formatUsd, safeUrl } from './format.js';
 import { localeTag, t, tOr } from './i18n.js';
+import { TELEMETRY_I18N_KEYS, createTelemetryPane, renderSchedulesBudgetCard } from './telemetry.js';
 
 export const SKILL_ERROR_KEYS = {
   invalid_slug: 'skErr_invalid_slug',
@@ -40,6 +41,7 @@ export const CONTROL_PLANE_I18N_KEYS = [
   'cpSkillGit_clean', 'cpSkillGit_modified', 'cpSkillGit_untracked', 'cpSkillGit_plain',
   ...Object.values(SKILL_ERROR_KEYS),
   'skErr_failed',
+  ...TELEMETRY_I18N_KEYS,
 ];
 
 const LAYERS = ['active', 'resident', 'project', 'archive'];
@@ -83,6 +85,7 @@ export function createControlPlane(deps) {
       draftPinned: false,
       eviction: null,
       busyKey: null,
+      focusNoteId: null,
     },
     schedules: {
       status: 'idle',
@@ -116,6 +119,7 @@ export function createControlPlane(deps) {
     cp.rev += 1;
     bump();
   };
+  const telemetryPane = createTelemetryPane({ request, touch, openThread });
 
   const formatStamp = (ts) => {
     if (!ts || !Number.isFinite(ts)) return '–';
@@ -161,7 +165,24 @@ export function createControlPlane(deps) {
       params.set('layer', cp.memory.layer);
       if (cp.memory.repoId) params.set('repoId', cp.memory.repoId);
       if (cp.memory.q.trim()) params.set('q', cp.memory.q.trim());
-      const { status, data } = await request(`/app/api/memory?${params.toString()}`);
+      let { status, data } = await request(`/app/api/memory?${params.toString()}`);
+      if (
+        status === 200 &&
+        data &&
+        Array.isArray(data.notes) &&
+        cp.memory.focusNoteId &&
+        cp.memory.q.trim() &&
+        !data.notes.some((n) => n.noteId === cp.memory.focusNoteId)
+      ) {
+        cp.memory.q = '';
+        const fallback = new URLSearchParams();
+        fallback.set('layer', cp.memory.layer);
+        const retry = await request(`/app/api/memory?${fallback.toString()}`);
+        if (retry.status === 200 && retry.data && Array.isArray(retry.data.notes)) {
+          status = retry.status;
+          data = retry.data;
+        }
+      }
       if (status === 200 && data && Array.isArray(data.notes)) {
         cp.memory.notes = data.notes;
         cp.memory.usage = data.usage ?? null;
@@ -182,6 +203,19 @@ export function createControlPlane(deps) {
       cp.memory.status = 'error';
     }
     touch();
+    if (cp.tab === 'memory' && cp.memory.focusNoteId && cp.memory.status === 'ready') {
+      const targetNoteId = cp.memory.focusNoteId;
+      cp.memory.focusNoteId = null;
+      requestAnimationFrame(() => {
+        const card = document.querySelector(`.cp-note-card[data-note-id="${CSS.escape(targetNoteId)}"]`);
+        if (!card) return;
+        card.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+        card.classList.remove('flash');
+        void card.offsetWidth;
+        card.classList.add('flash');
+        setTimeout(() => card.classList.remove('flash'), 1800);
+      });
+    }
   }
 
   async function loadSchedules() {
@@ -645,7 +679,7 @@ export function createControlPlane(deps) {
     const canPromote = note.status === 'active' && note.layer === 'project' && note.source !== 'connector';
     const canArchive = note.status === 'active' && (note.layer === 'resident' || note.layer === 'project') && !note.pinned;
 
-    return h('article', { class: `cp-card cp-note-card${note.status === 'superseded' ? ' muted' : ''}` },
+    return h('article', { class: `cp-card cp-note-card${note.status === 'superseded' ? ' muted' : ''}`, dataset: { noteId: note.noteId } },
       h('div', { class: 'cp-card-head' },
         h('div', { class: 'cp-badges' },
           h('span', { class: `cp-badge layer-${note.layer}` },
@@ -855,10 +889,11 @@ export function createControlPlane(deps) {
     const lim = cp.schedules.budget;
 
     return h('div', { class: 'cp-pane' },
-      lim?.over
-        ? h('div', { class: 'cp-alert cp-pressure' },
-          h('p', { class: 'cp-alert-title' }, icon('alert'), t('cpOverLimitBanner', { spent: formatUsd(lim.costUsd), limit: formatUsd(lim.limitUsd) })))
-        : null,
+      renderSchedulesBudgetCard(lim, () => {
+        cp.tab = 'telemetry';
+        telemetryPane.ensureLoaded();
+        touch();
+      }),
       h('section', { class: 'cp-section' },
         h('h3', { class: 'cp-section-title' }, icon('repeat'), t('cpRoutinesHeading')),
         routinesShown.length ? h('div', { class: 'cp-list' }, routinesShown.map(routineCard)) : h('p', { class: 'cp-empty' }, t('cpEmptyRoutines'))),
@@ -1106,16 +1141,29 @@ export function createControlPlane(deps) {
 
   return {
     open(initialTab = 'memory', initialTarget = null) {
-      cp.tab = initialTab === 'schedules' ? 'schedules' : initialTab === 'skills' ? 'skills' : 'memory';
+      cp.tab = initialTab === 'schedules'
+        ? 'schedules'
+        : initialTab === 'skills'
+          ? 'skills'
+          : initialTab === 'telemetry'
+            ? 'telemetry'
+            : 'memory';
       cp.memory.eviction = null;
+      cp.memory.focusNoteId = null;
       cp.skills.editor = null;
       cp.skills.confirmDeleteKey = null;
-      if (initialTarget) {
+      if (cp.tab === 'memory' && initialTarget?.noteId) {
+        cp.memory.layer = initialTarget.layer === 'archive' ? 'archive' : 'active';
+        cp.memory.repoId = '';
+        cp.memory.q = typeof initialTarget.q === 'string' ? initialTarget.q : '';
+        cp.memory.focusNoteId = initialTarget.noteId;
+      } else if (initialTarget) {
         cp.skills.pendingTarget = initialTarget;
         cp.skills.status = 'idle';
       }
       void loadMemory();
       void loadSchedules();
+      if (cp.tab === 'telemetry') telemetryPane.open();
       if (cp.tab === 'skills' && cp.memory.repos.length > 0) {
         applyPendingSkillRepo();
         void loadRepoSkills();
@@ -1146,6 +1194,17 @@ export function createControlPlane(deps) {
             h('button', {
               type: 'button',
               role: 'tab',
+              'aria-selected': String(cp.tab === 'telemetry'),
+              class: `cp-tab${cp.tab === 'telemetry' ? ' active' : ''}`,
+              onclick: () => {
+                cp.tab = 'telemetry';
+                telemetryPane.ensureLoaded();
+                touch();
+              },
+            }, icon('signal'), t('cpTabTelemetry')),
+            h('button', {
+              type: 'button',
+              role: 'tab',
               'aria-selected': String(cp.tab === 'skills'),
               class: `cp-tab${cp.tab === 'skills' ? ' active' : ''}`,
               onclick: () => {
@@ -1160,6 +1219,7 @@ export function createControlPlane(deps) {
             onclick: () => {
               void loadMemory();
               void loadSchedules();
+              if (cp.tab === 'telemetry') telemetryPane.reload();
               if (cp.tab === 'skills') void loadRepoSkills();
             },
           }, t('cpRefresh'))),
@@ -1167,7 +1227,9 @@ export function createControlPlane(deps) {
           ? renderMemoryTab()
           : cp.tab === 'schedules'
             ? renderSchedulesTab()
-            : renderSkillsTab());
+            : cp.tab === 'telemetry'
+              ? telemetryPane.render()
+              : renderSkillsTab());
     },
   };
 }
