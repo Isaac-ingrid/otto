@@ -87,7 +87,7 @@ const TONE_EMOJI: Array<[string, CardView["tone"]]> = [
 
 /** The 详情 line is a one-time login into this very workspace — pointless inside it. */
 const DETAIL_LINK_LINE = /^详情：\S*\/link\/wl1\.\S*[ \t]*$/gm;
-const workspaceText = (text: string): string => text.replace(DETAIL_LINK_LINE, "").replace(/\n{3,}/g, "\n\n").trim();
+export const workspaceText = (text: string): string => text.replace(DETAIL_LINK_LINE, "").replace(/\n{3,}/g, "\n\n").trim();
 
 /** A flat LocalMessage ({text, buttons}) → the structured view: the optional leading
  *  【Thread】 prefix becomes the note, the tone emoji sets the tone, the rest of the first
@@ -328,24 +328,11 @@ const parseProgress = (raw: string | null): { phase?: string; tool?: string; tar
   }
 };
 
-export function workspaceSnapshot(input: {
-  ledger: Ledger;
-  budget: BudgetState;
-  devices: WorkspaceDevice[];
-  now: number;
-  includeArchived?: boolean;
-}) {
-  const { ledger, budget, devices, now } = input;
-  const view = ledger.views.workspace({ includeArchived: input.includeArchived });
-  const machineName = new Map(devices.map((device) => [device.deviceId, device.name]));
-  const repoNamesByMachine = new Map<string, string[]>();
-  for (const repo of view.repos) {
-    repoNamesByMachine.set(repo.deviceId, [...(repoNamesByMachine.get(repo.deviceId) ?? []), repo.name]);
-  }
-  const repoName = new Map(view.repos.map((repo) => [repo.repoId, repo.name]));
-  const ledgerMachines = new Map(view.machines.map((machine) => [machine.deviceId, machine]));
-
-  const skillOfferMetaFor = (cardId: string): WorkspaceSkillOfferMeta | undefined => {
+function createSkillOfferMetaResolver(
+  ledger: Ledger,
+  repoName: ReadonlyMap<string, string>,
+): (cardId: string) => WorkspaceSkillOfferMeta | undefined {
+  return (cardId: string): WorkspaceSkillOfferMeta | undefined => {
     if (!cardId.startsWith("skilloffer:")) return undefined;
     const offer = ledger.skillOffers.get(cardId.slice("skilloffer:".length));
     if (!offer) return undefined;
@@ -368,9 +355,16 @@ export function workspaceSnapshot(input: {
       failureReason: offer.failureReason,
     };
   };
+}
 
-  const messages: WorkspaceMessage[] = [
-    ...view.inputs.map((row) => ({
+function formatWorkspaceMessages(
+  ledger: Ledger,
+  skillOfferMetaFor: (cardId: string) => WorkspaceSkillOfferMeta | undefined,
+  inputs: ReadonlyArray<{ id: string; text: string; threadId: string | null; at: number; channel: string }>,
+  outbound: ReadonlyArray<Record<string, unknown>>,
+): WorkspaceMessage[] {
+  return [
+    ...inputs.map((row) => ({
       id: `user:${row.id}`,
       role: "user" as const,
       channel: (row.channel as OwnerChannel) ?? "local",
@@ -378,33 +372,89 @@ export function workspaceSnapshot(input: {
       threadId: row.threadId,
       text: row.text,
     })),
-    ...view.outbound.filter((row) => !parsePayload({ payload: String(row.payload) }).private).map((row): WorkspaceMessage => {
-      const id = String(row.id);
-      const payload = parsePayload({ payload: String(row.payload) });
-      const base = {
-        id,
-        role: "assistant" as const,
-        channel: (row.channel as OwnerChannel) ?? "local",
-        at: Number(row.createdAt),
-        threadId: (row.threadId as string | null) ?? null,
-        status: String(row.status),
-      };
-      if (row.kind === "card") {
-        const ref = { id, questionId: (row.questionId as string | null) ?? null };
-        const card = cardView(payload.card);
-        const kind = cardKind(ref, card);
-        if (!DECISION_KINDS.has(kind)) return { ...base, text: messageText(payload.card, card) };
-        const skillOffer = skillOfferMetaFor(id);
-        return {
-          ...base,
-          card: { ...card, kind },
-          open: cardOpen(ledger, ref, card),
-          ...(skillOffer ? { skillOffer } : {}),
+    ...outbound
+      .filter((row) => !parsePayload({ payload: String(row.payload) }).private)
+      .map((row): WorkspaceMessage => {
+        const id = String(row.id);
+        const payload = parsePayload({ payload: String(row.payload) });
+        const base = {
+          id,
+          role: "assistant" as const,
+          channel: (row.channel as OwnerChannel) ?? "local",
+          at: Number(row.createdAt),
+          threadId: (row.threadId as string | null) ?? null,
+          status: String(row.status),
         };
-      }
-      return { ...base, text: payload.text ?? "" };
-    }),
-  ].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+        if (row.kind === "card") {
+          const ref = { id, questionId: (row.questionId as string | null) ?? null };
+          const card = cardView(payload.card);
+          const kind = cardKind(ref, card);
+          if (!DECISION_KINDS.has(kind)) return { ...base, text: messageText(payload.card, card) };
+          const skillOffer = skillOfferMetaFor(id);
+          return {
+            ...base,
+            card: { ...card, kind },
+            open: cardOpen(ledger, ref, card),
+            ...(skillOffer ? { skillOffer } : {}),
+          };
+        }
+        return { ...base, text: payload.text ?? "" };
+      }),
+  ].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+export interface WorkspaceMessagesAroundResult {
+  anchorId: string;
+  threadId: string | null;
+  messages: WorkspaceMessage[];
+  hasOlder: boolean;
+  hasNewer: boolean;
+}
+
+export function workspaceMessagesAround(input: {
+  ledger: Ledger;
+  messageId: string;
+  threadId?: string | null;
+  limit?: number;
+}): WorkspaceMessagesAroundResult | null {
+  const { ledger } = input;
+  const slice = ledger.views.messagesAround({
+    messageId: input.messageId,
+    ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+    ...(input.limit !== undefined ? { limit: input.limit } : {}),
+  });
+  if (!slice) return null;
+  const repoName = new Map(ledger.repos.list().map((repo) => [repo.repoId, repo.name]));
+  const skillOfferMetaFor = createSkillOfferMetaResolver(ledger, repoName);
+  const messages = formatWorkspaceMessages(ledger, skillOfferMetaFor, slice.inputs, slice.outbound);
+  if (!messages.some((m) => m.id === slice.anchorId)) return null;
+  return {
+    anchorId: slice.anchorId,
+    threadId: slice.threadId,
+    messages,
+    hasOlder: slice.hasOlder,
+    hasNewer: slice.hasNewer,
+  };
+}
+
+export function workspaceSnapshot(input: {
+  ledger: Ledger;
+  budget: BudgetState;
+  devices: WorkspaceDevice[];
+  now: number;
+  includeArchived?: boolean;
+}) {
+  const { ledger, budget, devices, now } = input;
+  const view = ledger.views.workspace({ includeArchived: input.includeArchived });
+  const machineName = new Map(devices.map((device) => [device.deviceId, device.name]));
+  const repoNamesByMachine = new Map<string, string[]>();
+  for (const repo of view.repos) {
+    repoNamesByMachine.set(repo.deviceId, [...(repoNamesByMachine.get(repo.deviceId) ?? []), repo.name]);
+  }
+  const repoName = new Map(view.repos.map((repo) => [repo.repoId, repo.name]));
+  const ledgerMachines = new Map(view.machines.map((machine) => [machine.deviceId, machine]));
+  const skillOfferMetaFor = createSkillOfferMetaResolver(ledger, repoName);
+  const messages = formatWorkspaceMessages(ledger, skillOfferMetaFor, view.inputs, view.outbound);
 
   const attention = (view.decisionCards as unknown as CardRow[])
     .map((row) => {
@@ -462,6 +512,10 @@ export function workspaceSnapshot(input: {
           outcome: worker.lastOutcome,
           progress: parseProgress(worker.lastProgress),
           contextPercent: worker.contextPercent,
+          contextTokens: worker.contextTokens ?? null,
+          contextWindow: worker.contextWindow ?? null,
+          compactionCount: worker.compactionCount ?? 0,
+          lastToolDurationMs: worker.lastToolDurationMs ?? null,
           lastEventAt: worker.lastEventAt,
           createdAt: worker.createdAt,
           git: git

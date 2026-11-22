@@ -286,6 +286,7 @@ export interface WebDeps {
     | "stopThread"
     | "archiveThread"
     | "diagnosePrWatch"
+    | "githubToken"
     | "controlPlane"
     | "webauthnRegisterOptions"
     | "webauthnRegisterVerify"

@@ -33,15 +33,24 @@ import {
   type ControlPlaneDeps,
 } from "./control-plane.ts";
 import type { Ledger } from "./ledger.ts";
+import { parseTelemetryDays, type WorkspaceTelemetryResponse } from "./telemetry.ts";
 import type { PrFailureSnapshot, PrFeedbackSnapshot, PrMergeState, PrReviewDecision } from "./pr-evidence.ts";
 import type { PrActionKind, PrDiagnosisStatus, PrFailureDiagnosis, PrFeedbackTriage } from "./pr-failure-diagnoser.ts";
 import type { PrWatchRow } from "./pr-watch.ts";
 import {
+  isWorkspaceSearchScope,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
+  type WorkspaceSearchResponse,
+} from "./search.ts";
+import {
   WorkspaceError,
+  workspaceMessagesAround,
   workspaceSnapshot,
   type WorkspaceActionInput,
   type WorkspaceDevice,
   type WorkspaceInput,
+  type WorkspaceMessagesAroundResult,
 } from "./workspace.ts";
 
 export interface MachineDirectoryInput {
@@ -193,6 +202,7 @@ export interface WorkspaceApiDeps {
   stopThread?(input: ThreadStopInput): Promise<ThreadStopResult>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
   diagnosePrWatch?(input: PrWatchDiagnosisInput, signal: AbortSignal): Promise<PrWatchDiagnosisResponse>;
+  githubToken?(): string | undefined;
   controlPlane?: Omit<ControlPlaneDeps, "ledger" | "budget" | "audit">;
   /** `attestation`/the WebAuthn wire fields stay `unknown` here on purpose (synthesis graft 1):
    *  only webauthn.ts's verifyRegistrationResponse/verifyAssertionResponse ever assert their
@@ -331,6 +341,94 @@ function parseModelSwitch(body: Record<string, unknown>): ModelSwitchInput {
   };
 }
 
+function parseBoundedIntParam(raw: string | null, min: number, max: number, fallback: number): number {
+  if (raw === null || raw === "") return fallback;
+  if (!/^\d+$/.test(raw)) throw new WorkspaceError("bad_request", 400);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new WorkspaceError("bad_request", 400);
+  }
+  return parsed;
+}
+
+function readWorkspaceSearch(
+  ledger: Ledger,
+  searchParams: URLSearchParams,
+  githubToken?: string,
+): WorkspaceSearchResponse {
+  const rawQ = searchParams.get("q") ?? "";
+  if ([...rawQ].length > 2_000) throw new WorkspaceError("bad_request", 400);
+
+  const rawScope = searchParams.get("scope") ?? "all";
+  if (!isWorkspaceSearchScope(rawScope)) throw new WorkspaceError("bad_request", 400);
+
+  const rawThreadId = searchParams.get("threadId");
+  let threadId: string | null = null;
+  if (rawThreadId !== null && rawThreadId !== "") {
+    if (!THREAD_ID.test(rawThreadId)) throw new WorkspaceError("bad_request", 400);
+    threadId = rawThreadId;
+  }
+
+  const rawArchived = searchParams.get("includeArchived");
+  let includeArchived = true;
+  if (rawArchived !== null && rawArchived !== "") {
+    if (rawArchived === "1" || rawArchived === "true") includeArchived = true;
+    else if (rawArchived === "0" || rawArchived === "false") includeArchived = false;
+    else throw new WorkspaceError("bad_request", 400);
+  }
+
+  const limit = parseBoundedIntParam(searchParams.get("limit"), 1, SEARCH_MAX_LIMIT, SEARCH_DEFAULT_LIMIT);
+
+  return ledger.search.query({
+    q: rawQ,
+    scope: rawScope,
+    threadId,
+    includeArchived,
+    limit,
+    ...(githubToken ? { githubToken } : {}),
+  });
+}
+
+function readWorkspaceMessagesAround(
+  ledger: Ledger,
+  searchParams: URLSearchParams,
+): WorkspaceMessagesAroundResult {
+  const messageId = searchParams.get("messageId") ?? "";
+  if (!messageId || !CARD_ID.test(messageId)) throw new WorkspaceError("bad_request", 400);
+
+  const rawThreadId = searchParams.get("threadId");
+  let threadId: string | null | undefined;
+  if (rawThreadId !== null && rawThreadId !== "") {
+    if (!THREAD_ID.test(rawThreadId)) throw new WorkspaceError("bad_request", 400);
+    threadId = rawThreadId;
+  }
+
+  const limit = parseBoundedIntParam(searchParams.get("limit"), 5, 60, 30);
+  const result = workspaceMessagesAround({
+    ledger,
+    messageId,
+    ...(threadId !== undefined ? { threadId } : {}),
+    limit,
+  });
+  if (!result) throw new WorkspaceError("message_not_found", 404);
+  return result;
+}
+
+function readWorkspaceTelemetry(
+  ledger: Ledger,
+  budgetState: BudgetState,
+  searchParams: URLSearchParams,
+  now: number,
+): WorkspaceTelemetryResponse {
+  const days = parseTelemetryDays(searchParams.get("days"));
+  if (days === null) throw new WorkspaceError("invalid_days", 400);
+  return ledger.telemetry.query({
+    days,
+    budgetState,
+    at: now,
+  });
+}
+
 export async function handleWorkspaceApi(request: Request, url: URL, session: ApiSession, deps: WorkspaceApiDeps): Promise<Response> {
   if (url.pathname === "/app/api/workspace") {
     if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
@@ -345,6 +443,33 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
       }),
       csrf: session.csrf,
     });
+  }
+  if (url.pathname === "/app/api/search") {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    try {
+      return json(readWorkspaceSearch(deps.ledger, url.searchParams, deps.githubToken?.()));
+    } catch (error) {
+      if (error instanceof WorkspaceError) return json({ error: error.code, ...(error.details ?? {}) }, error.status);
+      throw error;
+    }
+  }
+  if (url.pathname === "/app/api/telemetry") {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    try {
+      return json(readWorkspaceTelemetry(deps.ledger, deps.budget(), url.searchParams, deps.now()));
+    } catch (error) {
+      if (error instanceof WorkspaceError) return json({ error: error.code, ...(error.details ?? {}) }, error.status);
+      throw error;
+    }
+  }
+  if (url.pathname === "/app/api/messages/around") {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    try {
+      return json(readWorkspaceMessagesAround(deps.ledger, url.searchParams));
+    } catch (error) {
+      if (error instanceof WorkspaceError) return json({ error: error.code, ...(error.details ?? {}) }, error.status);
+      throw error;
+    }
   }
   if (url.pathname === "/app/api/settings" && request.method === "GET" && deps.settings) return json(await deps.settings());
   if (url.pathname === "/app/api/memory") {

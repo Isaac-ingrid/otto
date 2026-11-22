@@ -31,7 +31,9 @@ import {
 } from "@isaac2ingrid/protocol";
 import type { GitFacts, HelloMessage } from "@isaac2ingrid/protocol";
 import { createBudget } from "./budget.ts";
+import { createTelemetry, extractWorkerLiveTelemetry, updateWorkerTelemetryColumns } from "./telemetry.ts";
 import { createNotes, type NoteRow } from "./notes.ts";
+import { createWorkspaceSearch } from "./search.ts";
 import { assembleBrief, type BriefDecision, type HandoffBrief } from "./handoff.ts";
 import { escapeMarkers, eventWakeText, externalActivityWakeText, queueReturnedWakeText } from "./wake-text.ts";
 import { createMachineStatus, type MachineReliability } from "./machine-status.ts";
@@ -150,9 +152,13 @@ export interface WorkerRow {
   lastOutcome: string | null;
   lastEventAt: number | null;
   lastProgress: string | null;
-  /** Last-reported context usage in percent (settled.usage.contextUsage) — the
+  /** Last-reported context usage in percent (settled.usage.contextUsage or progress.telemetry) — the
    *  resume-vs-new-session input for high context usage (issue #8, connector-pi §11.2). */
   contextPercent: number | null;
+  contextTokens?: number | null;
+  contextWindow?: number | null;
+  compactionCount?: number;
+  lastToolDurationMs?: number | null;
   createdAt: number;
 }
 
@@ -679,6 +685,10 @@ const viewWorker = (r: Record<string, unknown>): WorkerRow => ({
   lastEventAt: (r.lastEventAt as number | null) ?? null,
   lastProgress: (r.lastProgress as string | null) ?? null,
   contextPercent: (r.contextPercent as number | null) ?? null,
+  contextTokens: typeof r.contextTokens === "number" ? r.contextTokens : null,
+  contextWindow: typeof r.contextWindow === "number" ? r.contextWindow : null,
+  compactionCount: typeof r.compactionCount === "number" ? r.compactionCount : 0,
+  lastToolDurationMs: typeof r.lastToolDurationMs === "number" ? r.lastToolDurationMs : null,
   createdAt: r.createdAt as number,
 });
 
@@ -800,6 +810,7 @@ export function createLedger(deps: LedgerDeps) {
   // The notes half of the memory module (issue #18, steward.md §2.3-§2.5): layered
   // knowledge with a two-phase write. Same SQL handle, same transaction wrapper.
   const notes = createNotes({ sql, tx, now });
+  const search = createWorkspaceSearch({ sql, notes, now });
   const machineStatus = createMachineStatus({
     sql,
     tx,
@@ -810,6 +821,7 @@ export function createLedger(deps: LedgerDeps) {
   // The daily budget counter (issue #28, steward.md §12): sh_usage_day / sh_usage_cursor.
   // Same SQL handle, same transaction wrapper.
   const budget = createBudget({ sql, tx, now });
+  const telemetry = createTelemetry({ sql, now });
 
   /** §2.6 (issue #8): records one landed summary version, keeping the last
    *  SUMMARY_VERSIONS_KEPT. The version number is also the cumulative update count;
@@ -3093,6 +3105,7 @@ export function createLedger(deps: LedgerDeps) {
             WHERE workerId = ${workerId}
           `;
         }
+        updateWorkerTelemetryColumns(sql, workerId, extractWorkerLiveTelemetry(event));
         sql`UPDATE worker_ack SET processedUpTo = ${seq} WHERE workerId = ${workerId}`;
         return; // no further state change
       }
@@ -3237,20 +3250,18 @@ export function createLedger(deps: LedgerDeps) {
         }
         if (event.usage) {
           sql`UPDATE sh_worker SET lastProgress = ${JSON.stringify({ usage: event.usage })} WHERE workerId = ${workerId}`;
-          // issue #8: context usage in percent — the resume-vs-new-session input
-          // (connector-pi.md §11.2). percent wins; tokens/contextWindow stands in when
-          // the connector did not compute one.
-          const cu = (event.usage as { contextUsage?: { percent?: unknown; tokens?: unknown; contextWindow?: unknown } }).contextUsage;
-          const percent =
-            typeof cu?.percent === "number" && cu.percent >= 0
-              ? cu.percent
-              : typeof cu?.tokens === "number" && typeof cu.contextWindow === "number" && cu.contextWindow > 0
-                ? (cu.tokens / cu.contextWindow) * 100
-                : null;
-          if (percent !== null) {
-            sql`UPDATE sh_worker SET contextPercent = ${Math.round(percent)} WHERE workerId = ${workerId}`;
-          }
         }
+        telemetry.recordWorkerSettled({
+          workerId,
+          seq,
+          at: ts,
+          threadId: worker.threadId,
+          deviceId: worker.deviceId,
+          repoId: worker.repoId,
+          agent: worker.agent,
+          outcome,
+          event,
+        });
         break;
       }
       case "broken": {
@@ -3838,6 +3849,175 @@ export function createLedger(deps: LedgerDeps) {
         workerCount: workers.listByThread(thread.threadId).length,
       }));
     },
+    /**
+     * Historical message context window around `messageId` (`GET /app/api/messages/around`).
+     * Resolves `user:<msgId>` (owner-authorized inbound) or `<outboundId>` (non-private outbound),
+     * returning up to `limit` chronological visible rows plus `hasOlder` / `hasNewer` flags.
+     */
+    messagesAround(input: { messageId: string; threadId?: string | null; limit?: number }) {
+      type InputSliceRow = { id: string; text: string; threadId: string | null; at: number; channel: string };
+      type MergedItem =
+        | { sortId: string; at: number; kind: "in"; inRow: InputSliceRow }
+        | { sortId: string; at: number; kind: "out"; outRow: Record<string, unknown> };
+
+      const limit = Math.max(5, Math.min(60, Math.trunc(input.limit ?? 30)));
+      const scopeThreadId = input.threadId?.trim() ? input.threadId.trim() : null;
+
+      let anchorItem: MergedItem | null = null;
+      let resolvedThreadId: string | null = null;
+
+      if (input.messageId.startsWith("user:")) {
+        const rawMsgId = input.messageId.slice("user:".length);
+        if (!rawMsgId) return null;
+        const inRow = sql<InputSliceRow>`
+          SELECT i.msgId AS id, i.text, COALESCE(r.routedThreadId, i.threadId) AS threadId, i.receivedAt AS at, i.channel
+          FROM sh_inbound i LEFT JOIN sh_run r ON r.operationId = 'user:' || i.msgId
+          WHERE i.ownerAuthorized = 1 AND i.text IS NOT NULL AND i.msgId = ${rawMsgId}
+          ORDER BY (i.channel = 'local') DESC, i.receivedAt DESC LIMIT 1
+        `[0];
+        if (!inRow) return null;
+        resolvedThreadId = inRow.threadId ?? null;
+        anchorItem = { sortId: `user:${inRow.id}`, at: Number(inRow.at), kind: "in", inRow };
+      } else {
+        const outRow = sql<Record<string, unknown>>`
+          SELECT * FROM sh_outbound
+          WHERE id = ${input.messageId}
+            AND json_valid(payload)
+            AND COALESCE(json_extract(payload, '$.private'), 0) = 0
+          LIMIT 1
+        `[0];
+        if (!outRow) return null;
+        resolvedThreadId = (outRow.threadId as string | null) ?? null;
+        anchorItem = { sortId: String(outRow.id), at: Number(outRow.createdAt), kind: "out", outRow };
+      }
+
+      if (scopeThreadId !== null && resolvedThreadId !== scopeThreadId) {
+        return null;
+      }
+
+      const anchorAt = anchorItem.at;
+      const anchorId = anchorItem.sortId;
+      const fetchCap = limit + 1;
+      const cmpAsc = (a: MergedItem, b: MergedItem): number =>
+        a.at - b.at || (a.sortId < b.sortId ? -1 : a.sortId > b.sortId ? 1 : 0);
+
+      const olderInputs = scopeThreadId !== null
+        ? sql<InputSliceRow>`
+            SELECT i.msgId AS id, i.text, COALESCE(r.routedThreadId, i.threadId) AS threadId, i.receivedAt AS at, i.channel
+            FROM sh_inbound i LEFT JOIN sh_run r ON r.operationId = 'user:' || i.msgId
+            WHERE i.ownerAuthorized = 1 AND i.text IS NOT NULL
+              AND COALESCE(r.routedThreadId, i.threadId) = ${scopeThreadId}
+              AND (i.receivedAt < ${anchorAt} OR (i.receivedAt = ${anchorAt} AND ('user:' || i.msgId) < ${anchorId}))
+            ORDER BY i.receivedAt DESC, ('user:' || i.msgId) DESC LIMIT ${fetchCap}
+          `
+        : sql<InputSliceRow>`
+            SELECT i.msgId AS id, i.text, COALESCE(r.routedThreadId, i.threadId) AS threadId, i.receivedAt AS at, i.channel
+            FROM sh_inbound i LEFT JOIN sh_run r ON r.operationId = 'user:' || i.msgId
+            WHERE i.ownerAuthorized = 1 AND i.text IS NOT NULL
+              AND (i.receivedAt < ${anchorAt} OR (i.receivedAt = ${anchorAt} AND ('user:' || i.msgId) < ${anchorId}))
+            ORDER BY i.receivedAt DESC, ('user:' || i.msgId) DESC LIMIT ${fetchCap}
+          `;
+
+      const olderOutbound = scopeThreadId !== null
+        ? sql<Record<string, unknown>>`
+            SELECT * FROM sh_outbound
+            WHERE threadId = ${scopeThreadId}
+              AND json_valid(payload)
+              AND COALESCE(json_extract(payload, '$.private'), 0) = 0
+              AND (createdAt < ${anchorAt} OR (createdAt = ${anchorAt} AND id < ${anchorId}))
+            ORDER BY createdAt DESC, id DESC LIMIT ${fetchCap}
+          `
+        : sql<Record<string, unknown>>`
+            SELECT * FROM sh_outbound
+            WHERE json_valid(payload)
+              AND COALESCE(json_extract(payload, '$.private'), 0) = 0
+              AND (createdAt < ${anchorAt} OR (createdAt = ${anchorAt} AND id < ${anchorId}))
+            ORDER BY createdAt DESC, id DESC LIMIT ${fetchCap}
+          `;
+
+      const olderMerged: MergedItem[] = [
+        ...olderInputs.map((inRow): MergedItem => ({ sortId: `user:${inRow.id}`, at: Number(inRow.at), kind: "in", inRow })),
+        ...olderOutbound.map((outRow): MergedItem => ({ sortId: String(outRow.id), at: Number(outRow.createdAt), kind: "out", outRow })),
+      ]
+        .sort((a, b) => cmpAsc(b, a))
+        .slice(0, fetchCap);
+
+      const newerInputs = scopeThreadId !== null
+        ? sql<InputSliceRow>`
+            SELECT i.msgId AS id, i.text, COALESCE(r.routedThreadId, i.threadId) AS threadId, i.receivedAt AS at, i.channel
+            FROM sh_inbound i LEFT JOIN sh_run r ON r.operationId = 'user:' || i.msgId
+            WHERE i.ownerAuthorized = 1 AND i.text IS NOT NULL
+              AND COALESCE(r.routedThreadId, i.threadId) = ${scopeThreadId}
+              AND (i.receivedAt > ${anchorAt} OR (i.receivedAt = ${anchorAt} AND ('user:' || i.msgId) > ${anchorId}))
+            ORDER BY i.receivedAt ASC, ('user:' || i.msgId) ASC LIMIT ${fetchCap}
+          `
+        : sql<InputSliceRow>`
+            SELECT i.msgId AS id, i.text, COALESCE(r.routedThreadId, i.threadId) AS threadId, i.receivedAt AS at, i.channel
+            FROM sh_inbound i LEFT JOIN sh_run r ON r.operationId = 'user:' || i.msgId
+            WHERE i.ownerAuthorized = 1 AND i.text IS NOT NULL
+              AND (i.receivedAt > ${anchorAt} OR (i.receivedAt = ${anchorAt} AND ('user:' || i.msgId) > ${anchorId}))
+            ORDER BY i.receivedAt ASC, ('user:' || i.msgId) ASC LIMIT ${fetchCap}
+          `;
+
+      const newerOutbound = scopeThreadId !== null
+        ? sql<Record<string, unknown>>`
+            SELECT * FROM sh_outbound
+            WHERE threadId = ${scopeThreadId}
+              AND json_valid(payload)
+              AND COALESCE(json_extract(payload, '$.private'), 0) = 0
+              AND (createdAt > ${anchorAt} OR (createdAt = ${anchorAt} AND id > ${anchorId}))
+            ORDER BY createdAt ASC, id ASC LIMIT ${fetchCap}
+          `
+        : sql<Record<string, unknown>>`
+            SELECT * FROM sh_outbound
+            WHERE json_valid(payload)
+              AND COALESCE(json_extract(payload, '$.private'), 0) = 0
+              AND (createdAt > ${anchorAt} OR (createdAt = ${anchorAt} AND id > ${anchorId}))
+            ORDER BY createdAt ASC, id ASC LIMIT ${fetchCap}
+          `;
+
+      const newerMerged: MergedItem[] = [
+        ...newerInputs.map((inRow): MergedItem => ({ sortId: `user:${inRow.id}`, at: Number(inRow.at), kind: "in", inRow })),
+        ...newerOutbound.map((outRow): MergedItem => ({ sortId: String(outRow.id), at: Number(outRow.createdAt), kind: "out", outRow })),
+      ]
+        .sort(cmpAsc)
+        .slice(0, fetchCap);
+
+      const sideBudget = limit - 1;
+      const targetBefore = Math.floor(sideBudget / 2);
+      const targetAfter = sideBudget - targetBefore;
+
+      let beforeTake = Math.min(olderMerged.length, targetBefore);
+      let afterTake = Math.min(newerMerged.length, targetAfter);
+      if (beforeTake < targetBefore) {
+        afterTake = Math.min(newerMerged.length, sideBudget - beforeTake);
+      }
+      if (afterTake < targetAfter) {
+        beforeTake = Math.min(olderMerged.length, sideBudget - afterTake);
+      }
+
+      const windowItems = [
+        ...olderMerged.slice(0, beforeTake).reverse(),
+        anchorItem,
+        ...newerMerged.slice(0, afterTake),
+      ];
+
+      const inputs: InputSliceRow[] = [];
+      const outbound: Array<Record<string, unknown>> = [];
+      for (const item of windowItems) {
+        if (item.kind === "in") inputs.push(item.inRow);
+        else outbound.push(item.outRow);
+      }
+
+      return {
+        anchorId,
+        threadId: resolvedThreadId,
+        inputs,
+        outbound,
+        hasOlder: olderMerged.length > beforeTake,
+        hasNewer: newerMerged.length > afterTake,
+      };
+    },
   };
 
   // ---- whole-ledger debug view for tests (read-only) ---------------------------------------------
@@ -3911,8 +4091,8 @@ export function createLedger(deps: LedgerDeps) {
 
   return {
     machines, machineStatus, offlineDispatches, repos, threads, workers, reports, questions, timeline, notifications, outbound,
-    runs, ownerInputs, webRequests, wakes, notes, budget, routines, followups, offers, skillOffers, handoff, proposals, views, applyPendingEvents, recomputeThreadState, debug,
-    prConsent,
+    runs, ownerInputs, webRequests, wakes, notes, budget, telemetry, routines, followups, offers, skillOffers, handoff, proposals, views, applyPendingEvents, recomputeThreadState, debug,
+    prConsent, search,
   };
 }
 

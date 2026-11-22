@@ -285,8 +285,17 @@ export class HistorySubscriptions {
   private sendThreadState(connection: Connection, threadId: string, state: ConnState | null): void {
     const thread = this.deps.ledger.threads.get(threadId);
     if (thread === null) return;
-    const workers = this.sql<{ workerId: string; state: string }>`
-      SELECT workerId, state FROM sh_worker WHERE threadId = ${threadId} ORDER BY workerId`;
+    const workers = this.sql<{
+      workerId: string;
+      state: string;
+      contextPercent: number | null;
+      contextTokens: number | null;
+      contextWindow: number | null;
+      compactionCount: number;
+      lastToolDurationMs: number | null;
+    }>`
+      SELECT workerId, state, contextPercent, contextTokens, contextWindow, compactionCount, lastToolDurationMs
+      FROM sh_worker WHERE threadId = ${threadId} ORDER BY workerId`;
     const openQuestions = this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM sh_question WHERE threadId = ${threadId} AND status = 'open'`[0]!.n;
     const frame = JSON.stringify({ t: "thread_state", threadId, state: thread.state, workers, openQuestions });

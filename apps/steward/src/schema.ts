@@ -1261,4 +1261,266 @@ export const MIGRATIONS: readonly Migration[] = [
       sql`CREATE INDEX IF NOT EXISTS sh_pr_watch_feedback_updated ON sh_pr_watch_feedback (updatedAt DESC)`;
     },
   },
+  {
+    // Web Workspace Global Search (Command-K, Stage 1):
+    // Trigram FTS5 indexes over owner-authorized messages (`sh_message_fts`) and full worker
+    // closing reports (`sh_report_fts`), trigger-synced with idempotent backfill. Private
+    // outbound rows (`json_extract(payload, '$.private') != 0`) are physically excluded at
+    // write/backfill time and re-checked in TypeScript at read time.
+    id: "046_workspace_search_fts",
+    up: (sql) => {
+      sql`CREATE VIRTUAL TABLE IF NOT EXISTS sh_message_fts USING fts5(
+        docKey UNINDEXED,
+        role UNINDEXED,
+        threadId UNINDEXED,
+        ts UNINDEXED,
+        body,
+        tokenize='trigram'
+      )`;
+
+      const inboundCols = new Set(
+        sql<{ name: string }>`SELECT name FROM pragma_table_info('sh_inbound')`.map((r) => r.name),
+      );
+      if (inboundCols.has("ownerAuthorized") && inboundCols.has("text") && inboundCols.has("threadId")) {
+        sql`CREATE TRIGGER IF NOT EXISTS sh_message_fts_in_ai AFTER INSERT ON sh_inbound
+          WHEN new.ownerAuthorized = 1 AND new.text IS NOT NULL AND length(trim(new.text)) > 0
+        BEGIN
+          INSERT INTO sh_message_fts (docKey, role, threadId, ts, body)
+          VALUES ('in:' || new.channel || ':' || new.msgId, 'user', new.threadId, new.receivedAt, new.text);
+        END`;
+
+        sql`CREATE TRIGGER IF NOT EXISTS sh_message_fts_in_au AFTER UPDATE OF text, ownerAuthorized, threadId ON sh_inbound BEGIN
+          DELETE FROM sh_message_fts WHERE docKey = 'in:' || old.channel || ':' || old.msgId;
+          INSERT INTO sh_message_fts (docKey, role, threadId, ts, body)
+          SELECT 'in:' || new.channel || ':' || new.msgId, 'user', new.threadId, new.receivedAt, new.text
+          WHERE new.ownerAuthorized = 1 AND new.text IS NOT NULL AND length(trim(new.text)) > 0;
+        END`;
+
+        sql`CREATE TRIGGER IF NOT EXISTS sh_message_fts_in_ad AFTER DELETE ON sh_inbound BEGIN
+          DELETE FROM sh_message_fts WHERE docKey = 'in:' || old.channel || ':' || old.msgId;
+        END`;
+      }
+
+      sql`CREATE TRIGGER IF NOT EXISTS sh_message_fts_out_ai AFTER INSERT ON sh_outbound
+        WHEN json_valid(new.payload) AND COALESCE(json_extract(new.payload, '$.private'), 0) = 0
+      BEGIN
+        INSERT INTO sh_message_fts (docKey, role, threadId, ts, body)
+        SELECT
+          'out:' || new.id,
+          'assistant',
+          new.threadId,
+          new.createdAt,
+          trim(
+            COALESCE(json_extract(new.payload, '$.text'), '') || char(10) ||
+            COALESCE(json_extract(new.payload, '$.card.text'), '') || char(10) ||
+            COALESCE(json_extract(new.payload, '$.card.title'), '') || char(10) ||
+            COALESCE(json_extract(new.payload, '$.card'), '')
+          )
+        WHERE length(
+          trim(
+            COALESCE(json_extract(new.payload, '$.text'), '') ||
+            COALESCE(json_extract(new.payload, '$.card.text'), '') ||
+            COALESCE(json_extract(new.payload, '$.card.title'), '') ||
+            COALESCE(json_extract(new.payload, '$.card'), '')
+          )
+        ) > 0;
+      END`;
+
+      sql`CREATE TRIGGER IF NOT EXISTS sh_message_fts_out_au AFTER UPDATE OF payload, threadId ON sh_outbound BEGIN
+        DELETE FROM sh_message_fts WHERE docKey = 'out:' || old.id;
+        INSERT INTO sh_message_fts (docKey, role, threadId, ts, body)
+        SELECT
+          'out:' || new.id,
+          'assistant',
+          new.threadId,
+          new.createdAt,
+          trim(
+            COALESCE(json_extract(new.payload, '$.text'), '') || char(10) ||
+            COALESCE(json_extract(new.payload, '$.card.text'), '') || char(10) ||
+            COALESCE(json_extract(new.payload, '$.card.title'), '') || char(10) ||
+            COALESCE(json_extract(new.payload, '$.card'), '')
+          )
+        WHERE json_valid(new.payload)
+          AND COALESCE(json_extract(new.payload, '$.private'), 0) = 0
+          AND length(
+            trim(
+              COALESCE(json_extract(new.payload, '$.text'), '') ||
+              COALESCE(json_extract(new.payload, '$.card.text'), '') ||
+              COALESCE(json_extract(new.payload, '$.card.title'), '') ||
+              COALESCE(json_extract(new.payload, '$.card'), '')
+            )
+          ) > 0;
+      END`;
+
+      sql`CREATE TRIGGER IF NOT EXISTS sh_message_fts_out_ad AFTER DELETE ON sh_outbound BEGIN
+        DELETE FROM sh_message_fts WHERE docKey = 'out:' || old.id;
+      END`;
+
+      if (inboundCols.has("ownerAuthorized") && inboundCols.has("text") && inboundCols.has("threadId")) {
+        sql`INSERT INTO sh_message_fts (docKey, role, threadId, ts, body)
+          SELECT 'in:' || i.channel || ':' || i.msgId, 'user', i.threadId, i.receivedAt, i.text
+          FROM sh_inbound i
+          WHERE i.ownerAuthorized = 1
+            AND i.text IS NOT NULL
+            AND length(trim(i.text)) > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM sh_message_fts f WHERE f.docKey = 'in:' || i.channel || ':' || i.msgId
+            )`;
+      }
+
+      sql`INSERT INTO sh_message_fts (docKey, role, threadId, ts, body)
+        SELECT
+          'out:' || o.id,
+          'assistant',
+          o.threadId,
+          o.createdAt,
+          trim(
+            COALESCE(json_extract(o.payload, '$.text'), '') || char(10) ||
+            COALESCE(json_extract(o.payload, '$.card.text'), '') || char(10) ||
+            COALESCE(json_extract(o.payload, '$.card.title'), '') || char(10) ||
+            COALESCE(json_extract(o.payload, '$.card'), '')
+          )
+        FROM sh_outbound o
+        WHERE json_valid(o.payload)
+          AND COALESCE(json_extract(o.payload, '$.private'), 0) = 0
+          AND length(
+            trim(
+              COALESCE(json_extract(o.payload, '$.text'), '') ||
+              COALESCE(json_extract(o.payload, '$.card.text'), '') ||
+              COALESCE(json_extract(o.payload, '$.card.title'), '') ||
+              COALESCE(json_extract(o.payload, '$.card'), '')
+            )
+          ) > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM sh_message_fts f WHERE f.docKey = 'out:' || o.id
+          )`;
+
+      sql`CREATE VIRTUAL TABLE IF NOT EXISTS sh_report_fts USING fts5(
+        workerId UNINDEXED,
+        seq UNINDEXED,
+        threadId UNINDEXED,
+        ts UNINDEXED,
+        body,
+        tokenize='trigram'
+      )`;
+
+      sql`CREATE TRIGGER IF NOT EXISTS sh_report_fts_ai AFTER INSERT ON sh_report BEGIN
+        INSERT INTO sh_report_fts (workerId, seq, threadId, ts, body)
+        VALUES (
+          new.workerId,
+          new.seq,
+          new.threadId,
+          new.receivedAt,
+          COALESCE(new.summary, '') || char(10) ||
+          COALESCE(new.answer, '') || char(10) ||
+          COALESCE(new.question, '') || char(10) ||
+          COALESCE(new.decisions, '') || char(10) ||
+          COALESCE(new.leftovers, '') || char(10) ||
+          COALESCE(new.changes, '') || char(10) ||
+          COALESCE(new.next, '')
+        );
+      END`;
+
+      sql`CREATE TRIGGER IF NOT EXISTS sh_report_fts_au AFTER UPDATE OF summary, answer, question, decisions, leftovers, changes, next ON sh_report BEGIN
+        DELETE FROM sh_report_fts WHERE workerId = old.workerId AND CAST(seq AS INTEGER) = old.seq;
+        INSERT INTO sh_report_fts (workerId, seq, threadId, ts, body)
+        VALUES (
+          new.workerId,
+          new.seq,
+          new.threadId,
+          new.receivedAt,
+          COALESCE(new.summary, '') || char(10) ||
+          COALESCE(new.answer, '') || char(10) ||
+          COALESCE(new.question, '') || char(10) ||
+          COALESCE(new.decisions, '') || char(10) ||
+          COALESCE(new.leftovers, '') || char(10) ||
+          COALESCE(new.changes, '') || char(10) ||
+          COALESCE(new.next, '')
+        );
+      END`;
+
+      sql`CREATE TRIGGER IF NOT EXISTS sh_report_fts_ad AFTER DELETE ON sh_report BEGIN
+        DELETE FROM sh_report_fts WHERE workerId = old.workerId AND CAST(seq AS INTEGER) = old.seq;
+      END`;
+
+      sql`INSERT INTO sh_report_fts (workerId, seq, threadId, ts, body)
+        SELECT
+          r.workerId,
+          r.seq,
+          r.threadId,
+          r.receivedAt,
+          COALESCE(r.summary, '') || char(10) ||
+          COALESCE(r.answer, '') || char(10) ||
+          COALESCE(r.question, '') || char(10) ||
+          COALESCE(r.decisions, '') || char(10) ||
+          COALESCE(r.leftovers, '') || char(10) ||
+          COALESCE(r.changes, '') || char(10) ||
+          COALESCE(r.next, '')
+        FROM sh_report r
+        WHERE NOT EXISTS (
+          SELECT 1 FROM sh_report_fts f WHERE f.workerId = r.workerId AND CAST(f.seq AS INTEGER) = r.seq
+        )`;
+    },
+  },
+  {
+    // Direction D Stage 1: Fine-grained Steward spend attribution (`sh_usage_event`),
+    // physically isolated Worker execution usage ledger (`sh_worker_usage`, keyed idempotently
+    // on `(workerId, seq)` so replays never double-count and `resume` turns never overwrite
+    // prior usage in `lastProgress`), plus live context-window & compaction columns on `sh_worker`.
+    id: "047_telemetry_and_worker_context",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_usage_event (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        category TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        operationId TEXT,
+        threadId TEXT,
+        repoId TEXT,
+        workerId TEXT,
+        watchId TEXT,
+        provider TEXT,
+        modelId TEXT,
+        costUsd REAL NOT NULL DEFAULT 0,
+        tokens INTEGER NOT NULL DEFAULT 0
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS idx_sh_usage_event_day ON sh_usage_event(day, category)`;
+      sql`CREATE INDEX IF NOT EXISTS idx_sh_usage_event_thread ON sh_usage_event(threadId, at DESC) WHERE threadId IS NOT NULL`;
+      sql`CREATE INDEX IF NOT EXISTS idx_sh_usage_event_repo ON sh_usage_event(repoId, day) WHERE repoId IS NOT NULL`;
+
+      sql`CREATE TABLE IF NOT EXISTS sh_worker_usage (
+        workerId TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        day TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        threadId TEXT NOT NULL,
+        deviceId TEXT NOT NULL,
+        repoId TEXT,
+        agent TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        inputTokens INTEGER NOT NULL DEFAULT 0,
+        outputTokens INTEGER NOT NULL DEFAULT 0,
+        totalTokens INTEGER NOT NULL DEFAULT 0,
+        costUsd REAL,
+        PRIMARY KEY (workerId, seq)
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS idx_sh_worker_usage_day ON sh_worker_usage(day)`;
+      sql`CREATE INDEX IF NOT EXISTS idx_sh_worker_usage_thread ON sh_worker_usage(threadId, at DESC)`;
+      sql`CREATE INDEX IF NOT EXISTS idx_sh_worker_usage_repo ON sh_worker_usage(repoId, day) WHERE repoId IS NOT NULL`;
+
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN contextTokens INTEGER`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN contextWindow INTEGER`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN compactionCount INTEGER NOT NULL DEFAULT 0`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_worker ADD COLUMN lastToolDurationMs INTEGER`;
+      });
+    },
+  },
 ];

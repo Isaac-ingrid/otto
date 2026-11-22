@@ -4,6 +4,7 @@
 // (wake drain, run settle, spend readout) brings it current before it reads.
 import type { UsageState } from "@earendil-works/pi-durable";
 import type { LedgerDeps } from "./ledger.ts";
+import { insertUsageEvent, pruneOldTelemetryRows, type SpendAttribution } from "./telemetry.ts";
 
 /** steward.md §12: unset deploy config gets this cap — far above a normal day's spend.
  *  docs/deploy.md: a moderately active day is single-digit cents, a heavy month a few dollars. */
@@ -59,6 +60,14 @@ export interface BudgetState extends UsageTotals {
 }
 
 export function createBudget({ sql, tx, now = Date.now }: LedgerDeps) {
+  let lastPrunedDay = "";
+  const maybePrune = (at: number): void => {
+    const day = budgetDay(at);
+    if (day === lastPrunedDay) return;
+    lastPrunedDay = day;
+    pruneOldTelemetryRows(sql, at);
+  };
+
   return {
     /**
      * Folds pi's *cumulative* session usage into today's counter; whatever grew since the
@@ -73,22 +82,26 @@ export function createBudget({ sql, tx, now = Date.now }: LedgerDeps) {
      * carry weeks of pi.usage history, and charging it to upgrade day would trip the cap
      * with a lie. `resetCursorForTests` re-seeds from zero for the same invariant in tests.
      */
-    observe(total: UsageTotals, at = now()): void {
+    observe(total: UsageTotals, at = now(), attribution?: SpendAttribution): void {
       tx(() => {
         const prev = sql<UsageTotals>`SELECT costUsd, tokens FROM sh_usage_cursor WHERE id = 1`[0];
         const costUsd = Math.max(prev?.costUsd ?? 0, total.costUsd);
         const tokens = Math.max(prev?.tokens ?? 0, total.tokens);
         const costDelta = costUsd - (prev?.costUsd ?? costUsd);
-        const tokenDelta = tokens - (prev?.tokens ?? tokens);
+        const tokenDelta = Math.max(0, tokens - (prev?.tokens ?? tokens));
         sql`
           INSERT INTO sh_usage_cursor (id, costUsd, tokens, updatedAt) VALUES (1, ${costUsd}, ${tokens}, ${at})
           ON CONFLICT (id) DO UPDATE SET costUsd = excluded.costUsd, tokens = excluded.tokens, updatedAt = excluded.updatedAt
         `;
         if (!(costDelta > 0) && !(tokenDelta > 0)) return;
+        maybePrune(at);
         sql`
-          INSERT INTO sh_usage_day (day, costUsd, tokens, updatedAt) VALUES (${budgetDay(at)}, ${costDelta}, ${Math.max(0, tokenDelta)}, ${at})
+          INSERT INTO sh_usage_day (day, costUsd, tokens, updatedAt) VALUES (${budgetDay(at)}, ${costDelta}, ${tokenDelta}, ${at})
           ON CONFLICT (day) DO UPDATE SET costUsd = costUsd + excluded.costUsd, tokens = tokens + excluded.tokens, updatedAt = excluded.updatedAt
         `;
+        if (attribution) {
+          insertUsageEvent(sql, { costUsd: costDelta, tokens: tokenDelta }, at, attribution);
+        }
       });
     },
 
@@ -118,15 +131,21 @@ export function createBudget({ sql, tx, now = Date.now }: LedgerDeps) {
       `;
     },
 
-    /** Attributes spend to the day containing `at` directly — no cursor movement (tests). */
-    add(delta: UsageTotals, at: number): void {
+    /** Attributes spend to the day containing `at` directly — no cursor movement (background LLM calls & tests). */
+    add(delta: UsageTotals, at: number, attribution?: SpendAttribution): void {
       if (!(delta.costUsd > 0) && !(delta.tokens > 0)) return;
-      sql`
-        INSERT INTO sh_usage_day (day, costUsd, tokens, updatedAt)
-        VALUES (${budgetDay(at)}, ${delta.costUsd}, ${delta.tokens}, ${at})
-        ON CONFLICT (day) DO UPDATE SET
-          costUsd = costUsd + excluded.costUsd, tokens = tokens + excluded.tokens, updatedAt = excluded.updatedAt
-      `;
+      tx(() => {
+        maybePrune(at);
+        sql`
+          INSERT INTO sh_usage_day (day, costUsd, tokens, updatedAt)
+          VALUES (${budgetDay(at)}, ${delta.costUsd}, ${delta.tokens}, ${at})
+          ON CONFLICT (day) DO UPDATE SET
+            costUsd = costUsd + excluded.costUsd, tokens = tokens + excluded.tokens, updatedAt = excluded.updatedAt
+        `;
+        if (attribution) {
+          insertUsageEvent(sql, delta, at, attribution);
+        }
+      });
     },
   };
 }

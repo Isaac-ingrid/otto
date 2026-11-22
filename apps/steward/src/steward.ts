@@ -51,6 +51,7 @@ import {
   type PrTarget,
 } from "./pr-evidence.ts";
 import { diagnosePrFailureWithLlm, diagnosePrFeedbackWithLlm } from "./pr-failure-diagnoser.ts";
+import type { SpendAttribution } from "./telemetry.ts";
 import {
   formatUsd,
   renderOverBudgetNote,
@@ -463,10 +464,10 @@ export class Steward extends Agent<Env> {
    * counter is brought current exactly where a decision reads it: the wake drain (before the
    * gate), run settlement (before the over-budget note), and the spend readout.
    */
-  private syncUsage(): Promise<void> {
+  private syncUsage(attribution?: SpendAttribution): Promise<void> {
     const run = this.usageSyncChain.then(async () => {
       const pi = await this.piHarness.pi();
-      this.ledger.budget.observe(sumUsage(await pi.usage(BACKGROUND_CONTEXT)));
+      this.ledger.budget.observe(sumUsage(await pi.usage(BACKGROUND_CONTEXT)), Date.now(), attribution);
     });
     this.usageSyncChain = run.catch(() => {});
     return run;
@@ -474,9 +475,9 @@ export class Steward extends Agent<Env> {
 
   /** syncUsage for decision points: a failed read must not take the decision down with it —
    *  the persisted counter is stale-but-honest and the failure is on the channel log. */
-  private async syncUsageQuietly(reason = "budget_sync_failed"): Promise<void> {
+  private async syncUsageQuietly(reason = "budget_sync_failed", attribution?: SpendAttribution): Promise<void> {
     try {
-      await this.syncUsage();
+      await this.syncUsage(attribution);
     } catch (err) {
       this.logChannel(reason, errorText(err));
     }
@@ -866,6 +867,7 @@ export class Steward extends Agent<Env> {
         stopThread: (input) => this.stopThreadByOwner(input),
         archiveThread: (input) => this.archiveThread(input),
         diagnosePrWatch: (input, signal) => this.diagnosePrWatchForWorkspace(input, signal),
+        githubToken: () => this.env.OTTO_GITHUB_READ_TOKEN,
         controlPlane: {
           tx: (fn) => this.ctx.storage.transactionSync(fn),
           listSdkSchedules: async () => {
@@ -3276,7 +3278,13 @@ export class Steward extends Agent<Env> {
             if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
             return scripted;
           }
-          return this.completeBackgroundText({ systemPrompt, userPrompt, signal: sig, maxTokens });
+          return this.completeBackgroundText({
+            systemPrompt,
+            userPrompt,
+            signal: sig,
+            maxTokens,
+            telemetry: this.ledger.telemetry.resolvePrAttribution(prUrl, "pr_ci"),
+          });
         },
         audit: (reason, detail) => this.logChannel(reason, detail),
       },
@@ -3306,7 +3314,13 @@ export class Steward extends Agent<Env> {
             if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
             return scripted;
           }
-          return this.completeBackgroundText({ systemPrompt, userPrompt, signal: sig, maxTokens });
+          return this.completeBackgroundText({
+            systemPrompt,
+            userPrompt,
+            signal: sig,
+            maxTokens,
+            telemetry: this.ledger.telemetry.resolvePrAttribution(prUrl, "pr_review"),
+          });
         },
         audit: (reason, detail) => this.logChannel(reason, detail),
       },
@@ -3407,6 +3421,7 @@ export class Steward extends Agent<Env> {
     userPrompt: string;
     signal: AbortSignal;
     maxTokens?: number;
+    telemetry?: SpendAttribution;
   }): Promise<string> {
     await this.ensureRootModel();
     const sealed = await this.modelConfig();
@@ -3427,7 +3442,12 @@ export class Steward extends Agent<Env> {
     );
     const costUsd = Math.max(0, reply.usage?.cost?.total ?? 0);
     const tokens = Math.max(0, reply.usage?.totalTokens ?? 0);
-    if (costUsd > 0 || tokens > 0) this.ledger.budget.add({ costUsd, tokens }, Date.now());
+    if (costUsd > 0 || tokens > 0) {
+      const attribution = input.telemetry
+        ? { ...input.telemetry, provider: config.provider, modelId: config.modelId }
+        : undefined;
+      this.ledger.budget.add({ costUsd, tokens }, Date.now(), attribution);
+    }
     if (reply.stopReason === "error" || reply.stopReason === "aborted") {
       const rawMsg = typeof reply.errorMessage === "string" ? reply.errorMessage.replace(/\s+/g, " ").trim().slice(0, 180) : reply.stopReason;
       this.logChannel("background_llm_failed", `${config.provider}/${config.modelId}:${reply.stopReason}:${rawMsg}`);
@@ -3441,6 +3461,7 @@ export class Steward extends Agent<Env> {
 
   async distillWorker(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult> {
     await this.syncUsageQuietly();
+    const targetWorker = this.ledger.workers.get(input.workerId);
     return distillWorkerCheckpoint(
       {
         ledger: this.ledger,
@@ -3448,7 +3469,18 @@ export class Steward extends Agent<Env> {
         budget: () => this.budgetState(),
         readCheckpoint: (workerId, sig) => this.connectorProto.checkpointWorker(workerId, sig),
         completeText: ({ systemPrompt, userPrompt, signal: sig }) =>
-          this.completeBackgroundText({ systemPrompt, userPrompt, signal: sig }),
+          this.completeBackgroundText({
+            systemPrompt,
+            userPrompt,
+            signal: sig,
+            telemetry: {
+              category: "memory_skill",
+              kind: "checkpoint_distill",
+              threadId: targetWorker?.threadId ?? null,
+              repoId: targetWorker?.repoId ?? null,
+              workerId: input.workerId,
+            },
+          }),
         audit: (reason, detail) => this.logChannel(reason, detail),
       },
       { ...input, signal },
@@ -3481,7 +3513,19 @@ export class Steward extends Agent<Env> {
             if (scripted === undefined) throw new WorkspaceError("distill_failed", 502);
             return scripted;
           }
-          return this.completeBackgroundText({ systemPrompt, userPrompt, signal });
+          const targetWorker = this.ledger.workers.get(workerId);
+          return this.completeBackgroundText({
+            systemPrompt,
+            userPrompt,
+            signal,
+            telemetry: {
+              category: "memory_skill",
+              kind: "skill_triage",
+              threadId: targetWorker?.threadId ?? null,
+              repoId: targetWorker?.repoId ?? null,
+              workerId,
+            },
+          });
         },
         audit: (reason, detail) => this.logChannel(reason, detail),
       },
@@ -3934,7 +3978,8 @@ export class Steward extends Agent<Env> {
         if (modelErrorDetail) this.logChannel("model_call_error", modelErrorDetail.slice(0, 300));
         // Issue #28: bring the counter current before the over-budget note reads it — the
         // run that just settled is the spend that may tip today over the cap.
-        await this.syncUsageQuietly();
+        const freshRun = this.ledger.runs.get(run.operationId) ?? run;
+        await this.syncUsageQuietly("budget_sync_failed", this.ledger.telemetry.resolveRunAttribution(freshRun));
         const failedNotice = run.kind === "user" && result.status !== "done" ? await this.noticeForFailedRun(modelErrorDetail, result.status === "unanswered" ? result.reason : result.status) : undefined;
         this.settleRun(run, result, failedNotice);
       }
@@ -4919,6 +4964,7 @@ export class Steward extends Agent<Env> {
   async resetBudgetForTest(): Promise<void> {
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM sh_usage_event");
       this.ctx.storage.sql.exec("DELETE FROM sh_usage_day");
       this.ctx.storage.sql.exec("DELETE FROM sh_usage_cursor");
       this.ctx.storage.sql.exec(`INSERT INTO sh_usage_cursor (id, costUsd, tokens, updatedAt) VALUES (1, 0, 0, ${now})`);
@@ -5055,6 +5101,7 @@ export class Steward extends Agent<Env> {
     // Issue #28: pi's usage tables are gone, so the next conversation starts from zero — the
     // counters must follow, and the cursor row must EXIST at zero: an absent row would make
     // the next sync treat the first run's spend as a never-seen baseline and swallow it.
+    this.ctx.storage.sql.exec("DELETE FROM sh_usage_event");
     this.ctx.storage.sql.exec("DELETE FROM sh_usage_day");
     this.ctx.storage.sql.exec("DELETE FROM sh_usage_cursor");
     this.ctx.storage.sql.exec(
