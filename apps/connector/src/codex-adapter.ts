@@ -13,6 +13,7 @@ import type {
   SessionUsage,
   StartSpec,
   WorkerHandle,
+  WorkerLiveTelemetry,
 } from "./agent.ts";
 import {
   AgentModelObservationSchema,
@@ -133,6 +134,10 @@ interface WorkerRuntime {
   resultSeen: boolean;
   turn: number;
   window: RunWindow & { open: boolean };
+  itemStartedAt: Map<string, number>;
+  lastToolMs: number | null;
+  lastContextTokens: number | null;
+  lastContextWindow: number | null;
   pendingText: string;
   buffered: RawAdapterEvent[] | null;
 }
@@ -177,6 +182,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly listeners: ((e: RawAdapterEvent) => void)[] = [];
   private readonly lastSpecs = new Map<string, StartSpec>();
   private readonly knownSessionIds = new Map<string, string>();
+  private readonly compactionCounts = new Map<string, number>();
   private launch?: LaunchResolution;
 
   constructor(options: CodexAdapterOptions) {
@@ -335,6 +341,10 @@ export class CodexAdapter implements AgentAdapter {
       resultSeen: false,
       turn: 0,
       window: { open: false, aborted: false },
+      itemStartedAt: new Map(),
+      lastToolMs: null,
+      lastContextTokens: null,
+      lastContextWindow: null,
       pendingText: "",
       buffered: [],
     };
@@ -580,6 +590,10 @@ export class CodexAdapter implements AgentAdapter {
         const item = record.item as Record<string, unknown> | undefined;
         if (!item) return;
         const itemType = typeof item.type === "string" ? item.type : "";
+        if (typeof item.id === "string" && item.id.length > 0) {
+          runtime.itemStartedAt.set(item.id, Date.now());
+        }
+        const telemetry = this.snapshotTelemetry(runtime);
         if (itemType === "command_execution") {
           this.emit({
             type: "progress",
@@ -588,6 +602,7 @@ export class CodexAdapter implements AgentAdapter {
             tool: "Bash",
             target: typeof item.command === "string" ? item.command.slice(0, 80) : undefined,
             turn: Math.max(1, runtime.turn),
+            ...(telemetry ? { telemetry } : {}),
           });
         } else if (itemType === "mcp_tool_call") {
           const toolName = typeof item.tool === "string" ? item.tool : "mcp";
@@ -603,6 +618,7 @@ export class CodexAdapter implements AgentAdapter {
             tool: displayTool,
             target: extractTarget(item.arguments),
             turn: Math.max(1, runtime.turn),
+            ...(telemetry ? { telemetry } : {}),
           });
         }
         return;
@@ -612,11 +628,23 @@ export class CodexAdapter implements AgentAdapter {
         if (!item) return;
         const itemType = typeof item.type === "string" ? item.type : "";
         const itemId = typeof item.id === "string" && item.id.length > 0 ? item.id : `codex-item-${runtime.turn}-${runtime.liveEntries.length}`;
+        const startedAt = typeof item.id === "string" ? runtime.itemStartedAt.get(item.id) : undefined;
+        if (startedAt !== undefined && typeof item.id === "string") {
+          runtime.itemStartedAt.delete(item.id);
+          runtime.lastToolMs = Math.max(0, Date.now() - startedAt);
+        }
         if (itemType === "agent_message" && typeof item.text === "string") {
           runtime.pendingText = runtime.pendingText ? `${runtime.pendingText}\n${item.text}` : item.text;
           runtime.liveEntries.push({ id: itemId, role: "assistant", text: item.text });
           runtime.window.lastAssistant = { stopReason: "stop", text: runtime.pendingText };
-          this.emit({ type: "progress", workerId: runtime.workerId, phase: "thinking", turn: Math.max(1, runtime.turn) });
+          const telemetry = this.snapshotTelemetry(runtime);
+          this.emit({
+            type: "progress",
+            workerId: runtime.workerId,
+            phase: "thinking",
+            turn: Math.max(1, runtime.turn),
+            ...(telemetry ? { telemetry } : {}),
+          });
           return;
         }
         if (itemType === "command_execution") {
@@ -729,6 +757,41 @@ export class CodexAdapter implements AgentAdapter {
         void this.settle(runtime, record);
         return;
       }
+      case "context_compacted":
+      case "compaction": {
+        const nextCount = (this.compactionCounts.get(runtime.workerId) ?? 0) + 1;
+        this.compactionCounts.set(runtime.workerId, nextCount);
+        const telemetry = this.snapshotTelemetry(runtime);
+        this.emit({
+          type: "progress",
+          workerId: runtime.workerId,
+          phase: "compacting",
+          turn: Math.max(1, runtime.turn),
+          ...(telemetry ? { telemetry } : {}),
+        });
+        return;
+      }
+      case "token_count": {
+        const info = typeof record.info === "object" && record.info !== null ? (record.info as Record<string, unknown>) : record;
+        const totalObj = typeof info.last_token_usage === "object" && info.last_token_usage !== null
+          ? (info.last_token_usage as Record<string, unknown>)
+          : info;
+        const tok = typeof totalObj.total_tokens === "number" ? totalObj.total_tokens : typeof totalObj.input_tokens === "number" ? totalObj.input_tokens : null;
+        const win = typeof info.model_context_window === "number" && info.model_context_window > 0 ? info.model_context_window : null;
+        if (tok !== null && tok >= 0) runtime.lastContextTokens = Math.round(tok);
+        if (win !== null) runtime.lastContextWindow = Math.round(win);
+        const telemetry = this.snapshotTelemetry(runtime);
+        if (telemetry) {
+          this.emit({
+            type: "progress",
+            workerId: runtime.workerId,
+            phase: "thinking",
+            turn: Math.max(1, runtime.turn),
+            telemetry,
+          });
+        }
+        return;
+      }
       default:
         return;
     }
@@ -767,7 +830,24 @@ export class CodexAdapter implements AgentAdapter {
       const input = rawUsage.input_tokens;
       const output = typeof rawUsage.output_tokens === "number" ? rawUsage.output_tokens : 0;
       usage.tokens = { input, output, totalTokens: input + output };
+      const cached = typeof rawUsage.cached_input_tokens === "number" ? rawUsage.cached_input_tokens : 0;
+      if (runtime.lastContextTokens === null && input + cached + output > 0) {
+        runtime.lastContextTokens = Math.round(input + cached + output);
+      }
     }
+    const rawWindow = typeof result.model_context_window === "number" && result.model_context_window > 0
+      ? Math.round(result.model_context_window)
+      : runtime.lastContextWindow;
+    if (runtime.lastContextTokens !== null) {
+      usage.contextUsage = {
+        tokens: runtime.lastContextTokens,
+        ...(rawWindow !== null ? { contextWindow: rawWindow } : {}),
+        percent: rawWindow !== null && rawWindow > 0 ? Math.round((runtime.lastContextTokens / rawWindow) * 100) : null,
+      };
+    }
+    const telemetry = this.snapshotTelemetry(runtime);
+    runtime.itemStartedAt.clear();
+    runtime.lastToolMs = null;
 
     this.emit({
       type: "settled",
@@ -777,8 +857,24 @@ export class CodexAdapter implements AgentAdapter {
       errorMessage: adjudicated.errorMessage,
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
-      ...(usage.tokens ? { usage } : {}),
+      ...(usage.tokens || usage.contextUsage ? { usage } : {}),
+      ...(telemetry ? { telemetry } : {}),
     });
+  }
+
+  private snapshotTelemetry(runtime: WorkerRuntime): WorkerLiveTelemetry | undefined {
+    const out: WorkerLiveTelemetry = {};
+    if (runtime.lastContextTokens !== null) {
+      out.contextTokens = runtime.lastContextTokens;
+      if (runtime.lastContextWindow !== null && runtime.lastContextWindow > 0) {
+        out.contextWindow = runtime.lastContextWindow;
+        out.contextPercent = Math.round((runtime.lastContextTokens / runtime.lastContextWindow) * 100);
+      }
+    }
+    const compactions = this.compactionCounts.get(runtime.workerId) ?? 0;
+    if (compactions > 0) out.compactionCount = compactions;
+    if (runtime.lastToolMs !== null) out.lastToolMs = runtime.lastToolMs;
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
   private onExit(runtime: WorkerRuntime, info: { code: number | null; signal: NodeJS.Signals | null }): void {

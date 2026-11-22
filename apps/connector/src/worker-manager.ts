@@ -6,7 +6,7 @@
 // resume with the fixed prompt, 30 s backoff, and the ≤2/hour budget (§9.2) — and the stall
 // watchdog (issue #13, ADR-0001): silent + cold-CPU workers get one in-place respawn, then
 // settle as error:stall.
-import type { AgentAdapter, Delivery, ErrorClass, RawAdapterEvent, StartSpec, WorkerHandle, WorkerMode } from "./agent.ts";
+import type { AgentAdapter, Delivery, ErrorClass, RawAdapterEvent, StartSpec, WorkerHandle, WorkerLiveTelemetry, WorkerMode } from "./agent.ts";
 import { PartialInterruptError } from "./agent.ts";
 import { classifyError } from "./adjudication.ts";
 import { killOrphans, listDescendants, type ProcRef } from "./descendants.ts";
@@ -237,6 +237,7 @@ export class WorkerManager {
   private readonly emit?: (workerId: string, fields: Record<string, unknown>) => void;
   private readonly now: () => number;
   private readonly throttles = new Map<string, ProgressThrottle>();
+  private readonly pendingTelemetry = new Map<string, WorkerLiveTelemetry>();
   /** workerId → run context needed when adapter events arrive. */
   private readonly active = new Map<string, { repoId: string; worktree?: string; branch?: string; base?: string }>();
 
@@ -2323,14 +2324,23 @@ export class WorkerManager {
     if (this.crashed) return;
     switch (event.type) {
       case "progress": {
+        if (event.telemetry) {
+          this.pendingTelemetry.set(
+            event.workerId,
+            mergeWorkerTelemetry(this.pendingTelemetry.get(event.workerId), event.telemetry),
+          );
+        }
         const throttle = this.throttles.get(event.workerId) ?? new ProgressThrottle();
         this.throttles.set(event.workerId, throttle);
         if (!throttle.decide(this.now(), event.phase, event.tool)) return;
+        const telemetry = this.pendingTelemetry.get(event.workerId);
+        this.pendingTelemetry.delete(event.workerId);
         await this.emitEvent(event.workerId, "progress", {
           phase: event.phase,
           tool: event.tool,
           target: event.target,
           turn: event.turn,
+          ...(telemetry ? { telemetry } : {}),
         });
         return;
       }
@@ -2349,12 +2359,19 @@ export class WorkerManager {
               : undefined;
           await this.emitEvent(event.workerId, "report", { ...event.report, ...(git ? { git } : {}) });
         }
+        const mergedTelemetry = mergeWorkerTelemetry(
+          this.pendingTelemetry.get(event.workerId),
+          event.telemetry,
+        );
+        this.pendingTelemetry.delete(event.workerId);
         await this.emitEvent(event.workerId, "settled", {
           outcome: event.outcome,
           errorClass: event.errorClass,
           errorMessage: event.errorMessage,
           lastText: event.lastText,
           usage: event.usage,
+          ...(event.turnUsage ? { turnUsage: event.turnUsage } : {}),
+          ...(Object.keys(mergedTelemetry).length > 0 ? { telemetry: mergedTelemetry } : {}),
         });
         if (event.outcome === "error" && event.errorClass === "auth") {
           // §9.2: auth never auto-resumes — the user must fix credentials on the machine, so
@@ -2390,6 +2407,7 @@ export class WorkerManager {
         await this.emitEvent(event.workerId, "process_exit", { code: event.code, signal: event.signal });
         releaseLock(this.stateDir, event.workerId);
         this.throttles.delete(event.workerId);
+        this.pendingTelemetry.delete(event.workerId);
         this.active.delete(event.workerId);
         this.cancelIdleReclaim(event.workerId); // the process is gone; nothing to reclaim
         // Deliberately NOT forgetting watchdog strikes here: an expected exit is often the
@@ -2611,4 +2629,22 @@ function parseStartWorkerArgs(args: Record<string, unknown>): StartWorkerArgs {
     parsed.modelSource = args.modelSource as StartWorkerArgs['modelSource'];
   }
   return parsed;
+}
+
+function mergeWorkerTelemetry(
+  prev: WorkerLiveTelemetry | undefined,
+  next: WorkerLiveTelemetry | undefined,
+): WorkerLiveTelemetry {
+  if (!prev && !next) return {};
+  if (!prev) return { ...next };
+  if (!next) return { ...prev };
+  const out: WorkerLiveTelemetry = { ...prev };
+  if (next.contextTokens !== undefined && next.contextTokens !== null) out.contextTokens = next.contextTokens;
+  if (next.contextWindow !== undefined && next.contextWindow !== null) out.contextWindow = next.contextWindow;
+  if (next.contextPercent !== undefined && next.contextPercent !== null) out.contextPercent = next.contextPercent;
+  if (typeof next.compactionCount === "number") {
+    out.compactionCount = Math.max(prev.compactionCount ?? 0, next.compactionCount);
+  }
+  if (next.lastToolMs !== undefined && next.lastToolMs !== null) out.lastToolMs = next.lastToolMs;
+  return out;
 }

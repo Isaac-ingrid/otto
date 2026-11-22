@@ -137,6 +137,81 @@ export interface SessionUsage {
   contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null };
 }
 
+export interface WorkerLiveTelemetry {
+  contextTokens?: number | null;
+  contextWindow?: number | null;
+  contextPercent?: number | null;
+  compactionCount?: number;
+  lastToolMs?: number | null;
+}
+
+export interface CumulativeUsageCursor {
+  input: number;
+  output: number;
+  totalTokens: number;
+  cost: number | null;
+}
+
+/**
+ * Computes the single-turn incremental `turnUsage` from a cumulative session-stats snapshot
+ * (`pi` `get_session_stats`, `antigravity` cumulative session usage) so multi-turn `send`
+ * continuations on the same `workerId` never double-count earlier turns at settlement.
+ */
+export function diffCumulativeSessionUsage(
+  prev: CumulativeUsageCursor | undefined,
+  current: SessionUsage | undefined,
+): { turnUsage?: SessionUsage; nextCursor: CumulativeUsageCursor | undefined } {
+  if (!current) return { nextCursor: prev };
+  const rawInput = typeof current.tokens?.input === "number" && Number.isFinite(current.tokens.input) && current.tokens.input >= 0
+    ? Math.round(current.tokens.input)
+    : 0;
+  const rawOutput = typeof current.tokens?.output === "number" && Number.isFinite(current.tokens.output) && current.tokens.output >= 0
+    ? Math.round(current.tokens.output)
+    : 0;
+  const rawTotal = typeof current.tokens?.totalTokens === "number" && Number.isFinite(current.tokens.totalTokens) && current.tokens.totalTokens >= 0
+    ? Math.max(Math.round(current.tokens.totalTokens), rawInput + rawOutput)
+    : rawInput + rawOutput;
+  const rawCost = typeof current.cost === "number" && Number.isFinite(current.cost) && current.cost >= 0
+    ? current.cost
+    : null;
+
+  if (rawTotal === 0 && rawCost === null && !current.contextUsage) {
+    return { nextCursor: prev };
+  }
+
+  const nextInput = Math.max(prev?.input ?? 0, rawInput);
+  const nextOutput = Math.max(prev?.output ?? 0, rawOutput);
+  const nextTotal = Math.max(prev?.totalTokens ?? 0, rawTotal);
+  const nextCost = rawCost !== null
+    ? Math.max(prev?.cost ?? 0, rawCost)
+    : (prev?.cost ?? null);
+
+  const deltaInput = Math.max(0, nextInput - (prev?.input ?? 0));
+  const deltaOutput = Math.max(0, nextOutput - (prev?.output ?? 0));
+  const deltaTotal = Math.max(deltaInput + deltaOutput, nextTotal - (prev?.totalTokens ?? 0));
+  const deltaCost = nextCost !== null
+    ? Math.max(0, Math.round((nextCost - (prev?.cost ?? 0)) * 1e8) / 1e8)
+    : undefined;
+
+  const turnUsage: SessionUsage = {
+    ...(deltaTotal > 0 || deltaInput > 0 || deltaOutput > 0
+      ? { tokens: { input: deltaInput, output: deltaOutput, totalTokens: deltaTotal } }
+      : {}),
+    ...(deltaCost !== undefined ? { cost: deltaCost } : {}),
+    ...(current.contextUsage ? { contextUsage: current.contextUsage } : {}),
+  };
+
+  return {
+    ...(Object.keys(turnUsage).length > 0 ? { turnUsage } : {}),
+    nextCursor: {
+      input: nextInput,
+      output: nextOutput,
+      totalTokens: nextTotal,
+      cost: nextCost,
+    },
+  };
+}
+
 export type ErrorClass = "auth" | "transient" | "context" | "stall" | "unknown";
 
 export type SettledOutcome = "reported" | "aborted" | "error" | "unreported";
@@ -146,11 +221,12 @@ export type RawAdapterEvent =
   | {
       type: "progress";
       workerId: string;
-      phase: "thinking" | "tool";
+      phase: "thinking" | "tool" | "compacting";
       tool?: string;
       /** First 80 chars of a path or command — never file contents or command output. */
       target?: string;
       turn: number;
+      telemetry?: WorkerLiveTelemetry;
     }
   | {
       type: "proposal";
@@ -168,6 +244,9 @@ export type RawAdapterEvent =
       lastText?: string;
       report?: ReportPayload;
       usage?: SessionUsage;
+      /** Incremental single-turn usage when `usage` is session-cumulative (`pi`, `antigravity`). */
+      turnUsage?: SessionUsage;
+      telemetry?: WorkerLiveTelemetry;
     }
   | {
       type: "process_exit";

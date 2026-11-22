@@ -5,6 +5,7 @@
 import type {
   AgentAdapter,
   AgentCapabilities,
+  CumulativeUsageCursor,
   Delivery,
   InterruptResult,
   RawAdapterEvent,
@@ -12,8 +13,9 @@ import type {
   SessionUsage,
   StartSpec,
   WorkerHandle,
+  WorkerLiveTelemetry,
 } from "./agent.ts";
-import { AdapterError, PartialInterruptError } from "./agent.ts";
+import { AdapterError, diffCumulativeSessionUsage, PartialInterruptError } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
 import { normalizeSessionEntries } from "./session-history.ts";
 import { observeSession } from "./session-observation.ts";
@@ -92,6 +94,12 @@ interface WorkerRuntime {
   stopping: boolean;
   turn: number;
   window: RunWindow & { open: boolean };
+  compactionCount: number;
+  activeTools: Map<string, number>;
+  lastToolMs: number | null;
+  lastStatsProbeAt: number;
+  latestContextUsage?: SessionUsage["contextUsage"];
+  settledCursor?: CumulativeUsageCursor;
   /**
    * Events are buffered from spawn until start() resolves: a fast agent can begin streaming
    * (agent_start …) before the caller has emitted its `started` event, which must come first
@@ -205,6 +213,10 @@ export class PiAdapter implements AgentAdapter {
       stopping: false,
       turn: 0,
       window: { open: false, aborted: false },
+      compactionCount: 0,
+      activeTools: new Map(),
+      lastToolMs: null,
+      lastStatsProbeAt: 0,
       buffered: [],
     };
     this.runtimes.set(spec.workerId, runtime);
@@ -435,16 +447,23 @@ export class PiAdapter implements AgentAdapter {
       }
       case "turn_start": {
         runtime.turn += 1;
+        if (Date.now() - runtime.lastStatsProbeAt >= 15_000) {
+          void this.probeLiveStats(runtime, false);
+        }
+        const telemetry = this.snapshotTelemetry(runtime);
         this.emit({
           type: "progress",
           workerId: runtime.workerId,
           phase: "thinking",
           turn: runtime.turn,
+          ...(telemetry ? { telemetry } : {}),
         });
         return;
       }
       case "tool_execution_start": {
         const tool = String(record.toolName ?? "unknown");
+        const callKey = String(record.toolCallId ?? record.id ?? tool);
+        runtime.activeTools.set(callKey, Date.now());
         if (tool === "report") {
           const report = normalizeReport(record.args);
           if (report) runtime.window.report = report;
@@ -458,6 +477,7 @@ export class PiAdapter implements AgentAdapter {
             });
           }
         }
+        const telemetry = this.snapshotTelemetry(runtime);
         this.emit({
           type: "progress",
           workerId: runtime.workerId,
@@ -465,6 +485,44 @@ export class PiAdapter implements AgentAdapter {
           tool,
           target: extractTarget(record.args),
           turn: runtime.turn,
+          ...(telemetry ? { telemetry } : {}),
+        });
+        return;
+      }
+      case "tool_execution_end": {
+        const tool = String(record.toolName ?? "unknown");
+        const callKey = String(record.toolCallId ?? record.id ?? tool);
+        const startedAt = runtime.activeTools.get(callKey);
+        if (startedAt !== undefined) {
+          runtime.activeTools.delete(callKey);
+          runtime.lastToolMs = Math.max(0, Date.now() - startedAt);
+        }
+        return;
+      }
+      case "auto_compaction_start":
+      case "compaction_start": {
+        const telemetry = this.snapshotTelemetry(runtime);
+        this.emit({
+          type: "progress",
+          workerId: runtime.workerId,
+          phase: "compacting",
+          turn: Math.max(1, runtime.turn),
+          ...(telemetry ? { telemetry } : {}),
+        });
+        return;
+      }
+      case "auto_compaction_end":
+      case "compaction_end":
+      case "compaction": {
+        runtime.compactionCount += 1;
+        void this.probeLiveStats(runtime, true);
+        const telemetry = this.snapshotTelemetry(runtime);
+        this.emit({
+          type: "progress",
+          workerId: runtime.workerId,
+          phase: "thinking",
+          turn: Math.max(1, runtime.turn),
+          ...(telemetry ? { telemetry } : {}),
         });
         return;
       }
@@ -497,17 +555,67 @@ export class PiAdapter implements AgentAdapter {
     }
   }
 
+  private snapshotTelemetry(
+    runtime: WorkerRuntime,
+    cuOverride?: SessionUsage["contextUsage"],
+  ): WorkerLiveTelemetry | undefined {
+    const cu = cuOverride ?? runtime.latestContextUsage;
+    const out: WorkerLiveTelemetry = {};
+    if (cu) {
+      if (typeof cu.tokens === "number" && Number.isFinite(cu.tokens) && cu.tokens >= 0) {
+        out.contextTokens = Math.round(cu.tokens);
+      }
+      if (typeof cu.contextWindow === "number" && Number.isFinite(cu.contextWindow) && cu.contextWindow > 0) {
+        out.contextWindow = Math.round(cu.contextWindow);
+      }
+      if (typeof cu.percent === "number" && Number.isFinite(cu.percent) && cu.percent >= 0) {
+        out.contextPercent = Math.round(cu.percent);
+      } else if (out.contextTokens != null && out.contextWindow != null && out.contextWindow > 0) {
+        out.contextPercent = Math.round((out.contextTokens / out.contextWindow) * 100);
+      }
+    }
+    if (runtime.compactionCount > 0) out.compactionCount = runtime.compactionCount;
+    if (runtime.lastToolMs !== null) out.lastToolMs = runtime.lastToolMs;
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
+
+  private async probeLiveStats(runtime: WorkerRuntime, emitAfter: boolean): Promise<void> {
+    if (runtime.process.hasExited) return;
+    runtime.lastStatsProbeAt = Date.now();
+    const stats = (await runtime.process.rpc({ type: "get_session_stats" }, 1500).catch(() => undefined)) as SessionUsage | undefined;
+    if (!stats?.contextUsage || !runtime.window.open) return;
+    runtime.latestContextUsage = stats.contextUsage;
+    if (emitAfter) {
+      const telemetry = this.snapshotTelemetry(runtime);
+      if (telemetry) {
+        this.emit({
+          type: "progress",
+          workerId: runtime.workerId,
+          phase: "thinking",
+          turn: Math.max(1, runtime.turn),
+          telemetry,
+        });
+      }
+    }
+  }
+
   private async settle(runtime: WorkerRuntime): Promise<void> {
     const facts = runtime.window;
     const adjudicated = adjudicate(facts);
     runtime.window = { open: false, aborted: false };
     runtime.turn = 0;
+    runtime.activeTools.clear();
 
     // usage from get_session_stats at settlement (§11.2).
     let usage: SessionUsage | undefined;
     if (!runtime.process.hasExited) {
       usage = (await runtime.process.rpc({ type: "get_session_stats" }, 2000).catch(() => undefined)) as SessionUsage | undefined;
     }
+    if (usage?.contextUsage) runtime.latestContextUsage = usage.contextUsage;
+    const { turnUsage, nextCursor } = diffCumulativeSessionUsage(runtime.settledCursor, usage);
+    runtime.settledCursor = nextCursor;
+    const telemetry = this.snapshotTelemetry(runtime, usage?.contextUsage);
+    runtime.lastToolMs = null;
 
     this.emit({
       type: "settled",
@@ -518,6 +626,8 @@ export class PiAdapter implements AgentAdapter {
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
       usage,
+      ...(turnUsage ? { turnUsage } : {}),
+      ...(telemetry ? { telemetry } : {}),
     });
   }
 

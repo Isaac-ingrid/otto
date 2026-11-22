@@ -6,6 +6,7 @@
 import type {
   AgentAdapter,
   AgentCapabilities,
+  CumulativeUsageCursor,
   Delivery,
   InterruptResult,
   ProposalPayload,
@@ -14,9 +15,10 @@ import type {
   SessionUsage,
   StartSpec,
   WorkerHandle,
+  WorkerLiveTelemetry,
   WorkerMode,
 } from "./agent.ts";
-import { AdapterError } from "./agent.ts";
+import { AdapterError, diffCumulativeSessionUsage } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
 import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, OTTO_VERSION, WORKER_SYSTEM_PROMPT } from "./install.ts";
@@ -238,6 +240,8 @@ interface TrackedToolCall {
   kind?: string;
   rawInput?: unknown;
   target?: string;
+  startedAt?: number;
+  completed?: boolean;
   emittedProgress?: boolean;
   emittedProposal?: boolean;
 }
@@ -275,6 +279,9 @@ interface WorkerRuntime {
   toolCalls: Map<string, TrackedToolCall>;
   pendingPermissions: Map<string, PendingPermission>;
   latestUsage?: SessionUsage;
+  compactionCount: number;
+  lastToolMs: number | null;
+  settledCursor?: CumulativeUsageCursor;
   /** Events buffered until `start()` / `send()` / `resume()` returns so `started`/`resumed`
    *  always precedes streamed worker events on the wire (§11.1). */
   buffered: RawAdapterEvent[] | null;
@@ -443,6 +450,8 @@ export class AntigravityAdapter implements AgentAdapter {
       currentMessageText: "",
       toolCalls: new Map(),
       pendingPermissions: new Map(),
+      compactionCount: 0,
+      lastToolMs: null,
       buffered: [],
     };
     this.runtimes.set(spec.workerId, runtime);
@@ -993,6 +1002,7 @@ export class AntigravityAdapter implements AgentAdapter {
       case "tool_call_update": {
         const toolCallId = typeof update.toolCallId === "string" ? update.toolCallId : `call-${runtime.toolCalls.size}`;
         const existing = runtime.toolCalls.get(toolCallId) ?? {};
+        if (existing.startedAt === undefined) existing.startedAt = Date.now();
         if (typeof update.name === "string" && update.name.length > 0) existing.name = update.name;
         if (typeof update.title === "string" && update.title.length > 0) existing.title = update.title;
         if (typeof update.kind === "string" && update.kind.length > 0) existing.kind = update.kind;
@@ -1000,6 +1010,10 @@ export class AntigravityAdapter implements AgentAdapter {
         const locTarget = extractAcpLocationTarget(update.locations);
         const rawTarget = extractTarget(existing.rawInput);
         if (locTarget ?? rawTarget) existing.target = locTarget ?? rawTarget;
+        if ((update.status === "completed" || update.status === "failed") && !existing.completed && existing.startedAt !== undefined) {
+          existing.completed = true;
+          runtime.lastToolMs = Math.max(0, Date.now() - existing.startedAt);
+        }
         runtime.toolCalls.set(toolCallId, existing);
 
         const isReport = isAcpReportTool(existing.name, existing.title);
@@ -1025,6 +1039,7 @@ export class AntigravityAdapter implements AgentAdapter {
             : isProposal
               ? "propose"
               : existing.name ?? existing.kind ?? (existing.title ? existing.title.slice(0, 40) : "tool");
+          const telemetry = this.snapshotTelemetry(runtime);
           this.emit({
             type: "progress",
             workerId: runtime.workerId,
@@ -1032,6 +1047,7 @@ export class AntigravityAdapter implements AgentAdapter {
             tool: label,
             target: existing.target,
             turn: runtime.turn,
+            ...(telemetry ? { telemetry } : {}),
           });
         }
         return;
@@ -1056,6 +1072,16 @@ export class AntigravityAdapter implements AgentAdapter {
           usage.cost = costObj.amount;
         }
         runtime.latestUsage = usage;
+        const telemetry = this.snapshotTelemetry(runtime);
+        if (telemetry && runtime.window.open) {
+          this.emit({
+            type: "progress",
+            workerId: runtime.workerId,
+            phase: "thinking",
+            turn: Math.max(1, runtime.turn),
+            telemetry,
+          });
+        }
         return;
       }
       default:
@@ -1208,6 +1234,10 @@ export class AntigravityAdapter implements AgentAdapter {
     this.notifyPromptTurnDone(runtime);
 
     const usage = mergePromptUsage(runtime.latestUsage, promptResult);
+    const { turnUsage, nextCursor } = diffCumulativeSessionUsage(runtime.settledCursor, usage);
+    runtime.settledCursor = nextCursor;
+    const telemetry = this.snapshotTelemetry(runtime);
+    runtime.lastToolMs = null;
     this.emit({
       type: "settled",
       workerId: runtime.workerId,
@@ -1217,7 +1247,28 @@ export class AntigravityAdapter implements AgentAdapter {
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
       ...(usage ? { usage } : {}),
+      ...(turnUsage ? { turnUsage } : {}),
+      ...(telemetry ? { telemetry } : {}),
     });
+  }
+
+  private snapshotTelemetry(runtime: WorkerRuntime): WorkerLiveTelemetry | undefined {
+    const cu = runtime.latestUsage?.contextUsage;
+    const out: WorkerLiveTelemetry = {};
+    if (cu) {
+      if (typeof cu.tokens === "number" && Number.isFinite(cu.tokens) && cu.tokens >= 0) {
+        out.contextTokens = Math.round(cu.tokens);
+      }
+      if (typeof cu.contextWindow === "number" && Number.isFinite(cu.contextWindow) && cu.contextWindow > 0) {
+        out.contextWindow = Math.round(cu.contextWindow);
+      }
+      if (typeof cu.percent === "number" && Number.isFinite(cu.percent) && cu.percent >= 0) {
+        out.contextPercent = Math.round(cu.percent);
+      }
+    }
+    if (runtime.compactionCount > 0) out.compactionCount = runtime.compactionCount;
+    if (runtime.lastToolMs !== null) out.lastToolMs = runtime.lastToolMs;
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
   private onExit(runtime: WorkerRuntime, info: { code: number | null; signal: NodeJS.Signals | null }): void {

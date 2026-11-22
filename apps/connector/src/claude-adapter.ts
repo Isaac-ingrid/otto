@@ -19,6 +19,7 @@ import type {
   SessionUsage,
   StartSpec,
   WorkerHandle,
+  WorkerLiveTelemetry,
 } from "./agent.ts";
 import {
   AgentModelObservationSchema,
@@ -162,6 +163,10 @@ interface WorkerRuntime {
   resultSeen: boolean;
   turn: number;
   window: RunWindow & { open: boolean };
+  observedModelWindow: number | null;
+  lastContextTokens: number | null;
+  toolStartedAt: number | null;
+  lastToolMs: number | null;
   /** Assistant text accumulated for the message currently being streamed. */
   pendingText: string;
   /** Buffer from spawn until start() resolves — `started` must precede streamed events (§11.1). */
@@ -217,6 +222,7 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly listeners: ((e: RawAdapterEvent) => void)[] = [];
   /** The last StartSpec per worker: a prompt-path send relaunches from it with --resume. */
   private readonly lastSpecs = new Map<string, StartSpec>();
+  private readonly compactionCounts = new Map<string, number>();
   private launch?: LaunchResolution;
 
   constructor(options: ClaudeAdapterOptions) {
@@ -344,6 +350,10 @@ export class ClaudeAdapter implements AgentAdapter {
       resultSeen: false,
       turn: 0,
       window: { open: false, aborted: false },
+      observedModelWindow: spec.model ? inferClaudeContextWindow(spec.model) : null,
+      lastContextTokens: null,
+      toolStartedAt: null,
+      lastToolMs: null,
       pendingText: "",
       buffered: [],
     };
@@ -542,13 +552,40 @@ export class ClaudeAdapter implements AgentAdapter {
   private onStreamEvent(runtime: WorkerRuntime, record: Record<string, unknown>): void {
     switch (record.type) {
       case "system": {
-        if (record.subtype === "init") runtime.window = { open: true, aborted: false };
+        if (record.subtype === "init") {
+          runtime.window = { open: true, aborted: false };
+          if (typeof record.model === "string") {
+            runtime.observedModelWindow = inferClaudeContextWindow(record.model) ?? runtime.observedModelWindow;
+          }
+        } else if (record.subtype === "compact_boundary") {
+          const nextCount = (this.compactionCounts.get(runtime.workerId) ?? 0) + 1;
+          this.compactionCounts.set(runtime.workerId, nextCount);
+          const telemetry = this.snapshotTelemetry(runtime);
+          this.emit({
+            type: "progress",
+            workerId: runtime.workerId,
+            phase: "compacting",
+            turn: Math.max(1, runtime.turn),
+            ...(telemetry ? { telemetry } : {}),
+          });
+        }
         return;
       }
       case "assistant": {
         const message = record.message as Record<string, unknown> | undefined;
         if (!message) return;
         runtime.turn += 1;
+        const msgUsage = typeof message.usage === "object" && message.usage !== null
+          ? (message.usage as Record<string, unknown>)
+          : null;
+        if (msgUsage) {
+          const ctxTok =
+            (typeof msgUsage.input_tokens === "number" ? msgUsage.input_tokens : 0) +
+            (typeof msgUsage.cache_creation_input_tokens === "number" ? msgUsage.cache_creation_input_tokens : 0) +
+            (typeof msgUsage.cache_read_input_tokens === "number" ? msgUsage.cache_read_input_tokens : 0) +
+            (typeof msgUsage.output_tokens === "number" ? msgUsage.output_tokens : 0);
+          if (ctxTok > 0) runtime.lastContextTokens = Math.round(ctxTok);
+        }
         const liveEntryId =
           typeof record.uuid === "string" && record.uuid.length > 0
             ? record.uuid
@@ -565,6 +602,7 @@ export class ClaudeAdapter implements AgentAdapter {
         });
         runtime.pendingText = "";
         const content = Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : [];
+        let emittedToolProgress = false;
         for (const block of content) {
           if (block.type === "text" && typeof block.text === "string") {
             runtime.pendingText += block.text;
@@ -573,6 +611,7 @@ export class ClaudeAdapter implements AgentAdapter {
           if (block.type === "tool_use") {
             const name = typeof block.name === "string" ? block.name : "unknown";
             const input = block.input;
+            runtime.toolStartedAt = Date.now();
             if (isReportTool(name)) {
               // Suffix match only: the namespace prefix is not ours to predict.
               const report = normalizeReport(input);
@@ -581,6 +620,7 @@ export class ClaudeAdapter implements AgentAdapter {
               const proposal = normalizeProposal(input);
               if (proposal) this.emitProposalOnce(runtime, proposal);
             }
+            const telemetry = this.snapshotTelemetry(runtime);
             this.emit({
               type: "progress",
               workerId: runtime.workerId,
@@ -588,19 +628,35 @@ export class ClaudeAdapter implements AgentAdapter {
               tool: isReportTool(name) ? "report" : isProposalTool(name) ? "propose" : name,
               target: extractTarget(input),
               turn: runtime.turn,
+              ...(telemetry ? { telemetry } : {}),
             });
+            emittedToolProgress = true;
           }
         }
-        this.emit({ type: "progress", workerId: runtime.workerId, phase: "thinking", turn: runtime.turn });
+        if (!emittedToolProgress) {
+          const telemetry = this.snapshotTelemetry(runtime);
+          this.emit({
+            type: "progress",
+            workerId: runtime.workerId,
+            phase: "thinking",
+            turn: runtime.turn,
+            ...(telemetry ? { telemetry } : {}),
+          });
+        }
         runtime.window.lastAssistant = {
           stopReason: mapStopReason(message.stop_reason),
           text: runtime.pendingText,
         };
         return;
       }
-      case "user":
-        // Tool results — no WorkerEvent of their own (§11.1 compression).
+      case "user": {
+        // Tool results — measure tool duration without emitting an extra WorkerEvent (§11.1 compression).
+        if (runtime.toolStartedAt !== null) {
+          runtime.lastToolMs = Math.max(0, Date.now() - runtime.toolStartedAt);
+          runtime.toolStartedAt = null;
+        }
         return;
+      }
       case "result": {
         if (!runtime.window.open) return;
         const errored =
@@ -657,6 +713,33 @@ export class ClaudeAdapter implements AgentAdapter {
     }
     if (typeof result.total_cost_usd === "number") usage.cost = result.total_cost_usd;
 
+    const modelUsage = typeof result.modelUsage === "object" && result.modelUsage !== null
+      ? (result.modelUsage as Record<string, unknown>)
+      : null;
+    if (modelUsage) {
+      for (const entry of Object.values(modelUsage)) {
+        if (typeof entry === "object" && entry !== null) {
+          const cw = (entry as Record<string, unknown>).contextWindow;
+          if (typeof cw === "number" && Number.isFinite(cw) && cw > 0) {
+            runtime.observedModelWindow = Math.round(cw);
+            break;
+          }
+        }
+      }
+    }
+    if (runtime.lastContextTokens !== null) {
+      usage.contextUsage = {
+        tokens: runtime.lastContextTokens,
+        ...(runtime.observedModelWindow !== null ? { contextWindow: runtime.observedModelWindow } : {}),
+        percent:
+          runtime.observedModelWindow !== null && runtime.observedModelWindow > 0
+            ? Math.round((runtime.lastContextTokens / runtime.observedModelWindow) * 100)
+            : null,
+      };
+    }
+    const telemetry = this.snapshotTelemetry(runtime);
+    runtime.lastToolMs = null;
+
     this.emit({
       type: "settled",
       workerId: runtime.workerId,
@@ -665,8 +748,24 @@ export class ClaudeAdapter implements AgentAdapter {
       errorMessage: adjudicated.errorMessage,
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
-      ...(usage.tokens || usage.cost !== undefined ? { usage } : {}),
+      ...(usage.tokens || usage.cost !== undefined || usage.contextUsage ? { usage } : {}),
+      ...(telemetry ? { telemetry } : {}),
     });
+  }
+
+  private snapshotTelemetry(runtime: WorkerRuntime): WorkerLiveTelemetry | undefined {
+    const out: WorkerLiveTelemetry = {};
+    if (runtime.lastContextTokens !== null) {
+      out.contextTokens = runtime.lastContextTokens;
+      if (runtime.observedModelWindow !== null && runtime.observedModelWindow > 0) {
+        out.contextWindow = runtime.observedModelWindow;
+        out.contextPercent = Math.round((runtime.lastContextTokens / runtime.observedModelWindow) * 100);
+      }
+    }
+    const compactions = this.compactionCounts.get(runtime.workerId) ?? 0;
+    if (compactions > 0) out.compactionCount = compactions;
+    if (runtime.lastToolMs !== null) out.lastToolMs = runtime.lastToolMs;
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
   private onExit(runtime: WorkerRuntime, info: { code: number | null; signal: NodeJS.Signals | null }): void {
@@ -923,4 +1022,21 @@ export function detectClaude(
   } catch {
     return { installed: false };
   }
+}
+
+/** Returns known context window ONLY for recognized standard Anthropic Claude models; unknown custom/gateway IDs stay null. */
+export function inferClaudeContextWindow(modelId: string): number | null {
+  const m = modelId.trim().toLowerCase();
+  if (!m) return null;
+  if (m.includes("[1m]") || m.endsWith("-1m")) return 1_000_000;
+  if (
+    m === "sonnet" ||
+    m === "opus" ||
+    m === "haiku" ||
+    m === "opusplan" ||
+    /(?:^|[/:.-])claude-(?:3|sonnet-4|opus-4|haiku-4)/.test(m)
+  ) {
+    return 200_000;
+  }
+  return null;
 }
