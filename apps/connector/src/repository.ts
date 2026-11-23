@@ -51,6 +51,7 @@ export async function registerRepository({
     hasArchiveHook: hookSummary.hasArchiveHook,
     approved: hookSummary.approved,
     projectApproved: stored?.approved === true,
+    ...(stored ? { writePolicy: stored.writePolicy } : {}),
     ...(skills.length > 0 ? { skills } : {}),
   };
 }

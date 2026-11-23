@@ -4,6 +4,7 @@ import { z } from "zod";
 import { type RepoCapability } from "./git.ts";
 import { AgentModelCatalogSchema, AgentModelIdSchema, AgentModelObservationSchema } from './agent-models.ts';
 import { REPO_SKILL_HELLO_MAX_ITEMS, RepoSkillBriefSchema } from "./repo-skills.ts";
+import { RepoWritePolicySchema } from "./worktree-audit.ts";
 
 export const PROTOCOL_VERSION = { min: 1, max: 1 } as const;
 
@@ -40,6 +41,8 @@ export const RepoSchema = z.object({
   /** Ambient Memory & Skill Loop: whether `otto repo-config --approve` is enabled for `pi`,
    *  plus bounded metadata-only briefs of whitelisted repository skill files. */
   projectApproved: z.boolean().optional(),
+  /** Direction E: read-only local repository write policy summary (`isolation` & `concurrency`). */
+  writePolicy: RepoWritePolicySchema.optional(),
   skills: z.array(RepoSkillBriefSchema).max(REPO_SKILL_HELLO_MAX_ITEMS).optional(),
 });
 
@@ -86,6 +89,7 @@ export const HelloMessageSchema = z.object({
     workerDiff: z.boolean().optional(),
     workerCheckpoint: z.boolean().optional(),
     repoSkills: z.boolean().optional(),
+    worktreeAudit: z.boolean().optional(),
   }).optional(),
   machine: z.object({ name: z.string(), memTotalMB: z.number(), memFreeMB: z.number() }),
   agents: z.array(AgentCapabilitySchema),

@@ -17,6 +17,8 @@ import {
   ulid,
   WorkerCheckpointMessageSchema,
   WorkerDiffMessageSchema,
+  WorktreeAuditMessageSchema,
+  WorktreeCleanupMessageSchema,
   type CmdMessage,
   type DirectoryListingMessage,
   type RepoSkillOpArgs,
@@ -29,6 +31,12 @@ import {
   type WorkerDiffArgs,
   type WorkerDiffResult,
   type WorkerDiffResultMessage,
+  type WorktreeAuditArgs,
+  type WorktreeAuditResult,
+  type WorktreeAuditResultMessage,
+  type WorktreeCleanupArgs,
+  type WorktreeCleanupResult,
+  type WorktreeCleanupResultMessage,
 } from "@isaac2ingrid/protocol";
 import { CommandLog, type CommandResult } from "./commands.ts";
 import { EventLog, type StoredEvent } from "./events.ts";
@@ -60,6 +68,8 @@ export interface ClientOptions {
   diffWorker?: (args: WorkerDiffArgs) => Promise<WorkerDiffResult>;
   checkpointWorker?: (args: WorkerCheckpointArgs) => Promise<WorkerCheckpointResult>;
   repoSkillOp?: (op: RepoSkillOpArgs) => Promise<RepoSkillResult>;
+  auditWorktrees?: (args: WorktreeAuditArgs) => Promise<WorktreeAuditResult>;
+  cleanupWorktrees?: (op: WorktreeCleanupArgs) => Promise<WorktreeCleanupResult>;
   /** Honest hello snapshot for the non-worker sections (protocol §6.1): agents, repos, limits. */
   snapshot?: () => { agents: unknown[]; repos: unknown[]; limits: { maxWorkers: number; running: number } };
   /** L3 raw-history loader (connector-pi.md §11.4): when set, `history_req` messages are
@@ -110,6 +120,7 @@ export class ConnectorClient {
   private diffReads = 0;
   private checkpointReads = 0;
   private repoSkillOps = 0;
+  private worktreeAuditOps = 0;
   private discoveringModels = false;
   private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
@@ -198,6 +209,7 @@ export class ConnectorClient {
             workerDiff: Boolean(this.options.diffWorker),
             workerCheckpoint: Boolean(this.options.checkpointWorker),
             repoSkills: Boolean(this.options.repoSkillOp),
+            worktreeAudit: Boolean(this.options.auditWorktrees && this.options.cleanupWorktrees),
           },
           machine: {
             name: this.options.machineName ?? os.hostname(),
@@ -383,6 +395,46 @@ export class ConnectorClient {
         }).catch(() => {
           if (this.ws === ws) this.send(ws, { t: "repo_skill_result", re: request.id, ok: false, code: "io_failed" } satisfies RepoSkillResultMessage);
         }).finally(() => { this.repoSkillOps--; });
+        return;
+      }
+      case "worktree_audit": {
+        const parsed = WorktreeAuditMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.auditWorktrees) {
+          this.send(ws, { t: "worktree_audit_result", re: request.id, ok: false, code: "unsupported" } satisfies WorktreeAuditResultMessage);
+          return;
+        }
+        if (this.worktreeAuditOps >= 2) {
+          this.send(ws, { t: "worktree_audit_result", re: request.id, ok: false, code: "busy" } satisfies WorktreeAuditResultMessage);
+          return;
+        }
+        this.worktreeAuditOps++;
+        void this.options.auditWorktrees({ ...(request.repoId !== undefined ? { repoId: request.repoId } : {}) }).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "worktree_audit_result", re: request.id, ...result } satisfies WorktreeAuditResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "worktree_audit_result", re: request.id, ok: false, code: "audit_failed" } satisfies WorktreeAuditResultMessage);
+        }).finally(() => { this.worktreeAuditOps--; });
+        return;
+      }
+      case "worktree_cleanup": {
+        const parsed = WorktreeCleanupMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.cleanupWorktrees) {
+          this.send(ws, { t: "worktree_cleanup_result", re: request.id, ok: false, code: "unsupported" } satisfies WorktreeCleanupResultMessage);
+          return;
+        }
+        if (this.worktreeAuditOps >= 2) {
+          this.send(ws, { t: "worktree_cleanup_result", re: request.id, ok: false, code: "busy" } satisfies WorktreeCleanupResultMessage);
+          return;
+        }
+        this.worktreeAuditOps++;
+        void this.options.cleanupWorktrees(request.op).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "worktree_cleanup_result", re: request.id, ...result } satisfies WorktreeCleanupResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "worktree_cleanup_result", re: request.id, ok: false, code: "cleanup_failed" } satisfies WorktreeCleanupResultMessage);
+        }).finally(() => { this.worktreeAuditOps--; });
         return;
       }
       case "history_req": {

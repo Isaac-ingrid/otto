@@ -16,3 +16,4 @@ export * from "./report.ts";
 export * from "./proposal.ts";
 export * from "./checkpoint.ts";
 export * from "./repo-skills.ts";
+export * from "./worktree-audit.ts";

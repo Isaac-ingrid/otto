@@ -258,8 +258,12 @@ export async function createReadonlyWorktree(
   return { path: dir, head, base: head };
 }
 
-function joinDir(root: string, repoPath: string, branchSlug: string): string {
+export function managedRepoBucketName(repoPath: string): string {
   const repoName = slugify(basename(repoPath), "repo");
   const pathHash = createHash("sha256").update(repoPath).digest("hex").slice(0, 8);
-  return join(root, `${repoName}-${pathHash}`, branchSlug);
+  return `${repoName}-${pathHash}`;
+}
+
+function joinDir(root: string, repoPath: string, branchSlug: string): string {
+  return join(root, managedRepoBucketName(repoPath), branchSlug);
 }

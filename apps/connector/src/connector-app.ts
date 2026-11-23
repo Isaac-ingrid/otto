@@ -166,6 +166,14 @@ export class ConnectorApp {
         this.log?.("repo_skill_op_requested", { action: op.action, repoId: op.scope.repoId });
         return this.manager.repoSkillOp(op);
       },
+      auditWorktrees: (args) => {
+        this.log?.("worktree_audit_requested", { repoId: args.repoId ?? null });
+        return this.manager.auditWorktrees(args);
+      },
+      cleanupWorktrees: (op) => {
+        this.log?.("worktree_cleanup_requested", { targetCount: op.targets.length, pruneCount: op.pruneRepoIds?.length ?? 0 });
+        return this.manager.cleanupWorktrees(op);
+      },
       // L3 raw-history reads (§11.4): live get_entries while the process runs, the session
       // JSONL along the current branch otherwise. Logged at lifecycle level only — the
       // transcript itself never reaches the log.
@@ -283,6 +291,7 @@ export class ConnectorApp {
           hasArchiveHook: hookSummary.hasArchiveHook,
           approved: hookSummary.approved,
           projectApproved: r.approved === true,
+          writePolicy: r.writePolicy,
           ...(skills.length > 0 ? { skills } : {}),
         };
       }),

@@ -24,12 +24,13 @@ import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath, code
 import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
 import type { ClaudeAdapter } from "./claude-adapter.ts";
 import type { CodexAdapter } from "./codex-adapter.ts";
-import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type RepoSkillOpArgs, type RepoSkillResult, type WorkerCheckpointArgs, type WorkerCheckpointResult, type WorkerDiffArgs, type WorkerDiffResult } from "@isaac2ingrid/protocol";
+import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type RepoSkillOpArgs, type RepoSkillResult, type WorkerCheckpointArgs, type WorkerCheckpointResult, type WorkerDiffArgs, type WorkerDiffResult, type WorktreeAuditArgs, type WorktreeAuditResult, type WorktreeCleanupArgs, type WorktreeCleanupResult } from "@isaac2ingrid/protocol";
 import type { LocalStore, RegisteredRepo, WorkerRow } from "./store.ts";
 import { executeRepoSkillOp } from "./repo-skills.ts";
 import { StallWatchdog, stallContinueNote, type StallWatchdogOptions, type WatchdogCandidate } from "./watchdog.ts";
 import { collectWorkerCheckpoint } from "./worker-checkpoint.ts";
 import { collectWorkerDiff } from "./worker-diff.ts";
+import { collectWorktreeAudit, executeWorktreeCleanup } from "./worktree-audit.ts";
 import { WorktreeManager, createReadonlyWorktree } from "./worktree.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1099,6 +1100,51 @@ export class WorkerManager {
       op,
       extraSecrets: this.redactionSecrets(),
     });
+  }
+
+  /** Read-only machine worktree inspection (`worktree_audit` -> `worktree_audit_result`). */
+  async auditWorktrees(args: WorktreeAuditArgs = {}): Promise<WorktreeAuditResult> {
+    return collectWorktreeAudit(
+      {
+        store: this.store,
+        stateDir: this.stateDir,
+        now: this.now,
+        isLiveProcess: (w) => this.adapterOfWorkerOrNull(w)?.isRunning?.(w.workerId) === true,
+      },
+      args,
+    );
+  }
+
+  /** Controlled worktree cleanup & prune (`worktree_cleanup` -> `worktree_cleanup_result`). */
+  async cleanupWorktrees(args: WorktreeCleanupArgs): Promise<WorktreeCleanupResult> {
+    return executeWorktreeCleanup(
+      {
+        store: this.store,
+        stateDir: this.stateDir,
+        now: this.now,
+        isLiveProcess: (w) => this.adapterOfWorkerOrNull(w)?.isRunning?.(w.workerId) === true,
+        stopIdleProcess: async (w) => {
+          if (w.state === "idle" && this.adapterOfWorkerOrNull(w)?.isRunning?.(w.workerId) === true) {
+            await this.stopProcess(w.workerId);
+          }
+        },
+        runArchiveHook: async (repo, worker, worktreePath) => {
+          await runWorktreeHook({
+            phase: "archive",
+            workerId: worker.workerId,
+            repoName: repo.name,
+            repoPath: repo.path,
+            worktreePath,
+            hooks: repo.hooks,
+            stateDir: this.stateDir,
+            proxy: this.store.getProxyConfig(),
+            secrets: this.redactionSecrets(),
+            timeoutMs: this.hookOptions?.timeoutMs,
+          });
+        },
+      },
+      args,
+    );
   }
 
   // --- pr_worker (connector-pi.md §6.1, issue #21: the consent gate's machine half) ------------------
