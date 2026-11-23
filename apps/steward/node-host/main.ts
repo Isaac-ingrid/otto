@@ -60,9 +60,13 @@ if (vars.OTTO_PUBLIC_ORIGIN) vars.OTTO_PUBLIC_ORIGIN = parsePublicOrigin(vars.OT
 const { default: worker } = await import("../src/index.ts");
 const { Steward } = await import("../src/steward.ts");
 
+const uiDir = existsSync(resolve(import.meta.dirname, "../ui/workspace.html"))
+  ? resolve(import.meta.dirname, "../ui")
+  : resolve(appDir, "ui");
+
 const env: Record<string, unknown> = {
   ...vars,
-  ASSETS: createAssets(resolve(appDir, "ui")),
+  ASSETS: createAssets(uiDir),
   LOGIN_RATE_LIMITER: createRateLimiter(),
 };
 

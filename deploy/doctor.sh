@@ -71,7 +71,7 @@ if [[ -f "$db" ]]; then
   description='queued connector commands past delivery deadline'
   count_check "SELECT COUNT(*) FROM outbox WHERE state='queued' AND notAfter IS NOT NULL AND notAfter < $now_ms - 60000;"
   description='unheld connector commands queued for over 10 minutes'
-  count_check "SELECT COUNT(*) FROM outbox WHERE state='queued' AND held=0 AND createdAt < $now_ms - 600000;"
+  count_check "SELECT COUNT(*) FROM outbox WHERE state='queued' AND held=0 AND kind!='cleanup_worktree' AND createdAt < $now_ms - 600000;"
   description='push jobs overdue by over 5 minutes (including retries)'
   count_check "SELECT COUNT(*) FROM sh_push_job WHERE sentAt IS NULL AND dueAt < $now_ms - 300000;"
   description='push jobs exhausting six failed attempts in the past 30 minutes'
