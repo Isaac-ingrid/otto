@@ -58,7 +58,7 @@ A durable piece of knowledge Otto keeps outside the conversation — a preferenc
 _Avoid_: using "memory" for raw conversation history or the ledger; a blanket "fact" where provenance decides what may be trusted.
 
 **Checkpoint & Repo skill (检查点与仓库技能)**:
-A **checkpoint** is a deterministic summary of a worker's progress and git state relayed from the connector for handoff or compaction. A **repo skill** is a whitelisted `SKILL.md` entry discovered or distilled in a repository under sandboxed connector rules and indexed in the Control Plane.
+A **checkpoint** is a deterministic summary of a worker's progress and git state relayed from the connector for handoff or compaction. A **repo skill** is a whitelisted `SKILL.md` entry discovered or distilled in a repository under sandboxed connector rules and indexed in the Control Plane. Steward also aggregates recent repo sessions to detect recurring patterns and proposes either creating a new skill or incrementally updating an existing one (`offerKind: create | update`) only when evidence is sufficient and never writes to disk before owner confirmation.
 
 **Routine (例行任务)**:
 Work or a report the owner scheduled by conversation: a recurring digest rendered straight from the ledger, or a recurring instruction that wakes Otto. Deterministic code fires it. A routine *suggestion* only offers a card; the owner’s tap creates the routine.

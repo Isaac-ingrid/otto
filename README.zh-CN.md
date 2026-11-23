@@ -13,7 +13,7 @@
 - **云端总管，始终在线。** 即使电脑休眠，总管仍在云服务器上保留对话、记忆和定时回看；本地编码任务等连接器上线后才能执行。
 - **多台机器，一处对话。** 任务、待决事项、实时上下文/工具遥测与进展集中在一起，支持 `Cmd/Ctrl+K` 全局混合检索（FTS5）。
 - **代码留在自己的电脑上。** 连接器在本地运行 **pi**、**Claude Code**、**Codex CLI** 或 **Antigravity（`agy`）**，按仓库执行写入隔离（`worktree`/`in-place`）、并发策略（`parallel`/`serial`）与授权钩子；coding agent 的完整会话记录也留在本机。
-- **有边界的记忆、技能与控制面。** 偏好和项目约定与聊天记录分开保存（记录来源及确认状态），支持确定性 worker 检查点、受控仓库技能（`SKILL.md`）、双账本预算与遥测图表，以及只读 Worktree 体检与带确认门禁的安全回收。
+- **有边界的记忆、技能与控制面。** 偏好和项目约定与聊天记录分开保存（记录来源及确认状态），会结合同仓库历史会话识别重复模式，仅在证据充分时提议新增或增量更新 `SKILL.md` 技能并等待你确认落盘；同时提供确定性 worker 检查点、双账本预算与遥测图表，以及只读 Worktree 体检与带确认门禁的安全回收。
 - **只读跟进 PR 与诊断分诊。** 把 GitHub PR 关联到已有事项，服务器持续监测 CI 状态、诊断失败日志、检测合并冲突并分诊可信评审意见，无需一直挂着本地 coding agent；创建/取消跟进仍需专用确认卡。
 - **随时由你掌控。** 停止回复、停止/中断 worker（支持 5 态停止诊断与行内中断）、取消 PR 跟进是三个独立操作。
 
@@ -162,7 +162,7 @@ pnpm deploy:vps
 pnpm deploy:vps -- --apply-env
 ```
 
-`pnpm connector:restart` 重新构建 `apps/connector` 并重启本机守护进程（若服务配置模板有更新，无需重新配对，运行一次 `otto install` 刷新即可；`PiAdapter` 启动握手默认超时 20 秒）。`pnpm deploy:vps` 自动完成远端 SQLite 在线备份、Steward 与 UI 发布（启动失败自动回滚）、证书续期守卫及 `deploy/doctor.sh` 巡检。
+`pnpm connector:restart` 重新构建 `apps/connector` 并重启本机守护进程（若服务配置模板有更新，无需重新配对，运行一次 `otto install` 刷新即可；`PiAdapter` 启动握手默认超时 20 秒）。`pnpm deploy:vps` 自动完成远端 SQLite 在线备份、Steward 产物 gzip 压缩原子上传（含 SSH 255 断连自动重试）与 UI 发布（启动失败自动回滚）、证书续期守卫及 `deploy/doctor.sh` 巡检。
 
 ## 进一步了解
 

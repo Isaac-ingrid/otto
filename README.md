@@ -13,7 +13,7 @@
 - **An always-on coordinator.** The steward stays online on your VPS even when your computers are asleep; it keeps conversations, memory and scheduled follow-ups. Local coding work waits for an available connector.
 - **One conversation across machines.** Tasks, decisions, follow-ups, live context/tool telemetry and progress stay together, searchable via `Cmd/Ctrl+K` hybrid FTS5 search.
 - **Your code stays on your machines.** A connector runs **pi**, **Claude Code**, **Codex CLI**, or **Antigravity (`agy`)** locally with per-repo write isolation (`worktree`/`in-place`), concurrency (`parallel`/`serial`), and optional approved hooks; full coding-agent session records stay there.
-- **Memory, skills & control plane with boundaries.** Otto keeps preferences and project conventions separately from conversation history (tracking source and confirmation), supports deterministic worker checkpoints, sandboxed repo skills (`SKILL.md`), dual-ledger budget/telemetry charts, and read-only worktree audits with guarded cleanup.
+- **Memory, skills & control plane with boundaries.** Otto keeps preferences and project conventions separately from conversation history (tracking source and confirmation), mines cross-session repo patterns to propose new or updated `SKILL.md` skills only with sufficient evidence and owner approval, and provides deterministic worker checkpoints, dual-ledger budget/telemetry charts, and read-only worktree audits with guarded cleanup.
 - **Read-only PR follow-up & triage.** Bind a GitHub PR to an existing task Thread to monitor CI checks, diagnose failing logs, detect merge conflicts, and triage trusted reviews without keeping a coding agent running. Conversational create/cancel requests require your confirmation on a dedicated card.
 - **You stay in control.** Stopping a reply, stopping/interrupting a worker (with 5-state stop diagnostics and inline interrupt), and cancelling a PR watch are three separate operations.
 
@@ -162,7 +162,7 @@ pnpm deploy:vps
 pnpm deploy:vps -- --apply-env
 ```
 
-`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired background service (run `otto install` once after service-unit updates without re-pairing; `PiAdapter` defaults to a 20s startup RPC timeout). `pnpm deploy:vps` backs up SQLite online, deploys the Steward bundle and UI with automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`.
+`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired background service (run `otto install` once after service-unit updates without re-pairing; `PiAdapter` defaults to a 20s startup RPC timeout). `pnpm deploy:vps` backs up SQLite online, uploads the gzipped Steward bundle atomically with SSH drop retries and automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`.
 
 ## Documentation
 
