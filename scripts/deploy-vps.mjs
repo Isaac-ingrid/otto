@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const remoteSh = join(rootDir, "deploy", "remote.sh");
@@ -46,18 +47,43 @@ function runLocal(cmd, args, cwd = rootDir) {
   execFileSync(cmd, args, { cwd, stdio: "inherit" });
 }
 
-function runRemote(remoteScript, stdinText) {
-  execFileSync("bash", [remoteSh, remoteScript], {
-    cwd: rootDir,
-    stdio: stdinText !== undefined ? ["pipe", "inherit", "inherit"] : "inherit",
-    ...(stdinText !== undefined ? { input: stdinText } : {}),
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withSshRetry(label, fn, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      const status = typeof err === "object" && err !== null && "status" in err ? err.status : null;
+      if (status === 255 && attempt < maxAttempts) {
+        const delayMs = attempt * 2_000;
+        console.warn(`    [retry ${attempt}/${maxAttempts - 1}] ${label} dropped (SSH exit 255); retrying in ${delayMs / 1000}s…`);
+        sleepSync(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+function runRemote(remoteScript, stdinPayload) {
+  return withSshRetry("remote command", () => {
+    execFileSync("bash", [remoteSh, remoteScript], {
+      cwd: rootDir,
+      stdio: stdinPayload !== undefined ? ["pipe", "inherit", "inherit"] : "inherit",
+      ...(stdinPayload !== undefined ? { input: stdinPayload } : {}),
+    });
   });
 }
 
 function copyToRemote(localRelPath, remoteDestDir) {
-  execFileSync("bash", [remoteSh, "--copy", localRelPath, remoteDestDir], {
-    cwd: rootDir,
-    stdio: "inherit",
+  return withSshRetry(`copy ${localRelPath}`, () => {
+    execFileSync("bash", [remoteSh, "--copy", localRelPath, remoteDestDir], {
+      cwd: rootDir,
+      stdio: "inherit",
+    });
   });
 }
 
@@ -95,9 +121,15 @@ runRemote(
   ].join("\n"),
 );
 
-// 3. Ship new Steward bundle, full UI directory, optional env update, and doctor.sh
-step("3/5 Uploading steward-node.mjs & apps/steward/ui to /opt/otto/dist");
-copyToRemote("apps/steward/dist/node/steward-node.mjs", "/opt/otto/dist/node");
+// 3. Ship new Steward bundle (gzipped + atomic rename), full UI directory, optional env update, and doctor.sh
+const bundleGzip = gzipSync(readFileSync(stewardBundlePath), { level: 6 });
+step(
+  `3/5 Uploading steward-node.mjs (${(bundleGzip.length / 1024 / 1024).toFixed(2)} MB gzipped) & apps/steward/ui to /opt/otto/dist`,
+);
+runRemote(
+  "set -euo pipefail; mkdir -p /opt/otto/dist/node; gzip -dc > /opt/otto/dist/node/steward-node.mjs.tmp && mv /opt/otto/dist/node/steward-node.mjs.tmp /opt/otto/dist/node/steward-node.mjs",
+  bundleGzip,
+);
 runRemote("rm -rf /opt/otto/dist/ui && mkdir -p /opt/otto/dist/ui");
 copyToRemote("apps/steward/ui", "/opt/otto/dist/ui");
 runRemote(
@@ -105,12 +137,10 @@ runRemote(
     "set -euo pipefail",
     "find /opt/otto/dist -name '._*' -delete",
     "chown -R root:otto /opt/otto/dist && chmod -R g+rX,o-rwx /opt/otto/dist",
+    "cat > /opt/otto/doctor.sh && chmod 0700 /opt/otto/doctor.sh",
   ].join("\n"),
+  readFileSync(doctorSh, "utf8"),
 );
-
-runRemote("if [ -f /opt/otto/doctor.sh ]; then exit 0; else exit 0; fi");
-copyToRemote("deploy/doctor.sh", "/opt/otto");
-runRemote("chmod 0700 /opt/otto/doctor.sh");
 
 if (withApplyEnv) {
   step("Applying deploy/aliyun.env -> /etc/otto/.dev.vars");
