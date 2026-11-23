@@ -1,6 +1,6 @@
 # PR 盯盘只读评审意见与合并冲突感知闭环设计方案（Direction B）
 
-状态：草案待审（2026-11-20）
+状态：已落地（Stage 1–3 全部完成，2026-11-20）
 前置依赖：[ADR-0019（PR 盯盘变更需绑定确认）](../adr/0019-pr-watch-owner-confirmation.md)、[受控改进设计方案](../design/otto-improvement.md)、[PR 盯盘说明](../pr-watches.md)、[Direction A（PR 盯盘只读 CI 失败日志诊断）](./pr-watch-ci-failure-diagnosis.md)
 
 实施顺序：**Stage 1（`pr-evidence.ts` 有界只读合并状态、Review 状态机与行级评论采集 + `045` 迁移） → Stage 2（`pr-watch.ts` 双目标生命周期、游标去重通知、无工具评审提炼与统一诊断接口升级） → Stage 3（工作台统一 PR 阻塞诊断抽屉、评审/冲突卡片徽章与「填入输入框修订/解冲突」闭环 + 全套回归门禁）**。

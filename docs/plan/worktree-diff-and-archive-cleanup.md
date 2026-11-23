@@ -1,6 +1,6 @@
 # Workspace Git Diff 审阅与 Thread 归档自动清理 Worktree 实施方案
 
-状态：设计定稿，待实施（2026-11-18）。关联前序决策：[ADR-0004](../adr/0004-web-workspace.md)（Web Workspace）、[ADR-0022](../adr/0022-report-labels-worktree-hooks-and-readonly-proposals.md)（本地批准的 `setup` / `archive` 生命周期钩子）。
+状态：已落地（Stage 1–3 全部完成，2026-11-19）。关联前序决策：[ADR-0004](../adr/0004-web-workspace.md)（Web Workspace）、[ADR-0022](../adr/0022-report-labels-worktree-hooks-and-readonly-proposals.md)（本地批准的 `setup` / `archive` 生命周期钩子）。
 
 实施顺序：**Stage 1（Protocol + Connector 层：`worker_diff` 按需采集与 `WorktreeManager.cleanup` 边界修正） → Stage 2（Steward 账本、持久化 Outbox 归档回收与 API/工具层） → Stage 3（Web Workspace Diff 查看器与归档确认交互）**。
 

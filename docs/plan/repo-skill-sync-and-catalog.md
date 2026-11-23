@@ -1,6 +1,6 @@
 # 2B 仓库技能受控落盘与工作台目录管理实施方案
 
-状态：草案待评审（2026-11-19）。关联前序决策：[ADR-0004](../adr/0004-web-workspace.md)（Web Workspace）、[ADR-0016](../adr/0016-dark-instrument-panel-theme.md)（暗色仪表台设计规范）、[ADR-0022](../adr/0022-report-labels-worktree-hooks-and-readonly-proposals.md)（本地信任红线与受控边界），以及已落地的 [2A 记忆与主动调度控制面](./memory-and-proactive-control-plane.md) 与 [中断任务断点快照与 Skill 提炼方案](./worker-checkpoint-and-skill-extraction.md)。
+状态：已落地（Stage 1–3 全部完成，2026-11-19）。关联前序决策：[ADR-0004](../adr/0004-web-workspace.md)（Web Workspace）、[ADR-0016](../adr/0016-dark-instrument-panel-theme.md)（暗色仪表台设计规范）、[ADR-0022](../adr/0022-report-labels-worktree-hooks-and-readonly-proposals.md)（本地信任红线与受控边界），以及已落地的 [2A 记忆与主动调度控制面](./memory-and-proactive-control-plane.md) 与 [中断任务断点快照与 Skill 提炼方案](./worker-checkpoint-and-skill-extraction.md)。
 
 实施顺序：**Stage 1（Protocol + Connector 层：`repo_skill_*` 有界帧、三槽位白名单路径、符号链接阻断、SHA-256 CAS 原子读写与 Git 状态探测） → Stage 2（Steward 层：无状态中继、`sh_web_request` 幂等落盘 API 与只读元数据目录） → Stage 3（Web Workspace 双触点交互：断点提炼面板一键入仓 + 控制面第三标签页「仓库技能」浏览/编辑/新建/删除）**。
 

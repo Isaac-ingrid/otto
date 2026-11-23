@@ -1,6 +1,6 @@
 # 记忆与技能无感闭环设计方案（派发自动注入 + 收尾顺路记记忆 + 高摩擦任务推卡一键存 Skill）
 
-状态：草案待评审（2026-11-19）。关联前序决策：[ADR-0004](../adr/0004-web-workspace.md)（Web Workspace）、[ADR-0016](../adr/0016-dark-instrument-panel-theme.md)（暗色仪表台设计规范）、[ADR-0022](../adr/0022-report-labels-worktree-hooks-and-readonly-proposals.md)（本地信任红线与受控边界），以及已落地的 [2A 记忆与主动调度控制面](./memory-and-proactive-control-plane.md)、[中断任务断点快照与 Skill 提炼方案](./worker-checkpoint-and-skill-extraction.md)、[2B 仓库技能受控落盘与工作台目录管理](./repo-skill-sync-and-catalog.md)，对照研究基线 [Personal Agent 2026](../research/personal-agent-2026.md) 与 [RSI 2026](../research/rsi-2026.md)。
+状态：已落地（Stage 1–3 全部完成，2026-11-19）。关联前序决策：[ADR-0004](../adr/0004-web-workspace.md)（Web Workspace）、[ADR-0016](../adr/0016-dark-instrument-panel-theme.md)（暗色仪表台设计规范）、[ADR-0022](../adr/0022-report-labels-worktree-hooks-and-readonly-proposals.md)（本地信任红线与受控边界），以及已落地的 [2A 记忆与主动调度控制面](./memory-and-proactive-control-plane.md)、[中断任务断点快照与 Skill 提炼方案](./worker-checkpoint-and-skill-extraction.md)、[2B 仓库技能受控落盘与工作台目录管理](./repo-skill-sync-and-catalog.md)，对照研究基线 [Personal Agent 2026](../research/personal-agent-2026.md) 与 [RSI 2026](../research/rsi-2026.md)。
 
 实施顺序：**Stage 1（派发端自动注入：`hello.repos` 轻量技能索引同步 + `043` 账本迁移 + `Dispatcher.startNewSession` 确定性注入项目记忆与按需读技能指引） → Stage 2（收尾顺路记记忆与一键转正：`eventWakeText` 踩坑事实提取准则 + `noteconfirm` 聊天流内一键确认/删除） → Stage 3（高摩擦任务推卡一键存 Skill：L0 确定性门槛 + L1 旁路严格否决器 + `sh_skill_offer` 卡片确定性落盘与冷却熔断）**。
 

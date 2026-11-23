@@ -1,6 +1,6 @@
 # 三态显式停止与就地中断闭环设计方案（Three-Way Stop & Inline Interrupt）
 
-状态：草案待审（2026-11-19）
+状态：已落地（Stage 1–2 全部完成，2026-11-20）
 前置依赖：[ADR-0011（机械式 Worker 控制）](../adr/0011-mechanical-worker-controls.md)、[ADR-0017（Turn 串行且可取消）](../adr/0017-turns-are-serial-and-cancellable.md)、[Direction 2A 控制面](./memory-and-proactive-control-plane.md)、[Worktree Diff 与归档自动回收](./worktree-diff-and-archive-cleanup.md)
 参考来源：[`docs/research/personal-agent-2026.md`](../research/personal-agent-2026.md) §5.2 *The three-way stop, because "stop" is not one thing*
 

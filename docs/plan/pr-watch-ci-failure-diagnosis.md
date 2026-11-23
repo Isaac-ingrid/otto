@@ -1,6 +1,6 @@
 # PR 盯盘只读 CI 失败日志采集与根因诊断闭环设计方案
 
-状态：草案待审（2026-11-19）
+状态：已落地（Stage 1–3 全部完成，2026-11-20）
 前置依赖：[ADR-0019（PR 盯盘变更需绑定确认）](../adr/0019-pr-watch-owner-confirmation.md)、[受控改进设计方案](../design/otto-improvement.md)、[PR 盯盘说明](../pr-watches.md)、[Direction 2A 控制面](./memory-and-proactive-control-plane.md)、[三态显式停止与就地中断](./three-way-stop-and-inline-interrupt.md)
 
 实施顺序：**Stage 1（`pr-evidence.ts` 有界只读失败证据与安全日志抓取 + `044` 诊断表迁移） → Stage 2（`pr-watch.ts` 旁路无工具根因诊断、超额确定性降级与只读查询 API） → Stage 3（工作台失败详情弹窗、控制面/事项面板诊断入口与「填入输入框派发修复」闭环 + 端到端回归测试）**。
