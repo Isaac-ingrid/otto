@@ -136,6 +136,33 @@ Polling, status-change notices and restart recovery run without an LLM turn or c
 
 The pilot has exercised confirmation, active-watch cancellation, recovery and a synthetic status-to-background-notification path. That is not evidence of a real CI workflow or changed-head acceptance; those remain separate validation work.
 
+## Local development & upgrades
+
+From a repository checkout, `pnpm local:*` runs an isolated Steward (`http://127.0.0.1:8787`) and Connector (`mac-local-dev`) under `/tmp/otto-local-test` without touching your paired `~/.otto` service:
+
+```sh
+pnpm local:up
+pnpm local:restart
+pnpm local:restart steward
+pnpm local:restart connector
+pnpm local:status
+pnpm local:logs
+pnpm local:down
+pnpm local:reset
+```
+
+`pnpm local:up` builds both packages, generates local `.dev.vars`, auto-pairs the connector on first boot, and prints a one-click sign-in URL.
+
+For source-linked connectors and self-hosted VPS upgrades (using an untracked `deploy/aliyun.env` for `deploy/remote.sh`):
+
+```sh
+pnpm connector:restart
+pnpm deploy:vps
+pnpm deploy:vps -- --apply-env
+```
+
+`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired `~/.otto` background service; `pnpm deploy:vps` backs up SQLite online, deploys the Steward bundle and UI with automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`.
+
 ## Documentation
 
 - [Cloud-server runbook](docs/self-hosted.md) — service, reverse proxy, TLS, upgrades and backups.

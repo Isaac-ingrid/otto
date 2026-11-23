@@ -136,6 +136,33 @@ otto status
 
 试点已验证确认、活跃跟进取消、重启恢复及 synthetic status 到后台通知的链路；这不是对真实 CI 工作流或换 head 行为的验收，后两项仍是独立待验证项。
 
+## 本地联调与一键升级
+
+在源码检出目录下，`pnpm local:*` 会在 `/tmp/otto-local-test` 启动隔离的本地 Steward（`http://127.0.0.1:8787`）与 Connector（`mac-local-dev`），不会触碰日常连着云端的 `~/.otto` 后台服务：
+
+```sh
+pnpm local:up
+pnpm local:restart
+pnpm local:restart steward
+pnpm local:restart connector
+pnpm local:status
+pnpm local:logs
+pnpm local:down
+pnpm local:reset
+```
+
+`pnpm local:up` 会自动构建两端产物、初始化本地 `.dev.vars`、首次自动完成配对，并直接打印免输密码的一键登录链接。
+
+若本机连接器通过源码安装，或已为 `deploy/remote.sh` 配置未入库的 `deploy/aliyun.env`：
+
+```sh
+pnpm connector:restart
+pnpm deploy:vps
+pnpm deploy:vps -- --apply-env
+```
+
+`pnpm connector:restart` 重新构建 `apps/connector` 并重启本机 `~/.otto` 守护进程；`pnpm deploy:vps` 自动完成远端 SQLite 在线备份、Steward 与 UI 发布（启动失败自动回滚）、证书续期守卫及 `deploy/doctor.sh` 巡检。
+
 ## 进一步了解
 
 - [云服务器自托管操作手册](docs/self-hosted.md)：服务、反向代理、TLS、升级和备份。
