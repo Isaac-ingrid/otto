@@ -22,7 +22,7 @@ import { observeSession } from "./session-observation.ts";
 import { installAssets, type InstalledAssets } from "./install.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { PiProcess } from "./pi-process.ts";
+import { PiProcess, RpcError } from "./pi-process.ts";
 import { piCommandFromEnv, resolveExecutableLaunch, type LaunchResolution } from "./pi-launch.ts";
 import {
   AgentModelObservationSchema,
@@ -36,6 +36,15 @@ import { PiModelDiscovery } from './pi-model-discovery.ts';
 
 /** Must match COMMAND_NAME in ./ext/otto-pi.ts (locked together by a test). */
 const OTTO_COMMAND = "otto";
+
+const DEFAULT_STARTUP_TIMEOUT_MS = 20_000;
+
+function resolveStartupTimeoutMs(explicit?: number): number {
+  if (explicit !== undefined) return explicit;
+  const raw = Number(process.env.OTTO_PI_STARTUP_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 1000) return Math.round(raw);
+  return DEFAULT_STARTUP_TIMEOUT_MS;
+}
 
 export interface PiAdapterOptions {
   stateDir: string;
@@ -128,7 +137,7 @@ export class PiAdapter implements AgentAdapter {
   constructor(options: PiAdapterOptions) {
     this.options = options;
     this.modelDiscovery = new PiModelDiscovery({ stateDir: options.stateDir, launch: () => this.launchResolution,
-      env: () => childEnv(process.env, options.env), timeoutMs: options.getStateTimeoutMs });
+      env: () => childEnv(process.env, options.env), timeoutMs: resolveStartupTimeoutMs(options.getStateTimeoutMs) });
     this.workerLogsDir = options.workerLogsDir === null ? null : (options.workerLogsDir ?? join(options.stateDir, "logs"));
   }
 
@@ -224,7 +233,8 @@ export class PiAdapter implements AgentAdapter {
 
     try {
       // §4.4 step 4: get_state must succeed within the timeout and sessionId must match.
-      const timeout = this.options.getStateTimeoutMs ?? 5000;
+      // Default 20s tolerates cold startup with user global extensions/MCP under launchd.
+      const timeout = resolveStartupTimeoutMs(this.options.getStateTimeoutMs);
       const state = await proc.rpc({ type: "get_state" }, timeout);
       if (state.sessionId !== spec.workerId) {
         throw new AdapterError(
@@ -285,7 +295,10 @@ export class PiAdapter implements AgentAdapter {
       await proc.close().catch(() => proc.kill());
       if (err instanceof AdapterError) throw err;
       const reason = err instanceof Error ? err.message : String(err);
-      throw new AdapterError("startup_failed", `pi startup failed: ${reason}`);
+      const cmdSuffix = err instanceof RpcError && err.command ? ` [rpc=${err.command}]` : "";
+      const stderr = proc.getStderrTail().trim();
+      const stderrSuffix = stderr ? `; stderr: ${stderr.slice(-400)}` : "";
+      throw new AdapterError("startup_failed", `pi startup failed: ${reason}${cmdSuffix}${stderrSuffix}`);
     }
   }
 

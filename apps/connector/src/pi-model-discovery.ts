@@ -55,7 +55,7 @@ export class PiModelDiscovery {
         cwd: scratch, env: this.options.env(), onEvent: () => {}, onExit: () => {},
       });
       proc.spawn();
-      const timeout = this.options.timeoutMs ?? 5000;
+      const timeout = this.options.timeoutMs ?? 15_000;
       const [state, available] = await Promise.all([proc.rpc({ type: 'get_state' }, timeout), proc.rpc({ type: 'get_available_models' }, timeout)]);
       if (this.stopped || !Array.isArray(available.models)) throw new Error('discovery_failed');
       const models: AgentModelCatalog['models'] = [], seen = new Set<string>();
