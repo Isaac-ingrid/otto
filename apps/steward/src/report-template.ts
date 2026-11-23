@@ -582,31 +582,43 @@ export function skillOfferCard(input: {
   description: string;
   summaryBullets: string[];
   projectApproved: boolean;
+  offerKind?: "create" | "update";
+  evidenceCount?: number;
+  evidenceSummary?: string | null;
   threadTitle?: string;
   failureReason?: string | null;
 }): LocalMessage {
+  const isUpdate = input.offerKind === "update";
   const head = input.threadTitle ? `【${clip(input.threadTitle, 80)}】` : "";
   const bullets = input.summaryBullets
     .filter((b) => b.trim().length > 0)
     .slice(0, 3)
     .map((b) => `- ${clip(b, 120)}`);
+  const evidenceLine = input.evidenceSummary?.trim()
+    ? `依据：${clip(input.evidenceSummary, 160)}`
+    : (input.evidenceCount ?? 1) >= 2
+      ? `依据：跨 ${input.evidenceCount} 次仓库会话出现同类模式`
+      : null;
+  const primaryLabel = isUpdate ? "更新仓库技能" : "写入仓库技能";
+  const title = isUpdate ? "要更新这条仓库技能吗？" : "要把这次排障套路存成仓库技能吗？";
   const lines = [
-    `${head}💡 要把这次排障套路存成仓库技能吗？`,
+    `${head}💡 ${title}`,
     "",
     `技能：${clip(input.name, 80)}（\`${input.relativePath}\` · 仓库 ${clip(input.repoName, 50)}）`,
     `适用场景：${clip(input.description, 180)}`,
+    ...(evidenceLine ? [evidenceLine] : []),
     ...(bullets.length > 0 ? ["", ...bullets] : []),
     ...(!input.projectApproved
       ? ["", "提示：Codex 与 Claude 可直接发现；该仓库尚未开启 pi 本地信任（`otto repo-config <path> --approve`），但派发摘要仍会提醒按需查阅该文件。"]
       : []),
-    ...(input.failureReason ? ["", `上次写入未完成：${clip(input.failureReason, 140)}（处理后可再次点击「写入仓库技能」重试）`] : []),
+    ...(input.failureReason ? ["", `上次写入未完成：${clip(input.failureReason, 140)}（处理后可再次点击「${primaryLabel}」重试）`] : []),
     "",
     "未点击前不会改动磁盘文件；可在工作台中先预览与编辑草稿。",
   ];
   return {
     text: lines.join("\n"),
     buttons: [
-      { label: "写入仓库技能", action: "skill_offer_accept", primary: true },
+      { label: primaryLabel, action: "skill_offer_accept", primary: true },
       { label: "忽略", action: "skill_offer_decline" },
     ],
   };

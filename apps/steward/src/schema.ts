@@ -1543,4 +1543,25 @@ export const MIGRATIONS: readonly Migration[] = [
       `;
     },
   },
+  {
+    // Cross-session skill pattern mining & incremental skill update offers:
+    // lets sh_skill_offer distinguish new skill creation ('create') from incremental revisions
+    // to an existing .agents/skills/<slug>/SKILL.md ('update'), along with cross-session
+    // evidence counts, summary, and baseSha256.
+    id: "049_skill_offer_mode_and_evidence",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_skill_offer ADD COLUMN offerKind TEXT NOT NULL DEFAULT 'create'`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_skill_offer ADD COLUMN evidenceCount INTEGER NOT NULL DEFAULT 1`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_skill_offer ADD COLUMN evidenceSummary TEXT`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_skill_offer ADD COLUMN baseSha256 TEXT`;
+      });
+    },
+  },
 ];

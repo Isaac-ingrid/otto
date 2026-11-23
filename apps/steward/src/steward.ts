@@ -3522,6 +3522,14 @@ export class Steward extends Agent<Env> {
         budget: () => this.budgetState(),
         canSyncRepoSkills: (deviceId) => this.connectorProto.canSyncRepoSkills(deviceId),
         readCheckpoint: (wid, sig) => this.connectorProto.checkpointWorker(wid, sig),
+        readRepoSkill: async (deviceId, repoId, target, slug, sig) => {
+          const res = await this.connectorProto.repoSkillOp(
+            deviceId,
+            { action: "read", scope: { kind: "repo", repoId }, target, slug },
+            AbortSignal.any([sig, AbortSignal.timeout(4_000)]),
+          );
+          return res.action === "read" ? { markdown: res.markdown, sha256: res.summary.sha256 } : null;
+        },
         completeText: async ({ systemPrompt, userPrompt, signal }) => {
           if (this.ambientSkillRepliesForTest !== null) {
             const scripted = this.ambientSkillRepliesForTest.shift();
@@ -3560,11 +3568,15 @@ export class Steward extends Agent<Env> {
       deviceId: worker.deviceId,
       repoId: worker.repoId,
       target: "agents-skill",
+      offerKind: candidate.offerKind,
       slug: candidate.slug,
       name: candidate.name,
       description: candidate.description,
       summaryBullets: candidate.summaryBullets,
       markdown: candidate.markdown,
+      evidenceCount: candidate.evidenceCount,
+      evidenceSummary: candidate.evidenceSummary,
+      baseSha256: candidate.baseSha256,
     });
     if (!offer) return;
     const thread = this.ledger.threads.get(worker.threadId);
@@ -3585,16 +3597,20 @@ export class Steward extends Agent<Env> {
         description: offer.description,
         summaryBullets: offer.summaryBullets,
         projectApproved: ctx.projectApproved,
+        offerKind: offer.offerKind,
+        evidenceCount: offer.evidenceCount,
+        evidenceSummary: offer.evidenceSummary,
         ...(thread ? { threadTitle: thread.title } : {}),
       }),
     });
+    const verb = offer.offerKind === "update" ? "仓库技能更新提议" : "高摩擦排障技能提议";
     this.ledger.timeline.add(
       worker.threadId,
       "note",
-      `已生成高摩擦排障技能提议：${offer.name}（${relativePath}，待确认写入）`,
-      { offerId: offer.id, workerId, slug: offer.slug, friction: candidate.frictionReason },
+      `已生成${verb}：${offer.name}（${relativePath}，待确认写入）`,
+      { offerId: offer.id, workerId, slug: offer.slug, offerKind: offer.offerKind, evidenceCount: offer.evidenceCount, friction: candidate.frictionReason },
     );
-    this.logChannel("ambient_skill_offered", `${workerId}:${offer.id}:${offer.slug}:${candidate.frictionReason}`);
+    this.logChannel("ambient_skill_offered", `${workerId}:${offer.id}:${offer.offerKind}:${offer.slug}:${candidate.frictionReason}`);
   }
 
   async setWorkerDiffTimeoutForTest(ms: number): Promise<void> {
@@ -4632,7 +4648,8 @@ export class Steward extends Agent<Env> {
       });
       return;
     }
-    this.ledger.ownerInputs.record("local", msgId, `写入仓库技能 ${offer.slug}`, threadId);
+    const isUpdate = offer.offerKind === "update";
+    this.ledger.ownerInputs.record("local", msgId, `${isUpdate ? "更新" : "写入"}仓库技能 ${offer.slug}`, threadId);
     try {
       const writeRes = await this.connectorProto.repoSkillOp(
         offer.deviceId,
@@ -4642,7 +4659,7 @@ export class Steward extends Agent<Env> {
           target: offer.target,
           slug: offer.slug,
           markdown: offer.markdown,
-          overwrite: false,
+          overwrite: isUpdate,
         },
         AbortSignal.timeout(8_000),
       );
@@ -4651,15 +4668,15 @@ export class Steward extends Agent<Env> {
       this.ledger.timeline.add(
         offer.threadId,
         "note",
-        `用户确认写入仓库技能：${writeRes.summary.relativePath}`,
-        { offerId: offer.id, slug: offer.slug, path: writeRes.summary.relativePath },
+        `用户确认${isUpdate ? "更新" : "写入"}仓库技能：${writeRes.summary.relativePath}`,
+        { offerId: offer.id, offerKind: offer.offerKind, slug: offer.slug, path: writeRes.summary.relativePath },
       );
       await this.enqueueOutbound({
         kind: "text",
         to: OWNER_ID,
         threadId,
         urgency: "push",
-        text: `✅ 已写入仓库技能 \`${writeRes.summary.relativePath}\`（后续新任务派发将自动纳入索引；可在「记忆与调度 → 仓库技能」中查看或编辑）。`,
+        text: `✅ 已${isUpdate ? "更新" : "写入"}仓库技能 \`${writeRes.summary.relativePath}\`（后续新任务派发将自动纳入索引；可在「记忆与调度 → 仓库技能」中查看或编辑）。`,
       });
     } catch (err) {
       const code = err instanceof WorkspaceError ? err.code : "io_failed";

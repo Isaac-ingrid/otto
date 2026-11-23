@@ -122,6 +122,7 @@ export const KNOWN_TITLES = {
   '要把这个变成例行任务吗？': 'titleRoutine',
   '记住这条项目观察吗？': 'titleNoteConfirm',
   '要把这次排障套路存成仓库技能吗？': 'titleSkillOffer',
+  '要更新这条仓库技能吗？': 'titleSkillOfferUpdate',
 };
 
 /** Full-screen states: [title, body]. */

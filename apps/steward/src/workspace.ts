@@ -290,10 +290,14 @@ export interface WorkspaceSkillOfferMeta {
   repoId: string;
   repoName: string;
   target: string;
+  offerKind: "create" | "update";
   slug: string;
   name: string;
   description: string;
   markdown: string;
+  evidenceCount: number;
+  evidenceSummary: string | null;
+  baseSha256: string | null;
   projectApproved: boolean;
   status: string;
   savedPath: string | null;
@@ -345,10 +349,14 @@ function createSkillOfferMetaResolver(
       repoId: offer.repoId,
       repoName: repoName.get(offer.repoId) ?? offer.repoId,
       target: offer.target,
+      offerKind: offer.offerKind,
       slug: offer.slug,
       name: offer.name,
       description: offer.description,
       markdown: offer.markdown,
+      evidenceCount: offer.evidenceCount,
+      evidenceSummary: offer.evidenceSummary,
+      baseSha256: offer.baseSha256,
       projectApproved: ctx.projectApproved,
       status: offer.status,
       savedPath: offer.savedPath,

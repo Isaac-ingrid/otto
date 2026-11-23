@@ -272,6 +272,7 @@ export interface RepoContextRow {
 }
 
 export type SkillOfferStatus = "offered" | "saving" | "saved" | "failed" | "dismissed";
+export type SkillOfferKind = "create" | "update";
 
 export interface SkillOfferRow {
   id: string;
@@ -280,17 +281,29 @@ export interface SkillOfferRow {
   deviceId: string;
   repoId: string;
   target: RepoSkillTarget;
+  offerKind: SkillOfferKind;
   slug: string;
   name: string;
   description: string;
   summaryBullets: string[];
   markdown: string;
+  evidenceCount: number;
+  evidenceSummary: string | null;
+  baseSha256: string | null;
   status: SkillOfferStatus;
   savedPath: string | null;
   savedSha256: string | null;
   failureReason: string | null;
   createdAt: number;
   decidedAt: number | null;
+}
+
+export interface RepoSessionReportRow extends ReportRow {
+  deviceId: string;
+  repoId: string;
+  agent: string;
+  lastOutcome: string | null;
+  receivedAt: number;
 }
 
 export interface OfflineDispatchRow {
@@ -1822,6 +1835,27 @@ export function createLedger(deps: LedgerDeps) {
         SELECT * FROM sh_report WHERE threadId = ${threadId} ORDER BY receivedAt, rowid
       `.map(viewReport);
     },
+    /** Recent worker reports across all Threads for a repository (newest first), used for
+     *  cross-session recurring pattern detection in skill triage. */
+    recentByRepo(repoId: string, limit = 12): RepoSessionReportRow[] {
+      const bounded = Math.max(1, Math.min(30, Math.trunc(limit)));
+      return sql<Record<string, unknown>>`
+        SELECT r.*, w.deviceId, w.repoId, w.agent, w.lastOutcome
+        FROM sh_report r
+        JOIN sh_worker w ON w.workerId = r.workerId
+        WHERE w.repoId = ${repoId}
+          AND COALESCE(w.workerRelation, 'relay') = 'relay'
+        ORDER BY r.receivedAt DESC, r.rowid DESC
+        LIMIT ${bounded}
+      `.map((row) => ({
+        ...viewReport(row),
+        deviceId: String(row.deviceId),
+        repoId: String(row.repoId),
+        agent: String(row.agent),
+        lastOutcome: (row.lastOutcome as string | null) ?? null,
+        receivedAt: Number(row.receivedAt ?? 0),
+      }));
+    },
   };
 
   // ---- handoff briefs (steward.md §2.6, issue #8) -------------------------------------------------
@@ -2911,11 +2945,15 @@ export function createLedger(deps: LedgerDeps) {
     deviceId: r.deviceId as string,
     repoId: r.repoId as string,
     target: (r.target === "claude-skill" || r.target === "claude-command" ? r.target : "agents-skill") as RepoSkillTarget,
+    offerKind: r.offerKind === "update" ? "update" : "create",
     slug: r.slug as string,
     name: r.name as string,
     description: r.description as string,
     summaryBullets: jsonOrNull<string[]>(r.summaryJson as string | null) ?? [],
     markdown: r.markdown as string,
+    evidenceCount: typeof r.evidenceCount === "number" && r.evidenceCount >= 1 ? Math.trunc(r.evidenceCount) : 1,
+    evidenceSummary: (r.evidenceSummary as string | null) ?? null,
+    baseSha256: (r.baseSha256 as string | null) ?? null,
     status: r.status as SkillOfferStatus,
     savedPath: (r.savedPath as string | null) ?? null,
     savedSha256: (r.savedSha256 as string | null) ?? null,
@@ -2932,22 +2970,29 @@ export function createLedger(deps: LedgerDeps) {
       deviceId: string;
       repoId: string;
       target?: RepoSkillTarget;
+      offerKind?: SkillOfferKind;
       slug: string;
       name: string;
       description: string;
       summaryBullets: string[];
       markdown: string;
+      evidenceCount?: number;
+      evidenceSummary?: string | null;
+      baseSha256?: string | null;
     }): SkillOfferRow | null {
       const id = input.id ?? `so_${ulid()}`;
+      const offerKind: SkillOfferKind = input.offerKind === "update" ? "update" : "create";
+      const evidenceCount = Math.max(1, Math.trunc(input.evidenceCount ?? 1));
       sql`
         INSERT OR IGNORE INTO sh_skill_offer (
-          id, workerId, threadId, deviceId, repoId, target, slug, name, description,
-          summaryJson, markdown, status, createdAt
+          id, workerId, threadId, deviceId, repoId, target, offerKind, slug, name, description,
+          summaryJson, markdown, evidenceCount, evidenceSummary, baseSha256, status, createdAt
         )
         VALUES (
           ${id}, ${input.workerId}, ${input.threadId}, ${input.deviceId}, ${input.repoId},
-          ${input.target ?? "agents-skill"}, ${input.slug}, ${input.name}, ${input.description},
-          ${JSON.stringify(input.summaryBullets.slice(0, 3))}, ${input.markdown}, 'offered', ${now()}
+          ${input.target ?? "agents-skill"}, ${offerKind}, ${input.slug}, ${input.name}, ${input.description},
+          ${JSON.stringify(input.summaryBullets.slice(0, 3))}, ${input.markdown},
+          ${evidenceCount}, ${input.evidenceSummary ?? null}, ${input.baseSha256 ?? null}, 'offered', ${now()}
         )
       `;
       return skillOffers.byWorker(input.workerId);

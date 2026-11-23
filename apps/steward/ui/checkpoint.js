@@ -420,7 +420,11 @@ export function createCheckpointModal(deps) {
         : null,
       sd
         ? h('div', { id: 'ck-skill-box', class: 'cp-create-form' },
-          h('span', { class: 'cp-meta' }, t('ckSkillPreviewTitle')),
+          h('div', { class: 'cp-badges' },
+            h('span', { class: 'cp-meta' }, t('ckSkillPreviewTitle')),
+            sd.offerKind === 'update' ? h('span', { class: 'cp-badge accent' }, t('ckOfferUpdateBadge')) : null,
+            (sd.evidenceCount ?? 1) >= 2 ? h('span', { class: 'cp-badge' }, t('ckOfferEvidenceBadge', { count: sd.evidenceCount })) : null),
+          sd.evidenceSummary ? h('p', { class: 'cp-trust-note' }, sd.evidenceSummary) : null,
           h('textarea', {
             class: 'cp-textarea cp-code-textarea',
             rows: 9,
@@ -505,6 +509,9 @@ export function createCheckpointModal(deps) {
         repoId: offer.repoId,
         repoName: offer.repoName ?? null,
         hasWriteWorktree: false,
+        offerKind: offer.offerKind === 'update' ? 'update' : 'create',
+        evidenceCount: offer.evidenceCount ?? 1,
+        evidenceSummary: offer.evidenceSummary ?? null,
         skill: {
           slug: offer.slug,
           name: offer.name,
@@ -517,7 +524,7 @@ export function createCheckpointModal(deps) {
       state.skillSlugDraft = offer.slug ?? '';
       state.skillTarget = offer.target || 'agents-skill';
       state.skillScopeKind = 'repo';
-      state.skillConfirmOverwrite = false;
+      state.skillConfirmOverwrite = offer.offerKind === 'update';
       state.skillWriteError = null;
       state.skillSavedResult = null;
       state.notesNotice = null;

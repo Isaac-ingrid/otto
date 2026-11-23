@@ -594,4 +594,239 @@ describe("Ambient Memory & Skill Loop (Stage 1 -> Stage 3)", () => {
 
     connector.close();
   });
+
+  it("Stage 4: mines cross-session recurring patterns on moderate runs and proposes lossless updates to existing skills", async () => {
+    const existingSkillMd = [
+      "---",
+      "name: sqlite-wal-recovery",
+      "description: Recover SQLite WAL corruption and online backup steps",
+      "---",
+      "",
+      "# Steps",
+      "1. Run PRAGMA integrity_check before backup.",
+    ].join("\n");
+    const updatedSkillMd = [
+      "---",
+      "name: sqlite-wal-recovery",
+      "description: Recover SQLite WAL corruption and online backup steps",
+      "---",
+      "",
+      "# Steps",
+      "1. Run PRAGMA integrity_check before backup.",
+      "2. Always use SQLite .backup instead of plain cp while WAL is active.",
+    ].join("\n");
+
+    const connector = await pairFakeConnector("mac-stage4", {
+      run: null,
+      autorun: false,
+      repos: [
+        {
+          repoId: "/srv/repo-cross",
+          name: "repo-cross",
+          projectApproved: true,
+        },
+      ],
+    });
+    connector.repoSkills = true;
+    connector.workerCheckpoint = true;
+    await connector.connect();
+
+    // Seed an existing repo skill + an earlier completed session on a DIFFERENT Thread in the same repo with overlapping WAL backup topic
+    await runInDurableObject(ownerStub(), (instance: Steward) => {
+      const ledger = (instance as unknown as { ledger: Steward["ledger"] }).ledger;
+      const sql = (instance as unknown as { sql: (s: TemplateStringsArray, ...v: unknown[]) => unknown }).sql.bind(instance);
+      ledger.repos.syncSkillMutation(connector.deviceId, "/srv/repo-cross", {
+        kind: "list",
+        projectApproved: true,
+        skills: [
+          {
+            target: "agents-skill",
+            slug: "sqlite-wal-recovery",
+            relativePath: ".agents/skills/sqlite-wal-recovery/SKILL.md",
+            name: "sqlite-wal-recovery",
+            description: "Recover SQLite WAL corruption and online backup steps",
+            bytes: existingSkillMd.length,
+            updatedAt: Date.now() - 86_400_000,
+            sha256: SHA_1,
+            gitStatus: "clean",
+          },
+        ],
+      });
+      const oldThread = ledger.threads.create({
+        title: "Prior SQLite WAL backup incident",
+        goal: "Fix SQLite WAL online backup script",
+        repoIds: ["/srv/repo-cross"],
+      });
+      ledger.workers.register({
+        workerId: "w_prior_wal_1",
+        threadId: oldThread.threadId,
+        deviceId: connector.deviceId,
+        repoId: "/srv/repo-cross",
+        agent: "pi",
+        mode: "write",
+      });
+      sql`
+        INSERT INTO sh_report (workerId, seq, threadId, status, summary, changes, decisions, receivedAt)
+        VALUES (
+          'w_prior_wal_1', 1, ${oldThread.threadId}, 'done',
+          'Fixed SQLite WAL backup failure by switching from cp to sqlite3 .backup',
+          ${JSON.stringify(["deploy/backup.sh"])},
+          ${JSON.stringify(["Never copy live WAL files with plain cp; use sqlite3 .backup"])},
+          ${Date.now() - 3_600_000}
+        )
+      `;
+    });
+
+    await ownerStub().setAmbientSkillRepliesForTest([
+      JSON.stringify({
+        worthSaving: true,
+        confidence: "high",
+        mode: "update",
+        reason: "Recurring WAL backup pattern across 2 sessions uncovered missing .backup rule",
+        evidenceSummary: "跨 2 次会话反复遇到 SQLite WAL 在线备份问题",
+        slug: "sqlite-wal-recovery",
+        name: "SQLite WAL 备份与恢复",
+        description: "Recover SQLite WAL corruption and online backup steps",
+        summaryBullets: ["补充 WAL 活跃期严禁直接 cp、必须使用 sqlite3 .backup 的步骤"],
+        markdown: updatedSkillMd,
+      }),
+    ]);
+    await scriptModel(fauxAssistantMessage([fauxText("已修复 WAL 备份脚本。")]));
+
+    await ownerStub().dispatchForTest({
+      prompt: "Fix SQLite WAL online backup in deploy/backup.sh",
+      repoRef: "repo-cross",
+      newTitle: "SQLite WAL backup follow-up",
+    });
+    const [cmdMod] = await connector.waitForCmds(1);
+    const wMod = String((cmdMod!.args as { workerId: string }).workerId);
+    connector.send({ t: "cmd_ack", re: cmdMod!.id, status: "accepted" });
+    connector.send({ t: "cmd_result", re: cmdMod!.id, ok: true, data: { sessionId: "s_mod", branch: "otto/wal-2", cwd: "/srv/repo-cross" } });
+    await connector.emit("started", wMod, { sessionId: "s_mod", cwd: "/srv/repo-cross", branch: "otto/wal-2" });
+    await connector.emit("report", wMod, {
+      type: "report",
+      status: "done",
+      summary: "Updated deploy/backup.sh to enforce sqlite3 .backup for SQLite WAL",
+      changes: ["deploy/backup.sh"],
+      decisions: ["Use sqlite3 .backup instead of plain cp while WAL is active"],
+      git: { branch: "otto/wal-2", base: "main", ahead: 1, dirty: 0, filesChanged: 1, insertions: 8, deletions: 2, pushed: true },
+    });
+    await connector.emit("settled", wMod, { type: "settled", outcome: "reported" });
+
+    // Moderate friction (only 5 tools / 3 turns, NO high-friction label) — still triggers via cross-session recurring pattern!
+    const [cpMod] = await connector.waitForWorkerCheckpointRequests(1);
+    connector.send({
+      t: "worker_checkpoint_result",
+      re: cpMod!.id,
+      ok: true,
+      checkpoint: {
+        workerId: wMod,
+        agent: "pi",
+        sessionId: "s_mod",
+        turnCount: 3,
+        toolCallCount: 5,
+        initialGoal: "Fix SQLite WAL online backup in deploy/backup.sh",
+        lastPrompt: null,
+        touchedFiles: { modified: ["deploy/backup.sh"], read: [] },
+        commandsRun: ["sqlite3 /var/lib/otto/steward.sqlite '.backup /tmp/test.sqlite'"],
+        recentNotes: ["WAL active requires sqlite3 .backup"],
+        lastStep: { tool: "bash", args: "sqlite3 .backup" },
+        git: null,
+      },
+    });
+
+    // Steward pre-reads the matching existing agents-skill so the LLM can produce a lossless update
+    const [readReq] = await connector.waitForRepoSkillRequests(1);
+    expect(readReq).toMatchObject({
+      t: "repo_skill_op",
+      op: {
+        action: "read",
+        scope: { kind: "repo", repoId: "/srv/repo-cross" },
+        target: "agents-skill",
+        slug: "sqlite-wal-recovery",
+      },
+    });
+    connector.send({
+      t: "repo_skill_result",
+      re: readReq!.id,
+      ok: true,
+      data: {
+        action: "read",
+        projectApproved: true,
+        markdown: existingSkillMd,
+        summary: {
+          target: "agents-skill",
+          slug: "sqlite-wal-recovery",
+          relativePath: ".agents/skills/sqlite-wal-recovery/SKILL.md",
+          name: "sqlite-wal-recovery",
+          description: "Recover SQLite WAL corruption and online backup steps",
+          bytes: existingSkillMd.length,
+          updatedAt: Date.now() - 86_400_000,
+          sha256: SHA_1,
+          gitStatus: "clean",
+        },
+      },
+    });
+
+    await ownerStub().waitSkillTriageIdleForTest();
+    await waitRunsSettled();
+    await waitWhileOutboundPending();
+
+    const client = await workspaceClient();
+    const wsOffer = await client.getWorkspace();
+    const offerMsg = wsOffer.messages.find((m) => m.id.startsWith("skilloffer:") && m.skillOffer?.workerId === wMod);
+    expect(offerMsg).toBeDefined();
+    expect(offerMsg!.open).toBe(true);
+    expect(offerMsg!.card?.title).toContain("要更新这条仓库技能吗");
+    expect(offerMsg!.skillOffer).toMatchObject({
+      workerId: wMod,
+      repoId: "/srv/repo-cross",
+      offerKind: "update",
+      slug: "sqlite-wal-recovery",
+      evidenceCount: 2,
+      evidenceSummary: "跨 2 次会话反复遇到 SQLite WAL 在线备份问题",
+      baseSha256: SHA_1,
+    });
+
+    // Accepting an update offer must send overwrite: true
+    const acceptPromise = client.postAction(wsOffer.csrf, offerMsg!.id, "skill_offer_accept");
+    const [, writeReq] = await connector.waitForRepoSkillRequests(2);
+    expect(writeReq).toMatchObject({
+      t: "repo_skill_op",
+      op: {
+        action: "write",
+        scope: { kind: "repo", repoId: "/srv/repo-cross" },
+        target: "agents-skill",
+        slug: "sqlite-wal-recovery",
+        markdown: updatedSkillMd,
+        overwrite: true,
+      },
+    });
+    connector.send({
+      t: "repo_skill_result",
+      re: writeReq!.id,
+      ok: true,
+      data: {
+        action: "write",
+        projectApproved: true,
+        summary: {
+          target: "agents-skill",
+          slug: "sqlite-wal-recovery",
+          relativePath: ".agents/skills/sqlite-wal-recovery/SKILL.md",
+          name: "sqlite-wal-recovery",
+          description: "Recover SQLite WAL corruption and online backup steps",
+          bytes: updatedSkillMd.length,
+          updatedAt: Date.now(),
+          sha256: SHA_2,
+          gitStatus: "modified",
+        },
+      },
+    });
+    expect((await acceptPromise).status).toBe(202);
+    await waitWhileOutboundPending();
+
+    const wsAfter = await client.getWorkspace();
+    expect(wsAfter.messages.find((m) => m.id === offerMsg!.id)?.open).toBe(false);
+    connector.close();
+  });
 });
