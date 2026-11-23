@@ -338,6 +338,25 @@ describe("Worktree audit & controlled cleanup engine (Direction E, Stage 1)", ()
       expect(missingConfirm.ok && missingConfirm.result.items[0]?.status).toBe("blocked_dirty");
       expect(existsSync(wtDirty)).toBe(true);
 
+      // TOCTOU lock & branch-mismatch guards:
+      // 1) Locking `wtDirty` via `git worktree lock` blocks cleanup (`blocked_locked`) instead of hitting `rm` fallback
+      await git(repo, ["worktree", "lock", wtDirty]);
+      const lockedAttempt = await manager.cleanupWorktrees({
+        confirmedRisks: true,
+        targets: [{ kind: "worker", repoId: repo, workerId: "w-dirty-gate", expectedBranch: "otto/dirty-gate-1", force: true }],
+      });
+      expect(lockedAttempt.ok && lockedAttempt.result.items[0]?.status).toBe("blocked_locked");
+      expect(existsSync(wtDirty)).toBe(true);
+      await git(repo, ["worktree", "unlock", wtDirty]);
+
+      // 2) Stale `expectedBranch` after a branch switch blocks cleanup (`branch_mismatch`)
+      const mismatchAttempt = await manager.cleanupWorktrees({
+        confirmedRisks: true,
+        targets: [{ kind: "worker", repoId: repo, workerId: "w-unmerged", expectedBranch: "otto/some-other-branch", force: true }],
+      });
+      expect(mismatchAttempt.ok && mismatchAttempt.result.items[0]?.status).toBe("branch_mismatch");
+      expect(existsSync(wtUnmerged)).toBe(true);
+
       // Pass 2: Explicit secondary confirmation (`force: true, confirmedRisks: true`) removes dirty & unmerged
       const pass2 = await manager.cleanupWorktrees({
         confirmedRisks: true,

@@ -398,6 +398,12 @@ describe("048_repo_policy_and_worktree_audit and Steward worktree audit/cleanup 
       selectable: true,
       safeCleanable: true,
       requiresRiskConfirm: false,
+      cleanupTarget: {
+        kind: "worker",
+        repoId: "/srv/repo-serial",
+        workerId: archivedWorkerId,
+        expectedBranch: "otto/arch-1",
+      },
     });
     expect(byKey.get("repo-serial-12345678/crash-orphan")).toMatchObject({
       category: "orphaned",
@@ -412,6 +418,12 @@ describe("048_repo_policy_and_worktree_audit and Steward worktree audit/cleanup 
       safeCleanable: false,
       requiresRiskConfirm: true,
       highRisk: true,
+      cleanupTarget: {
+        kind: "worker",
+        repoId: "/srv/repo-serial",
+        workerId: staleWorkerId,
+        expectedBranch: "otto/stale-1",
+      },
     });
     expect(byKey.get("repo-serial-12345678/merged-1")).toMatchObject({
       category: "idle_clean",
@@ -466,6 +478,13 @@ describe("048_repo_policy_and_worktree_audit and Steward worktree audit/cleanup 
     });
     expect(activeCleanAttempt.status).toBe(409);
     expect(await activeCleanAttempt.json()).toMatchObject({ error: "worker_active", workerId: runningWorkerId });
+
+    // Seed a queued offline `cleanup_worktree` outbox row for `archivedWorkerId` to verify dedup withdrawal
+    await runInDurableObject(ownerStub(), async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: LedgerSql }).sql.bind(instance);
+      sql`INSERT INTO outbox (cmdId, deviceId, workerId, cseq, kind, payload, notAfter, held, state, createdAt)
+          VALUES ('cleanup:stale_outbox_1', ${fake.deviceId}, ${archivedWorkerId}, 99, 'cleanup_worktree', '{}', NULL, 1, 'queued', ${now})`;
+    });
 
     // 4) Valid safe cleanup + idempotency replay + ledger reconciliation (`worktreeStatus = 'cleaned'` + timeline note)
     const cleanPromise = SELF.fetch(appUrl(`/app/api/machines/${fake.deviceId}/worktrees/cleanup`), {
@@ -545,12 +564,14 @@ describe("048_repo_policy_and_worktree_audit and Steward worktree audit/cleanup 
     expect(replayRes.status).toBe(200);
     expect(fake.worktreeCleanupRequests).toHaveLength(1);
 
-    // Verify Steward updated sh_worker.worktreeStatus and Thread timeline
+    // Verify Steward updated sh_worker.worktreeStatus, Thread timeline, and withdrew queued outbox cleanup
     await runInDurableObject(ownerStub(), async (instance: Steward) => {
       const ledger = (instance as unknown as { ledger: Ledger }).ledger;
       expect(ledger.workers.get(archivedWorkerId)?.worktreeStatus).toBe("cleaned");
       const entries = ledger.timeline.list(archivedThreadId);
       expect(entries.some((e) => e.text.includes("已通过机器巡检清理工作树") && e.text.includes(archivedWorkerId))).toBe(true);
+      const outboxRow = await instance.outboxRow("cleanup:stale_outbox_1");
+      expect(outboxRow?.state).toBe("expired");
     });
 
     // Disconnect machine -> audit returns 409 machine_offline, while workspace snapshot STILL preserves repoPolicies!

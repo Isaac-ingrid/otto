@@ -51,8 +51,8 @@ export interface AuditedRepoPolicyView {
 export interface AuditedWorktreeItemView {
   itemKey: string;
   cleanupTarget:
-    | { kind: "worker"; repoId: string; workerId: string }
-    | { kind: "orphan_dir"; repoId: string; worktreeKey: string }
+    | { kind: "worker"; repoId: string; workerId: string; expectedBranch?: string | null }
+    | { kind: "orphan_dir"; repoId: string; worktreeKey: string; expectedBranch?: string | null }
     | null;
   repoId: string;
   repoName: string;
@@ -241,15 +241,17 @@ export function buildMachineWorktreeAuditResponse(input: {
       category = "idle_clean";
     }
 
+    const effectiveBranch = wt.branch ?? stewardWorker?.branch ?? null;
+    const branchGuard = effectiveBranch ? { expectedBranch: effectiveBranch } : {};
     const cleanupTarget: AuditedWorktreeItemView["cleanupTarget"] =
       !wt.managedByOtto || category === "active"
         ? null
         : wt.localWorkerId
-          ? { kind: "worker", repoId: wt.repoId, workerId: wt.localWorkerId }
+          ? { kind: "worker", repoId: wt.repoId, workerId: wt.localWorkerId, ...branchGuard }
           : wt.existsOnDisk
-            ? { kind: "orphan_dir", repoId: wt.repoId, worktreeKey: wt.worktreeKey }
+            ? { kind: "orphan_dir", repoId: wt.repoId, worktreeKey: wt.worktreeKey, ...branchGuard }
             : stewardWorker
-              ? { kind: "worker", repoId: wt.repoId, workerId: stewardWorker.workerId }
+              ? { kind: "worker", repoId: wt.repoId, workerId: stewardWorker.workerId, ...branchGuard }
               : null;
 
     const selectable = cleanupTarget !== null && !wt.locked;
@@ -278,7 +280,7 @@ export function buildMachineWorktreeAuditResponse(input: {
       prunable: wt.prunable,
       locked: wt.locked,
       detached: wt.detached,
-      branch: wt.branch ?? stewardWorker?.branch ?? null,
+      branch: effectiveBranch,
       headSha: wt.headSha,
       baseBranch: wt.baseBranch,
       dirty: wt.dirty,

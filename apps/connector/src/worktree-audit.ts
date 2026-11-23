@@ -779,6 +779,25 @@ async function cleanupSingleTarget(input: {
   }
 
   // Live TOCTOU re-inspection immediately before mutating anything on disk:
+  const rawPorcelain = await gitRead(repo.path, ["worktree", "list", "--porcelain"]);
+  if (rawPorcelain) {
+    const canonicalCandidate = await canonicalPathOrResolved(candidatePath);
+    const liveEntry = parsePorcelainWorktreeList(rawPorcelain).find(
+      (entry) => resolve(entry.path) === candidatePath || resolve(entry.path) === canonicalCandidate,
+    );
+    if (liveEntry?.locked) {
+      return {
+        targetKey,
+        kind: target.kind,
+        repoId: repo.repoId,
+        workerId: matchedWorker?.workerId ?? null,
+        worktreeKey: containment.worktreeKey,
+        branch: liveEntry.branch ?? matchedWorker?.branch ?? null,
+        status: "blocked_locked",
+      };
+    }
+  }
+
   const baseBranch = matchedWorker?.base ?? repoDefaultBranch ?? null;
   const [liveGit, measuredDisk] = await Promise.all([
     inspectLiveGitWorktreeState(repo.path, candidatePath, baseBranch, repoDefaultBranch),

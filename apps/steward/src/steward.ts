@@ -3655,6 +3655,17 @@ export class Steward extends Agent<Env> {
     const payload = await this.connectorProto.cleanupMachineWorktrees(input.deviceId, input.op, signal);
     const res = this.ctx.storage.transactionSync(() => {
       const reconciled = reconcileWorktreeCleanupOutcomes(this.ledger, input.deviceId, input.id, payload);
+      for (const item of payload.items) {
+        if ((item.status === "cleaned" || item.status === "already_gone") && item.workerId) {
+          this.sql`
+            UPDATE outbox SET state = 'expired', held = 0
+            WHERE deviceId = ${input.deviceId}
+              AND workerId = ${item.workerId}
+              AND kind = 'cleanup_worktree'
+              AND state = 'queued'
+          `;
+        }
+      }
       this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res: reconciled }));
       this.ledger.webRequests.complete(key);
       return reconciled;

@@ -144,6 +144,7 @@ export const WorktreeCleanupItemStatusSchema = z.enum([
   "already_gone",
   "blocked_dirty",
   "blocked_unmerged",
+  "blocked_locked",
   "worker_active",
   "forbidden_path",
   "branch_mismatch",
