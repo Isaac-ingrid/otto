@@ -4,6 +4,7 @@ import { h, icon } from './dom.js';
 import { formatClock, formatDay, formatUsd, safeUrl } from './format.js';
 import { localeTag, t, tOr } from './i18n.js';
 import { TELEMETRY_I18N_KEYS, createTelemetryPane, renderSchedulesBudgetCard } from './telemetry.js';
+import { WORKTREE_AUDIT_I18N_KEYS, createWorktreeAuditPane } from './worktree-audit.js';
 
 export const SKILL_ERROR_KEYS = {
   invalid_slug: 'skErr_invalid_slug',
@@ -42,6 +43,7 @@ export const CONTROL_PLANE_I18N_KEYS = [
   ...Object.values(SKILL_ERROR_KEYS),
   'skErr_failed',
   ...TELEMETRY_I18N_KEYS,
+  ...WORKTREE_AUDIT_I18N_KEYS,
 ];
 
 const LAYERS = ['active', 'resident', 'project', 'archive'];
@@ -63,7 +65,7 @@ export function controlPlaneCounts(summary) {
 const repoCompositeKey = (r) => `${r.deviceId ?? ''}::${r.id}`;
 
 export function createControlPlane(deps) {
-  const { request, uuid, toast, bump, refreshWorkspace, openThread, openPrDiagnosis, prefillPrFix, serverNow } = deps;
+  const { request, uuid, toast, bump, refreshWorkspace, getMachines, openThread, openPrDiagnosis, prefillPrFix, serverNow } = deps;
   let searchTimer = null;
 
   const cp = {
@@ -120,6 +122,7 @@ export function createControlPlane(deps) {
     bump();
   };
   const telemetryPane = createTelemetryPane({ request, touch, openThread });
+  const worktreePane = createWorktreeAuditPane({ request, uuid, toast, touch, refreshWorkspace, getMachines, openThread });
 
   const formatStamp = (ts) => {
     if (!ts || !Number.isFinite(ts)) return '–';
@@ -1147,7 +1150,9 @@ export function createControlPlane(deps) {
           ? 'skills'
           : initialTab === 'telemetry'
             ? 'telemetry'
-            : 'memory';
+            : initialTab === 'worktrees'
+              ? 'worktrees'
+              : 'memory';
       cp.memory.eviction = null;
       cp.memory.focusNoteId = null;
       cp.skills.editor = null;
@@ -1157,6 +1162,8 @@ export function createControlPlane(deps) {
         cp.memory.repoId = '';
         cp.memory.q = typeof initialTarget.q === 'string' ? initialTarget.q : '';
         cp.memory.focusNoteId = initialTarget.noteId;
+      } else if (cp.tab === 'worktrees') {
+        worktreePane.open(initialTarget);
       } else if (initialTarget) {
         cp.skills.pendingTarget = initialTarget;
         cp.skills.status = 'idle';
@@ -1212,7 +1219,18 @@ export function createControlPlane(deps) {
                 if (cp.skills.status === 'idle') void loadRepoSkills();
                 touch();
               },
-            }, icon('sparkle'), t('cpTabSkills'))),
+            }, icon('sparkle'), t('cpTabSkills')),
+            h('button', {
+              type: 'button',
+              role: 'tab',
+              'aria-selected': String(cp.tab === 'worktrees'),
+              class: `cp-tab${cp.tab === 'worktrees' ? ' active' : ''}`,
+              onclick: () => {
+                cp.tab = 'worktrees';
+                worktreePane.ensureLoaded();
+                touch();
+              },
+            }, icon('branch'), t('cpTabWorktrees'))),
           h('button', {
             type: 'button',
             class: 'cp-mini-btn',
@@ -1221,6 +1239,7 @@ export function createControlPlane(deps) {
               void loadSchedules();
               if (cp.tab === 'telemetry') telemetryPane.reload();
               if (cp.tab === 'skills') void loadRepoSkills();
+              if (cp.tab === 'worktrees') worktreePane.reload();
             },
           }, t('cpRefresh'))),
         cp.tab === 'memory'
@@ -1229,7 +1248,9 @@ export function createControlPlane(deps) {
             ? renderSchedulesTab()
             : cp.tab === 'telemetry'
               ? telemetryPane.render()
-              : renderSkillsTab());
+              : cp.tab === 'worktrees'
+                ? worktreePane.render()
+                : renderSkillsTab());
     },
   };
 }

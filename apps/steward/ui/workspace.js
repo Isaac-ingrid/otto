@@ -1357,6 +1357,8 @@ function machineCard(machine) {
           ? h('button', { type: 'button', class: 'button primary', disabled: !machine.online, dataset: { action: 'directory-open', machine: machine.id, focus: `directory-open:${machine.id}` } }, icon('plus'), t('addDirectory')) : null,
         machine.repos.length > 0
           ? h('button', { type: 'button', class: 'button', dataset: { action: 'machine-skills', machine: machine.id, focus: `machine-skills:${machine.id}` } }, icon('sparkle'), t('machineRepoSkills')) : null,
+        machine.repos.length > 0
+          ? h('button', { type: 'button', class: 'button', dataset: { action: 'machine-worktrees', machine: machine.id, focus: `machine-worktrees:${machine.id}` } }, icon('branch'), t('machineWorktreesBtn')) : null,
         h('button', { type: 'button', class: 'button danger', dataset: { action: 'revoke', machine: machine.id, focus: `revoke:${machine.id}` } }, t('revokeMachine'))));
 }
 
@@ -1917,6 +1919,7 @@ const controlPlane = createControlPlane({
   toast,
   bump: () => bumpDialog(),
   refreshWorkspace: () => refresh(),
+  getMachines: () => state.snapshot?.machines ?? [],
   openThread: async (threadId, archived = false) => {
     if (archived && !state.showArchived) {
       state.showArchived = true;
@@ -2077,7 +2080,7 @@ function renderDialog() {
     type === 'directory' ? snapshot.machines : null,
     type === 'scope' ? [state.selected, snapshot.threads.map((entry) => [entry.id, entry.title, entry.state, entry.repos])] : null,
     type === 'diff' ? [state.diffRev, state.dialog.workerId] : null,
-    type === 'control-plane' ? [controlPlane.signature(), snapshot?.controlPlaneSummary, minuteBucket()] : null,
+    type === 'control-plane' ? [controlPlane.signature(), snapshot?.controlPlaneSummary, (snapshot?.machines ?? []).map((m) => [m.id, m.online, m.slots, m.repoPolicies]), minuteBucket()] : null,
     type === 'checkpoint' ? [checkpointModal.signature()] : null,
     type === 'pr-diagnosis' ? [prDiagnosisModal.signature()] : null,
     type === 'search' ? [searchPalette.signature(), snapshot?.threads?.length ?? 0] : null,
@@ -3339,6 +3342,16 @@ document.addEventListener('click', (event) => {
       state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
       drawn.delete('dialog');
       controlPlane.open('skills', { deviceId: dataset.machine });
+      return renderDialog();
+    case 'worktree-audit':
+      state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      controlPlane.open('worktrees');
+      return renderDialog();
+    case 'machine-worktrees':
+      state.dialog = { type: 'control-plane', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
+      drawn.delete('dialog');
+      controlPlane.open('worktrees', { deviceId: dataset.machine });
       return renderDialog();
     case 'machines': return openDialog('machines');
     case 'account': return openDialog('account');

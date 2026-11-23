@@ -13,6 +13,7 @@ import { CONTROL_PLANE_I18N_KEYS, controlPlaneCounts, skillErrorKey, skillTarget
 import { PR_DIAGNOSIS_I18N_KEYS, formatPrDiagnosisPlainText, prActionButtonKey, prDiagnosisCategoryKey, prDiagnosisSkipKey, prDiagnosisSourceKey, prReviewDecisionKey } from "../ui/pr-diagnosis.js";
 import { SEARCH_PALETTE_I18N_KEYS, SEARCH_PALETTE_SCOPES, buildLocalSuggestions, highlightSegments, normalizeHighlightRanges } from "../ui/search-palette.js";
 import { TELEMETRY_CATEGORIES, TELEMETRY_I18N_KEYS, classifyWorkerContext, computeStackedChartGeometry, formatCompactTokens } from "../ui/telemetry.js";
+import { WORKTREE_AUDIT_I18N_KEYS, WORKTREE_CATEGORIES, buildWorktreeCleanupRequest, formatDiskBytes, selectSafeWorktreeKeys, summarizeSelectedWorktrees, worktreeCategoryI18nKey, worktreeErrorKey } from "../ui/worktree-audit.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
@@ -31,7 +32,7 @@ const asset = async (name: string): Promise<string> => (await fetchAsset(name)).
 // design §6) — it is included here for the sink scan and the import-export check (it has no
 // imports, so that check is a no-op for it) but NOT in the i18n-completeness scan below, whose
 // own file list is separate and intentionally does not reach it.
-const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "search-palette.js", "telemetry.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
+const SCRIPTS = ["workspace.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "search-palette.js", "telemetry.js", "worktree-audit.js", "model-picker.js", "dom.js", "format.js", "model.js", "i18n.js", "markup.js", "session.js", "session-model.js", "thread-frames.js", "login.js"];
 
 /** The text between the parentheses of every call to `fn(…)` (not `x.fn(…)`, not `prefixfn(…)`). */
 function callArguments(source: string, fn: string): string[] {
@@ -143,7 +144,7 @@ describe("interface copy", () => {
 
   it("covers every string the page asks for, including the data-driven ones", async () => {
     const used = new Set<string>();
-    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "search-palette.js", "telemetry.js"]) {
+    for (const name of ["workspace.js", "workspace.html", "session.js", "control-plane.js", "checkpoint.js", "pr-diagnosis.js", "search-palette.js", "telemetry.js", "worktree-audit.js"]) {
       const source = await asset(name);
       for (const args of callArguments(source, "t")) for (const key of args.matchAll(/'([A-Za-z_:]+)'/g)) used.add(key[1]!);
       for (const attribute of source.matchAll(/data-i18n(?:-[a-z]+)?="([A-Za-z_:]+)"/g)) used.add(attribute[1]!);
@@ -155,7 +156,7 @@ describe("interface copy", () => {
     for (const state of ["connecting", "live", "reconnecting", "disconnected"]) used.add(state);
     // The session viewer labels the bookkeeping entries an agent writes by kind (session-model.js).
     for (const kind of ["session", "model", "thinking_level", "compaction", "branch_summary", "custom", "label", "session_info", "usage", "context_edit", "system", "summary", "info", "error"]) used.add(`svMeta_${kind}`);
-    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS), ...CONTROL_PLANE_I18N_KEYS, ...PR_DIAGNOSIS_I18N_KEYS, ...SEARCH_PALETTE_I18N_KEYS, ...TELEMETRY_I18N_KEYS]) used.add(key);
+    for (const key of [...Object.values(ACTION_KEYS), ...Object.values(KNOWN_TITLES), ...Object.values(FATAL_COPY).flat(), ...Object.values(DIFF_ERROR_KEYS), ...Object.values(WORKTREE_STATUS_KEYS), ...CONTROL_PLANE_I18N_KEYS, ...PR_DIAGNOSIS_I18N_KEYS, ...SEARCH_PALETTE_I18N_KEYS, ...TELEMETRY_I18N_KEYS, ...WORKTREE_AUDIT_I18N_KEYS]) used.add(key);
     expect(used.size).toBeGreaterThan(60);
     expect([...used].filter((key) => !(key in STRINGS))).toEqual([]);
   });
@@ -795,6 +796,112 @@ describe("budget telemetry and worker context helpers", () => {
       contextWindow: 200_000,
       compactionCount: 2,
       lastToolDurationMs: 4120,
+    });
+  });
+});
+
+describe("worktree audit and two-tier cleanup helpers", () => {
+  it("formats disk byte footprints and prefixes >= when bounded entry scans hit the safety cap", () => {
+    expect(formatDiskBytes(0, true)).toBe("0 B");
+    expect(formatDiskBytes(512, true)).toBe("512 B");
+    expect(formatDiskBytes(15 * 1024, true)).toBe("15 KB");
+    expect(formatDiskBytes(48.25 * 1024 * 1024, true)).toBe("48.3 MB");
+    expect(formatDiskBytes(1.5 * 1024 * 1024 * 1024, false)).toBe(">= 1.5 GB");
+    expect(worktreeCategoryI18nKey("orphaned")).toBe("wtCat_orphaned");
+    expect(worktreeCategoryI18nKey("external_unmanaged")).toBe("wtCat_external_unmanaged");
+    expect(worktreeErrorKey("risk_confirmation_required")).toBe("wtErr_risk_confirmation_required");
+    expect(worktreeErrorKey("unknown")).toBe("wtErr_failed");
+    expect(WORKTREE_CATEGORIES).toEqual(["all", "orphaned", "stale_unmerged", "recent_unmerged", "idle_clean", "active"]);
+  });
+
+  it("selects only clean orphaned/idle items for 1-click safe cleanup and forces secondary review on any dirty or unmerged selection", () => {
+    const items = [
+      {
+        itemKey: "worker:w-clean-orphan",
+        repoId: "r1",
+        category: "orphaned",
+        selectable: true,
+        safeCleanable: true,
+        highRisk: false,
+        dirty: false,
+        unmerged: false,
+        requiresRiskConfirm: false,
+        diskBytes: 10_000,
+        diskComplete: true,
+        cleanupTarget: { kind: "worker", repoId: "r1", workerId: "w-clean-orphan", expectedBranch: "otto/done-1" },
+      },
+      {
+        itemKey: "wt:r1:otto-a1b2/crash-leftover",
+        repoId: "r1",
+        category: "orphaned",
+        selectable: true,
+        safeCleanable: false,
+        highRisk: true,
+        dirty: true,
+        unmerged: false,
+        requiresRiskConfirm: true,
+        diskBytes: 25_000,
+        diskComplete: false,
+        cleanupTarget: { kind: "orphan_dir", repoId: "r1", worktreeKey: "otto-a1b2/crash-leftover", expectedBranch: "otto/wip-2" },
+      },
+      {
+        itemKey: "worker:w-stale-unmerged",
+        repoId: "r2",
+        category: "stale_unmerged",
+        selectable: true,
+        safeCleanable: false,
+        highRisk: true,
+        dirty: false,
+        unmerged: true,
+        requiresRiskConfirm: true,
+        diskBytes: 40_000,
+        diskComplete: true,
+        cleanupTarget: { kind: "worker", repoId: "r2", workerId: "w-stale-unmerged", expectedBranch: "otto/feat-3" },
+      },
+      {
+        itemKey: "worker:w-active",
+        repoId: "r1",
+        category: "active",
+        selectable: false,
+        safeCleanable: false,
+        highRisk: false,
+        dirty: false,
+        unmerged: false,
+        requiresRiskConfirm: false,
+        diskBytes: 50_000,
+        diskComplete: true,
+        cleanupTarget: null,
+      },
+    ];
+
+    expect(selectSafeWorktreeKeys(items)).toEqual(["worker:w-clean-orphan"]);
+
+    const safeOnly = summarizeSelectedWorktrees(items, new Set(["worker:w-clean-orphan", "worker:w-active"]));
+    expect(safeOnly.totalCount).toBe(1);
+    expect(safeOnly.canDirectBatchClean).toBe(true);
+    expect(safeOnly.requiresRiskModal).toBe(false);
+    expect(buildWorktreeCleanupRequest(safeOnly, false)).toEqual({
+      targets: [{ kind: "worker", repoId: "r1", workerId: "w-clean-orphan", expectedBranch: "otto/done-1" }],
+      pruneRepoIds: ["r1"],
+    });
+
+    const mixedSelection = summarizeSelectedWorktrees(
+      items,
+      new Set(["worker:w-clean-orphan", "wt:r1:otto-a1b2/crash-leftover", "worker:w-stale-unmerged"]),
+    );
+    expect(mixedSelection.totalCount).toBe(3);
+    expect(mixedSelection.riskyCount).toBe(2);
+    expect(mixedSelection.canDirectBatchClean).toBe(false);
+    expect(mixedSelection.requiresRiskModal).toBe(true);
+    expect(mixedSelection.diskComplete).toBe(false);
+    expect(buildWorktreeCleanupRequest(mixedSelection, true)).toEqual({
+      targets: [
+        { kind: "worker", repoId: "r1", workerId: "w-clean-orphan", expectedBranch: "otto/done-1" },
+        { kind: "orphan_dir", repoId: "r1", worktreeKey: "otto-a1b2/crash-leftover", expectedBranch: "otto/wip-2", force: true },
+        { kind: "worker", repoId: "r2", workerId: "w-stale-unmerged", expectedBranch: "otto/feat-3", force: true },
+      ],
+      pruneRepoIds: ["r1", "r2"],
+      confirmedRisks: true,
     });
   });
 });
