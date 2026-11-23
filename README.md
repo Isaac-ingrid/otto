@@ -11,26 +11,27 @@
 **Otto is an always-on coordinator for the coding agents on your computers.** You talk to one personal agent in a web workspace; it remembers ongoing work, routes tasks to local agents, and brings their progress and decisions back to the same conversation. The steward runs on your own server, while the agents work in repositories you choose on your own machines.
 
 - **An always-on coordinator.** The steward stays online on your VPS even when your computers are asleep; it keeps conversations, memory and scheduled follow-ups. Local coding work waits for an available connector.
-- **One conversation across machines.** Tasks, decisions, follow-ups and progress stay together.
-- **Your code stays on your machines.** A connector runs pi (or an installed Claude Code) locally; full coding-agent session records stay there.
-- **Memory with boundaries.** Otto keeps preferences and project conventions separately from conversation history. It tracks their source and confirmation, and distinguishes replacing an outdated fact from merely making room.
-- **Read-only PR follow-up.** Bind a GitHub PR to an existing task Thread and let the server monitor external status without keeping a coding agent running. Conversational create/cancel requests require your confirmation on a dedicated card.
-- **You stay in control.** The workspace shows active work and decisions that need you; you can stop an in-progress reply. Stopping a reply, stopping a worker and cancelling a PR watch are separate operations.
+- **One conversation across machines.** Tasks, decisions, follow-ups, live context/tool telemetry and progress stay together, searchable via `Cmd/Ctrl+K` hybrid FTS5 search.
+- **Your code stays on your machines.** A connector runs **pi**, **Claude Code**, **Codex CLI**, or **Antigravity (`agy`)** locally with per-repo write isolation (`worktree`/`in-place`), concurrency (`parallel`/`serial`), and optional approved hooks; full coding-agent session records stay there.
+- **Memory, skills & control plane with boundaries.** Otto keeps preferences and project conventions separately from conversation history (tracking source and confirmation), supports deterministic worker checkpoints, sandboxed repo skills (`SKILL.md`), dual-ledger budget/telemetry charts, and read-only worktree audits with guarded cleanup.
+- **Read-only PR follow-up & triage.** Bind a GitHub PR to an existing task Thread to monitor CI checks, diagnose failing logs, detect merge conflicts, and triage trusted reviews without keeping a coding agent running. Conversational create/cancel requests require your confirmation on a dedicated card.
+- **You stay in control.** Stopping a reply, stopping/interrupting a worker (with 5-state stop diagnostics and inline interrupt), and cancelling a PR watch are three separate operations.
 
 ## Architecture
 
 ```text
-Browser workspace / optional Owner API
+Browser workspace (Cmd/Ctrl+K search · 5-tab Control Plane) / optional Owner API
                 │ HTTPS / WebSocket
                 ▼
-Your VPS: Otto steward (Node.js + SQLite)
-  ├─ deterministic core: events, deadlines, notifications, durable queues
-  ├─ LLM steward: routing, judgment, summaries, tool calls
-  └─ ledger: Threads, decisions, notes, worker state
+Your VPS: Otto steward (Node.js + SQLite + FTS5)
+  ├─ deterministic core: events, deadlines, PR triage, notifications, durable queues
+  ├─ LLM steward: routing, judgment, summaries, tool calls, skill distillation
+  └─ ledger: Threads, decisions, notes, dual-ledger budget/telemetry, repo policies
                 ▲ outbound WebSocket connections
                 │
 Connectors on macOS / Linux / Windows
-  └─ pi or Claude Code → selected local repositories
+  ├─ local adapters: pi, Claude Code, Codex CLI, Antigravity (agy)
+  └─ local relays: worktree diff/audit/cleanup, checkpoints, sandboxed repo skills
 ```
 
 The steward uses a single persistent SQLite database; connectors initiate connections, so your computers need no inbound ports. Repository contents and complete coding-agent session records stay on those computers. The steward and local agents use separately configured models. The **same steward logic** can alternatively run on [Cloudflare Workers + a SQLite-backed Durable Object](docs/design/node-host.md); the VPS deployment uses a Node host adapter rather than a separate product.
@@ -161,7 +162,7 @@ pnpm deploy:vps
 pnpm deploy:vps -- --apply-env
 ```
 
-`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired `~/.otto` background service; `pnpm deploy:vps` backs up SQLite online, deploys the Steward bundle and UI with automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`.
+`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired background service (run `otto install` once after service-unit updates without re-pairing; `PiAdapter` defaults to a 20s startup RPC timeout). `pnpm deploy:vps` backs up SQLite online, deploys the Steward bundle and UI with automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`.
 
 ## Documentation
 
