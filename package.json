@@ -11,6 +11,13 @@
     "dev:steward": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
     "deploy:vps": "node scripts/deploy-vps.mjs",
+    "connector:restart": "node apps/connector/build.mjs && node apps/connector/bin/otto.js restart && node apps/connector/bin/otto.js status",
+    "local:up": "node scripts/local-dev.mjs up",
+    "local:restart": "node scripts/local-dev.mjs restart",
+    "local:down": "node scripts/local-dev.mjs down",
+    "local:status": "node scripts/local-dev.mjs status",
+    "local:logs": "node scripts/local-dev.mjs logs",
+    "local:reset": "node scripts/local-dev.mjs reset",
     "test:improvement": "node --test scripts/improvement/improvement.test.mjs",
     "eval:compare": "node scripts/improvement/compare-results.mjs"
   },
