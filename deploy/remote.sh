@@ -44,10 +44,14 @@ if [ "${1:-}" = "--copy" ]; then
   [ "$#" -eq 2 ] || { echo "usage: remote.sh --copy <local-path> <remote-dir>" >&2; exit 1; }
   src="$1"; dest="$2"
   ssh "${ssh_args[@]}" "$target" "mkdir -p '$dest'"
+  tar_flags=()
+  if [ "$(uname -s)" = "Darwin" ]; then
+    tar_flags=(--no-xattrs --no-mac-metadata)
+  fi
   if [ -d "$src" ]; then
-    tar -C "$src" -cf - . | ssh "${ssh_args[@]}" "$target" "tar -C '$dest' -xf -"
+    COPYFILE_DISABLE=1 tar "${tar_flags[@]}" -C "$src" -cf - . | ssh "${ssh_args[@]}" "$target" "tar --warning=no-unknown-keyword -C '$dest' -xf -"
   else
-    tar -C "$(dirname "$src")" -cf - "$(basename "$src")" | ssh "${ssh_args[@]}" "$target" "tar -C '$dest' -xf -"
+    COPYFILE_DISABLE=1 tar "${tar_flags[@]}" -C "$(dirname "$src")" -cf - "$(basename "$src")" | ssh "${ssh_args[@]}" "$target" "tar --warning=no-unknown-keyword -C '$dest' -xf -"
   fi
   exit 0
 fi
