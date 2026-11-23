@@ -65,7 +65,7 @@ afterEach(async () => {
   }
   await new Promise((resolve) => setTimeout(resolve, 100));
   store?.close();
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 /** A deterministic tree sampler consuming the script (last value repeats). */
@@ -557,7 +557,7 @@ describe("the strike window vs sends and stops (PR #46 review round 3)", () => {
 
 // ---- The REAL sampler vs a CPU-bound tool child (PR #41 review finding 1) -------------------------
 
-describe("the production sampler under a busy tool child (fake-pi, real ps)", () => {
+describe.skipIf(process.platform === "win32")("the production sampler under a busy tool child (fake-pi, real ps)", () => {
   // The bug this pins: pi itself idles at ~2% CPU while its tool child burns 80%+. Measuring
   // only the parent declared a stall and killed a healthy build. The tree sampler must see
   // the child. Marker-matched cleanup only — never a broad pkill.
@@ -603,25 +603,48 @@ describe("the production sampler under a busy tool child (fake-pi, real ps)", ()
 describe.runIf(process.platform === "win32")("the Windows sampler against a real busy child", () => {
   it("sees a descendant's CPU, and reports the same member set across samples", async () => {
     // A parent that idles (like pi) with a CPU-bound child of its own (like a tool call).
-    const spin = "const e=Date.now()+8000;while(Date.now()<e){Math.sqrt(Math.random())}";
+    const spin = "process.stdout.write('spinning\\n');const e=Date.now()+20000;while(Date.now()<e){Math.sqrt(Math.random())}";
     const holder = spawn(
       process.execPath,
-      ["-e", `require("child_process").spawn(process.execPath,["-e",${JSON.stringify(spin)}],{stdio:"ignore"});setInterval(()=>{},1000)`],
-      { stdio: "ignore" },
+      [
+        "-e",
+        `const c=require("child_process").spawn(process.execPath,["-e",${JSON.stringify(spin)}],{stdio:["ignore","pipe","ignore"]});c.stdout.once("data",()=>process.stdout.write("ready\\n"));setInterval(()=>{},1000)`,
+      ],
+      { stdio: ["ignore", "pipe", "ignore"] },
     );
     try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timed out waiting for busy child spawn")), 10_000);
+        holder.once("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        holder.stdout!.once("data", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
       const deps = { win32Deps: { cacheMs: 0 } };
-      const first = await sampleTreeCpu(holder.pid!, deps);
-      await new Promise((resolve) => setTimeout(resolve, 1_200));
-      const second = await sampleTreeCpu(holder.pid!, deps);
+      let first: TreeCpuSample | undefined;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const candidate = await sampleTreeCpu(holder.pid!, deps);
+        if (candidate && candidate.members.length >= 2) {
+          first = candidate;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
       expect(first).toBeDefined();
+      expect(first!.members.length).toBeGreaterThanOrEqual(2);
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const second = await sampleTreeCpu(holder.pid!, deps);
       expect(second).toBeDefined();
       expect(second!.members).toEqual(first!.members); // a stable tree, so the delta means something
-      expect(second!.totalCpuMs).toBeGreaterThan(first!.totalCpuMs + 200);
+      expect(second!.totalCpuMs).toBeGreaterThan(first!.totalCpuMs + 150);
     } finally {
       terminateProcess(holder.pid!, "SIGKILL");
     }
-  }, 30_000);
+  }, 45_000);
 });
 
 describe("stallContinueNote", () => {

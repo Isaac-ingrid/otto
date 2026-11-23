@@ -1536,11 +1536,16 @@ export const MIGRATIONS: readonly Migration[] = [
       ignoringDuplicateColumn(() => {
         sql`ALTER TABLE sh_repo ADD COLUMN writeConcurrency TEXT NOT NULL DEFAULT 'parallel'`;
       });
-      sql`
-        UPDATE sh_repo
-        SET writeIsolation = 'in-place', writeConcurrency = 'serial'
-        WHERE capabilityKind = 'plain' AND writeIsolation = 'worktree'
-      `;
+      const repoCols = new Set(
+        sql<{ name: string }>`SELECT name FROM pragma_table_info('sh_repo')`.map((r) => r.name),
+      );
+      if (repoCols.has("capabilityKind")) {
+        sql`
+          UPDATE sh_repo
+          SET writeIsolation = 'in-place', writeConcurrency = 'serial'
+          WHERE capabilityKind = 'plain' AND writeIsolation = 'worktree'
+        `;
+      }
     },
   },
   {

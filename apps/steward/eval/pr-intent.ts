@@ -180,7 +180,7 @@ export async function runIntentCase(c: IntentCase, models: Models, agent: { mode
   // Cancellation plans bind the identity from the initial world, never one selected by the model.
   const planned = ownerPlans.map(plan => plan.action === 'create' ? plan : {
     action: 'cancel' as const, watch: watches.list().filter(w => w.id === plan.watchId).map(w => ({ id: w.id, threadId: w.threadId, url: w.url,
-      evidenceMode: w.evidenceMode, createdAt: w.createdAt, expiresAt: w.expiresAt, intervalMs: w.intervalMs }))[0],
+      evidenceMode: w.evidenceMode, watchGoal: w.watchGoal ?? 'ci_pass', createdAt: w.createdAt, expiresAt: w.expiresAt, intervalMs: w.intervalMs }))[0],
   });
   ctx.prWatches = {
     list: () => watches.list(), targetsForThread: id => watches.targetsForThread(id), threadsForUrl: url => watches.threadsForUrl(url),

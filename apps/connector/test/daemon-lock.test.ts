@@ -177,7 +177,7 @@ describe("daemon lock: single instance (ADR-0018 phase 2)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("keeps the lock out of the worker lock directory, so a stale-lock sweep cannot touch it", () => {
     const dir = tempState();

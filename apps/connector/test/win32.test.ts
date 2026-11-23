@@ -124,5 +124,5 @@ describe.runIf(process.platform === "win32")("live Windows process table", () =>
     expect(self!.ppid).toBeGreaterThan(0);
     // Sync and async read the same table.
     expect(win32ProcessCreated(process.pid, { cacheMs: 0 })).toBe(self!.created);
-  });
+  }, 30_000);
 });

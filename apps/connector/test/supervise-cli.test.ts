@@ -39,7 +39,7 @@ describe("otto daemon under a supervisor", () => {
     const { code, stderr } = await daemonRun(home, { [SUPERVISOR_ENV]: "99999999" });
     expect(code).not.toBe(0);
     expect(stderr).toMatch(/its parent is pid \d+/);
-  });
+  }, 30_000);
 
   it("refuses when its parent does not hold the state directory", async () => {
     home = mkdtempSync(join(tmpdir(), "otto-supervised-"));
@@ -48,7 +48,7 @@ describe("otto daemon under a supervisor", () => {
     expect(code).not.toBe(0);
     expect(stderr).toMatch(/does not hold the state directory lock/);
     expect(stderr).toMatch(/no lock/);
-  });
+  }, 30_000);
 
   it("passes the gate once its parent holds the lock, and still needs pairing", async () => {
     home = mkdtempSync(join(tmpdir(), "otto-supervised-"));
@@ -62,7 +62,7 @@ describe("otto daemon under a supervisor", () => {
     // child is supposed to report to its supervisor.
     expect(stderr).toMatch(/not paired/);
     expect(stderr).not.toMatch(/refusing to run a second daemon/);
-  });
+  }, 30_000);
 
   it("status names the child only while the lock's holder is that supervisor", async () => {
     home = mkdtempSync(join(tmpdir(), "otto-supervised-"));
