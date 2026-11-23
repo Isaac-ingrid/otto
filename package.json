@@ -11,7 +11,7 @@
     "dev:steward": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
     "deploy:vps": "node scripts/deploy-vps.mjs",
-    "connector:restart": "node apps/connector/build.mjs && node apps/connector/bin/otto.js restart && node apps/connector/bin/otto.js status",
+    "connector:restart": "pnpm --filter @isaac2ingrid/otto build && node apps/connector/bin/otto.js restart && node apps/connector/bin/otto.js status",
     "local:up": "node scripts/local-dev.mjs up",
     "local:restart": "node scripts/local-dev.mjs restart",
     "local:down": "node scripts/local-dev.mjs down",
