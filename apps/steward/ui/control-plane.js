@@ -3,8 +3,11 @@
 import { h, icon } from './dom.js';
 import { formatClock, formatDay, formatUsd, safeUrl } from './format.js';
 import { localeTag, t, tOr } from './i18n.js';
+import { nextRovingItem } from './model.js';
 import { TELEMETRY_I18N_KEYS, createTelemetryPane, renderSchedulesBudgetCard } from './telemetry.js';
 import { WORKTREE_AUDIT_I18N_KEYS, createWorktreeAuditPane } from './worktree-audit.js';
+
+export const CONTROL_PLANE_TABS = ['memory', 'schedules', 'telemetry', 'skills', 'worktrees'];
 
 export const SKILL_ERROR_KEYS = {
   invalid_slug: 'skErr_invalid_slug',
@@ -313,6 +316,7 @@ export function createControlPlane(deps) {
           sha256: detail.summary.sha256,
           relativePath: detail.summary.relativePath,
           markdown: detail.markdown,
+          initialMarkdown: detail.markdown,
           conflict: false,
           errorCode: null,
         };
@@ -633,6 +637,7 @@ export function createControlPlane(deps) {
     h('div', { class: 'cp-form-grid' },
       h('select', {
         class: 'cp-select',
+        'aria-label': t('cpTabMemory'),
         onchange: (e) => {
           cp.memory.draftLayer = e.target.value;
           if (cp.memory.draftLayer === 'project' && !cp.memory.draftRepoId && cp.memory.repos[0]) {
@@ -645,12 +650,14 @@ export function createControlPlane(deps) {
       isProject
         ? h('select', {
           class: 'cp-select',
+          'aria-label': t('cpSkillsSelectRepo'),
           onchange: (e) => { cp.memory.draftRepoId = e.target.value; touch(); },
         }, cp.memory.repos.map((r) =>
           h('option', { value: r.id, selected: cp.memory.draftRepoId === r.id }, repoLabel(r.id))))
         : null,
       h('select', {
         class: 'cp-select',
+        'aria-label': t('cpSaveNote'),
         onchange: (e) => { cp.memory.draftKind = e.target.value; touch(); },
       }, NOTE_KINDS.map((k) =>
         h('option', { value: k, selected: cp.memory.draftKind === k }, t(`cpNoteKind_${k}`)))),
@@ -666,6 +673,7 @@ export function createControlPlane(deps) {
       rows: 3,
       maxlength: 2400,
       placeholder: t('cpNoteTextPlaceholder'),
+      'aria-label': t('cpNoteTextPlaceholder'),
       dataset: { focus: 'cp-note-text' },
       value: cp.memory.draftText,
       oninput: (e) => { cp.memory.draftText = e.target.value; },
@@ -715,6 +723,7 @@ export function createControlPlane(deps) {
           h('input', {
             type: 'search',
             placeholder: t('cpSearchNotes'),
+            'aria-label': t('cpSearchNotes'),
             value: cp.memory.q,
             dataset: { focus: 'cp-memory-search' },
             oninput: (e) => {
@@ -726,12 +735,14 @@ export function createControlPlane(deps) {
         h('div', { class: 'cp-pills', role: 'group' }, LAYERS.map((layer) =>
           h('button', {
             type: 'button',
+            'aria-pressed': String(cp.memory.layer === layer),
             class: `cp-pill${cp.memory.layer === layer ? ' active' : ''}`,
             onclick: () => { cp.memory.layer = layer; void loadMemory(); },
           }, t(`cpLayer_${layer}`)))),
         cp.memory.repos.length > 0
           ? h('select', {
             class: 'cp-select',
+            'aria-label': t('cpAllRepos'),
             onchange: (e) => { cp.memory.repoId = e.target.value; void loadMemory(); },
           },
           h('option', { value: '', selected: cp.memory.repoId === '' }, t('cpAllRepos')),
@@ -929,6 +940,7 @@ export function createControlPlane(deps) {
     h('div', { class: 'cp-form-grid' },
       h('select', {
         class: 'cp-select',
+        'aria-label': t('cpSkillSlotLabel'),
         onchange: (e) => {
           cp.skills.newTarget = e.target.value;
           cp.skills.newConfirmOverwrite = false;
@@ -958,6 +970,7 @@ export function createControlPlane(deps) {
       class: 'cp-textarea cp-code-textarea',
       rows: 9,
       placeholder: t('cpSkillMarkdownPlaceholder'),
+      'aria-label': t('cpTabSkills'),
       dataset: { focus: 'cp-new-skill-md' },
       value: cp.skills.newMarkdown,
       oninput: (e) => { cp.skills.newMarkdown = e.target.value; },
@@ -1153,8 +1166,16 @@ export function createControlPlane(deps) {
             : initialTab === 'worktrees'
               ? 'worktrees'
               : 'memory';
+      cp.memory.formOpen = false;
+      cp.memory.draftText = '';
+      cp.memory.draftPinned = false;
       cp.memory.eviction = null;
       cp.memory.focusNoteId = null;
+      cp.skills.createOpen = false;
+      cp.skills.newSlug = '';
+      cp.skills.newMarkdown = '';
+      cp.skills.newConfirmOverwrite = false;
+      cp.skills.formError = null;
       cp.skills.editor = null;
       cp.skills.confirmDeleteKey = null;
       if (cp.tab === 'memory' && initialTarget?.noteId) {
@@ -1176,61 +1197,89 @@ export function createControlPlane(deps) {
         void loadRepoSkills();
       }
     },
+    isSubmodalOpen() {
+      return cp.tab === 'worktrees' && worktreePane.isRiskModalOpen();
+    },
+    dismissSubmodal() {
+      return cp.tab === 'worktrees' ? worktreePane.dismissRiskModal() : false;
+    },
+    isBusy() {
+      return Boolean(cp.memory.busyKey || cp.schedules.busyKey || cp.skills.busyKey);
+    },
+    hasUnsavedChanges() {
+      const newSkillDirty = cp.skills.createOpen && (
+        Boolean(cp.skills.newSlug.trim())
+        || (Boolean(cp.skills.newMarkdown.trim()) && cp.skills.newMarkdown !== t('cpSkillMarkdownPlaceholder'))
+      );
+      const editSkillDirty = Boolean(cp.skills.editor && cp.skills.editor.markdown !== cp.skills.editor.initialMarkdown);
+      const memoryDirty = (cp.memory.formOpen && Boolean(cp.memory.draftText.trim())) || Boolean(cp.memory.eviction);
+      return Boolean(newSkillDirty || editSkillDirty || memoryDirty);
+    },
+    discardUnsavedChanges() {
+      cp.memory.formOpen = false;
+      cp.memory.draftText = '';
+      cp.memory.draftPinned = false;
+      cp.memory.eviction = null;
+      cp.skills.createOpen = false;
+      cp.skills.newSlug = '';
+      cp.skills.newMarkdown = '';
+      cp.skills.newConfirmOverwrite = false;
+      cp.skills.formError = null;
+      cp.skills.editor = null;
+      cp.skills.confirmDeleteKey = null;
+    },
     signature() {
       return [cp.tab, cp.rev];
     },
     render(summary) {
       const counts = controlPlaneCounts(summary);
+      const activateTab = (next, focusBtn = false) => {
+        cp.tab = next;
+        if (next === 'telemetry') telemetryPane.ensureLoaded();
+        if (next === 'skills' && cp.skills.status === 'idle') void loadRepoSkills();
+        if (next === 'worktrees') worktreePane.ensureLoaded();
+        touch();
+        if (focusBtn && typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => document.getElementById(`cp-tab-${next}`)?.focus());
+        }
+      };
+      const tabProps = (id) => ({
+        id: `cp-tab-${id}`,
+        type: 'button',
+        role: 'tab',
+        tabindex: cp.tab === id ? '0' : '-1',
+        'aria-selected': String(cp.tab === id),
+        'aria-controls': `cp-panel-${id}`,
+        class: `cp-tab${cp.tab === id ? ' active' : ''}`,
+        onclick: () => activateTab(id, false),
+      });
+      const activePane = cp.tab === 'memory'
+        ? renderMemoryTab()
+        : cp.tab === 'schedules'
+          ? renderSchedulesTab()
+          : cp.tab === 'telemetry'
+            ? telemetryPane.render()
+            : cp.tab === 'worktrees'
+              ? worktreePane.render()
+              : renderSkillsTab();
       return h('div', { class: 'cp-root' },
         h('div', { class: 'cp-tabs-bar' },
-          h('div', { class: 'cp-tabs', role: 'tablist' },
-            h('button', {
-              type: 'button',
-              role: 'tab',
-              'aria-selected': String(cp.tab === 'memory'),
-              class: `cp-tab${cp.tab === 'memory' ? ' active' : ''}`,
-              onclick: () => { cp.tab = 'memory'; touch(); },
-            }, icon('memory'), t('cpTabMemory'), counts.attentionCount > 0 ? h('span', { class: 'cp-tab-badge warn' }, String(counts.attentionCount)) : null),
-            h('button', {
-              type: 'button',
-              role: 'tab',
-              'aria-selected': String(cp.tab === 'schedules'),
-              class: `cp-tab${cp.tab === 'schedules' ? ' active' : ''}`,
-              onclick: () => { cp.tab = 'schedules'; touch(); },
-            }, icon('repeat'), t('cpTabSchedules'), counts.activeAuto > 0 ? h('span', { class: 'cp-tab-badge' }, String(counts.activeAuto)) : null),
-            h('button', {
-              type: 'button',
-              role: 'tab',
-              'aria-selected': String(cp.tab === 'telemetry'),
-              class: `cp-tab${cp.tab === 'telemetry' ? ' active' : ''}`,
-              onclick: () => {
-                cp.tab = 'telemetry';
-                telemetryPane.ensureLoaded();
-                touch();
-              },
-            }, icon('signal'), t('cpTabTelemetry')),
-            h('button', {
-              type: 'button',
-              role: 'tab',
-              'aria-selected': String(cp.tab === 'skills'),
-              class: `cp-tab${cp.tab === 'skills' ? ' active' : ''}`,
-              onclick: () => {
-                cp.tab = 'skills';
-                if (cp.skills.status === 'idle') void loadRepoSkills();
-                touch();
-              },
-            }, icon('sparkle'), t('cpTabSkills')),
-            h('button', {
-              type: 'button',
-              role: 'tab',
-              'aria-selected': String(cp.tab === 'worktrees'),
-              class: `cp-tab${cp.tab === 'worktrees' ? ' active' : ''}`,
-              onclick: () => {
-                cp.tab = 'worktrees';
-                worktreePane.ensureLoaded();
-                touch();
-              },
-            }, icon('branch'), t('cpTabWorktrees'))),
+          h('div', {
+            class: 'cp-tabs',
+            role: 'tablist',
+            'aria-label': t('controlPlaneShort'),
+            onkeydown: (e) => {
+              const next = nextRovingItem(CONTROL_PLANE_TABS, cp.tab, e.key);
+              if (!next) return;
+              e.preventDefault();
+              activateTab(next, true);
+            },
+          },
+            h('button', tabProps('memory'), icon('memory'), t('cpTabMemory'), counts.attentionCount > 0 ? h('span', { class: 'cp-tab-badge warn' }, String(counts.attentionCount)) : null),
+            h('button', tabProps('schedules'), icon('repeat'), t('cpTabSchedules'), counts.activeAuto > 0 ? h('span', { class: 'cp-tab-badge' }, String(counts.activeAuto)) : null),
+            h('button', tabProps('telemetry'), icon('signal'), t('cpTabTelemetry')),
+            h('button', tabProps('skills'), icon('sparkle'), t('cpTabSkills')),
+            h('button', tabProps('worktrees'), icon('branch'), t('cpTabWorktrees'))),
           h('button', {
             type: 'button',
             class: 'cp-mini-btn',
@@ -1242,15 +1291,13 @@ export function createControlPlane(deps) {
               if (cp.tab === 'worktrees') worktreePane.reload();
             },
           }, t('cpRefresh'))),
-        cp.tab === 'memory'
-          ? renderMemoryTab()
-          : cp.tab === 'schedules'
-            ? renderSchedulesTab()
-            : cp.tab === 'telemetry'
-              ? telemetryPane.render()
-              : cp.tab === 'worktrees'
-                ? worktreePane.render()
-                : renderSkillsTab());
+        h('div', {
+          id: `cp-panel-${cp.tab}`,
+          class: 'cp-tabpanel',
+          role: 'tabpanel',
+          tabindex: '0',
+          'aria-labelledby': `cp-tab-${cp.tab}`,
+        }, activePane));
     },
   };
 }

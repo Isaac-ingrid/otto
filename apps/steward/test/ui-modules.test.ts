@@ -7,14 +7,15 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { STRINGS, getLocale, setLocale, t, tOr } from "../ui/i18n.js";
 import { dayKey, formatClock, formatDay, formatRelative, formatUsd, parseInline, parseMarkup, plainText, safeUrl, trimOpenMarkup } from "../ui/format.js";
-import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, threadMatches, withPending, workOn } from "../ui/model.js";
-import { formatCheckpointPlainText } from "../ui/checkpoint.js";
-import { CONTROL_PLANE_I18N_KEYS, controlPlaneCounts, skillErrorKey, skillTargetI18nKey } from "../ui/control-plane.js";
+import { ACTION_KEYS, DIFF_ERROR_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, hasModelDraftChanges, initialSetupStep, isImeComposing, isPointOutsideRect, messagesFor, modelAfterProviderChange, modelRejectionKey, nextRovingItem, parseDiffLines, previewOf, serializeModelDraft, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, threadMatches, withPending, workOn } from "../ui/model.js";
+import { createCheckpointModal, formatCheckpointPlainText } from "../ui/checkpoint.js";
+import { CONTROL_PLANE_I18N_KEYS, CONTROL_PLANE_TABS, controlPlaneCounts, createControlPlane, skillErrorKey, skillTargetI18nKey } from "../ui/control-plane.js";
 import { PR_DIAGNOSIS_I18N_KEYS, formatPrDiagnosisPlainText, prActionButtonKey, prDiagnosisCategoryKey, prDiagnosisSkipKey, prDiagnosisSourceKey, prReviewDecisionKey } from "../ui/pr-diagnosis.js";
 import { SEARCH_PALETTE_I18N_KEYS, SEARCH_PALETTE_SCOPES, buildLocalSuggestions, highlightSegments, normalizeHighlightRanges } from "../ui/search-palette.js";
 import { TELEMETRY_CATEGORIES, TELEMETRY_I18N_KEYS, classifyWorkerContext, computeStackedChartGeometry, formatCompactTokens } from "../ui/telemetry.js";
 import { WORKTREE_AUDIT_I18N_KEYS, WORKTREE_CATEGORIES, buildWorktreeCleanupRequest, formatDiskBytes, selectSafeWorktreeKeys, summarizeSelectedWorktrees, worktreeCategoryI18nKey, worktreeErrorKey } from "../ui/worktree-audit.js";
 import { applyThreadState, lastTimelineId, mergeTimeline, timelineEntry } from "../ui/thread-frames.js";
+import { loginPage } from "../src/login-page.ts";
 import { cardView } from "../src/workspace.ts";
 import type { ReportRow, WorkerRow } from "../src/ledger.ts";
 import { askUserCard, noteDecisionCard, offlineAskCard, reportCardFor, routineOfferCard, workerQuestionCard } from "../src/report-template.ts";
@@ -903,5 +904,176 @@ describe("worktree audit and two-tier cleanup helpers", () => {
       pruneRepoIds: ["r1", "r2"],
       confirmedRisks: true,
     });
+  });
+});
+
+describe("modern web UI P0 invariants (Top Layer, Dialog light-dismiss, IME Enter, CSS custom properties)", () => {
+  it("promotes #toast via manual Popover and keeps a non-inert live announcer inside #dialog", async () => {
+    const html = await asset("workspace.html");
+    expect(html).toMatch(/<div[^>]*id="toast"[^>]*popover="manual"[^>]*>/);
+    expect(html).toMatch(/<dialog[^>]*id="dialog"[^>]*>[\s\S]*id="dialog-announcer"[^>]*role="status"[^>]*aria-live="polite"[\s\S]*<\/dialog>/);
+  });
+
+  it("defines every referenced CSS custom property, contains dialog scroll, and consolidates reduced-motion", async () => {
+    const css = await asset("workspace.css");
+    const defined = new Set([...css.matchAll(/(--[A-Za-z0-9_-]+)\s*:/g)].map((m) => m[1]!));
+    const referenced = new Set([...css.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)/g)].map((m) => m[1]!));
+    const missing = [...referenced].filter((name) => !defined.has(name));
+    expect(missing).toEqual([]);
+
+    const reducedMotionBlocks = [...css.matchAll(/@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)/g)];
+    expect(reducedMotionBlocks).toHaveLength(1);
+    expect(css).not.toMatch(/transition-duration:\s*\.001ms\s*!important/);
+    expect(css).toMatch(/dialog\s*\{[^}]*overscroll-behavior:\s*contain/);
+    expect(css).toMatch(/\.toast\s*\{[^}]*inset:\s*auto/);
+  });
+
+  it("guards Enter during active IME composition, keyCode 229, and Safari's post-compositionend window", () => {
+    expect(isImeComposing({ isComposing: true, timeStamp: 100 })).toBe(true);
+    expect(isImeComposing({ isComposing: false, keyCode: 229, timeStamp: 100 })).toBe(true);
+    expect(isImeComposing({ isComposing: false, keyCode: 13, timeStamp: 220 }, 200)).toBe(true);
+    expect(isImeComposing({ isComposing: false, keyCode: 13, timeStamp: 260 }, 200)).toBe(false);
+    // Synthetic events with timeStamp 0 must not be blocked when no composition has ended yet.
+    expect(isImeComposing({ isComposing: false, keyCode: 13, timeStamp: 0 })).toBe(false);
+  });
+
+  it("checks outside-bounds pointer coordinates and model draft changes accurately", () => {
+    const rect = { left: 100, right: 500, top: 80, bottom: 400 };
+    expect(isPointOutsideRect({ clientX: 250, clientY: 200 }, rect)).toBe(false);
+    expect(isPointOutsideRect({ clientX: 100, clientY: 80 }, rect)).toBe(false);
+    expect(isPointOutsideRect({ clientX: 99, clientY: 200 }, rect)).toBe(true);
+    expect(isPointOutsideRect({ clientX: 250, clientY: 401 }, rect)).toBe(true);
+
+    const base = {
+      provider: "openai",
+      modelId: "gpt-5",
+      baseUrl: "",
+      apiKey: "",
+      thinkingJson: "",
+      thinkingLevel: "medium",
+      customModel: false,
+    };
+    const snap = serializeModelDraft(base);
+    expect(hasModelDraftChanges(snap, { ...base })).toBe(false);
+    expect(hasModelDraftChanges(snap, { ...base, apiKey: "sk-test" })).toBe(true);
+    expect(hasModelDraftChanges(snap, { ...base, thinkingLevel: "high" })).toBe(true);
+  });
+
+  it("tracks dirty skill drafts in checkpoint modal and keeps workspace.js free of single-phase dialog click-dismiss", async () => {
+    const ck = createCheckpointModal({
+      request: async () => ({ status: 200, data: { workerId: "w-1" } }),
+      uuid: () => "id-1",
+      toast: () => {},
+      bump: () => {},
+      fillContinuation: () => {},
+      refreshWorkspace: async () => {},
+      openSkillCatalog: () => {},
+    });
+    ck.open("w-1", "t-1");
+    expect(ck.hasUnsavedChanges()).toBe(false);
+
+    ck.openSkillOffer({
+      workerId: "w-1",
+      deviceId: "dev-1",
+      repoId: "repo-1",
+      slug: "ime-guard",
+      name: "IME Guard",
+      description: "Prevent premature Enter submit",
+      markdown: "---\nname: ime-guard\n---\n",
+    });
+    expect(ck.hasUnsavedChanges()).toBe(true);
+    ck.discardUnsavedChanges();
+    expect(ck.hasUnsavedChanges()).toBe(false);
+
+    const cp = createControlPlane({
+      request: async () => ({ status: 200, data: { notes: [], repos: [], schedules: [], watches: [] } }),
+      uuid: () => "id-2",
+      toast: () => {},
+      bump: () => {},
+      getMachines: () => [],
+      openThread: () => {},
+      openPrDiagnosis: () => {},
+      refreshWorkspace: async () => {},
+      serverNow: () => Date.now(),
+    });
+    cp.open("worktrees");
+    expect(cp.hasUnsavedChanges()).toBe(false);
+    expect(cp.isSubmodalOpen()).toBe(false);
+    expect(cp.isBusy()).toBe(false);
+
+    const ws = await asset("workspace.js");
+    expect(ws).not.toMatch(/\$\('#dialog'\)\.addEventListener\('click'/);
+    expect(ws).toContain("syncDialogDismissPolicy");
+    expect(ws).toContain("syncToastTopLayer");
+    expect(ws).toContain("#dialog-announcer");
+  });
+});
+
+describe("modern web UI P1 enhancements (ARIA roving tabs, mobile 16px & 44px targets, webauthn autofill, forced-colors)", () => {
+  it("cycles WAI-ARIA roving tabindex items across ArrowRight, ArrowLeft, Home, and End", () => {
+    expect(CONTROL_PLANE_TABS).toEqual(["memory", "schedules", "telemetry", "skills", "worktrees"]);
+    expect(nextRovingItem(CONTROL_PLANE_TABS, "memory", "ArrowRight")).toBe("schedules");
+    expect(nextRovingItem(CONTROL_PLANE_TABS, "memory", "ArrowLeft")).toBe("worktrees");
+    expect(nextRovingItem(CONTROL_PLANE_TABS, "worktrees", "ArrowRight")).toBe("memory");
+    expect(nextRovingItem(CONTROL_PLANE_TABS, "skills", "Home")).toBe("memory");
+    expect(nextRovingItem(CONTROL_PLANE_TABS, "memory", "End")).toBe("worktrees");
+    expect(nextRovingItem(CONTROL_PLANE_TABS, "memory", "Tab")).toBeNull();
+  });
+
+  it("wires ARIA tabpanel/aria-controls in control-plane & search-palette and viewport resize on model-picker", async () => {
+    const cpSource = await asset("control-plane.js");
+    expect(cpSource).toContain("role: 'tabpanel'");
+    expect(cpSource).toContain("'aria-controls': `cp-panel-${id}`");
+    expect(cpSource).toContain("'aria-labelledby': `cp-tab-${cp.tab}`");
+
+    const spSource = await asset("search-palette.js");
+    expect(spSource).toContain("'aria-controls': 'search-palette-results'");
+    expect(spSource).toContain("nextRovingItem(SEARCH_PALETTE_SCOPES");
+
+    const mpSource = await asset("model-picker.js");
+    expect(mpSource).toContain("visualViewport");
+    expect(mpSource).toContain("addEventListener('resize', positionPanel)");
+  });
+
+  it("enforces mobile >=16px inputs, 44px touch targets, select:focus-visible, :user-invalid, and forced-colors in CSS & login page", async () => {
+    const css = await asset("workspace.css");
+    expect(css).toContain("color-scheme: dark;");
+    expect(css).toContain("select:focus-visible");
+    expect(css).toContain("input:user-invalid");
+    expect(css).toContain("@media (forced-colors: active)");
+    expect(css).toContain("content-visibility: auto");
+    expect(css).toMatch(/\.icon-button\s*\{\s*min-width:\s*44px;\s*min-height:\s*44px;/);
+    expect(css).not.toContain(".directory-form input:focus");
+
+    const loginHtml = await loginPage().text();
+    expect(loginHtml).toContain('autocomplete="current-password webauthn"');
+    expect(loginHtml).toContain('name="color-scheme" content="dark"');
+    expect(loginHtml).toContain("viewport-fit=cover");
+    expect(loginHtml).toContain("input:user-invalid");
+    expect(loginHtml).toContain("min-height:44px");
+    expect(loginHtml).toContain("accent-color:var(--green)");
+    expect(loginHtml).toContain("text-wrap:balance");
+  });
+
+  it("applies P2 Top Layer @starting-style transitions, tabular-nums, field-sizing, and aria-pressed filter toggles", async () => {
+    const css = await asset("workspace.css");
+    expect(css).toContain("accent-color: var(--green);");
+    expect(css).toContain("@starting-style");
+    expect(css).toContain("allow-discrete");
+    expect(css).toContain("font-variant-numeric: tabular-nums");
+    expect(css).toContain("text-wrap: balance");
+    expect(css).toContain("text-wrap: pretty");
+    expect(css).toContain("@supports (field-sizing: content)");
+
+    const tmSource = await asset("telemetry.js");
+    expect(tmSource).toContain("'aria-pressed': String(tm.days === opt.days)");
+    expect(tmSource).toContain("'aria-pressed': String(tm.mode === 'steward_usd')");
+
+    const wtSource = await asset("worktree-audit.js");
+    expect(wtSource).toContain("'aria-pressed': String(wt.staleDays === opt.days)");
+    expect(wtSource).toContain("'aria-pressed': String(wt.category === cat)");
+
+    const cpSource = await asset("control-plane.js");
+    expect(cpSource).toContain("'aria-pressed': String(cp.memory.layer === layer)");
   });
 });

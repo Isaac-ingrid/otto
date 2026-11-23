@@ -38,6 +38,8 @@ export function createCheckpointModal(deps) {
     skillData: null,
     skillMarkdownDraft: '',
     skillSlugDraft: '',
+    initialSkillMarkdown: '',
+    initialSkillSlug: '',
     skillTarget: 'agents-skill',
     skillScopeKind: 'repo',
     skillWriting: false,
@@ -93,7 +95,8 @@ export function createCheckpointModal(deps) {
   function scrollToDraft(elementId) {
     if (typeof requestAnimationFrame !== 'function') return;
     requestAnimationFrame(() => {
-      document.getElementById(elementId)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const behavior = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+      document.getElementById(elementId)?.scrollIntoView({ behavior, block: 'nearest' });
     });
   }
 
@@ -118,6 +121,8 @@ export function createCheckpointModal(deps) {
           state.skillData = data;
           state.skillMarkdownDraft = data.skill?.markdown ?? '';
           state.skillSlugDraft = data.skill?.slug ?? 'extracted-workflow';
+          state.initialSkillMarkdown = state.skillMarkdownDraft;
+          state.initialSkillSlug = state.skillSlugDraft;
           state.skillTarget = 'agents-skill';
           state.skillScopeKind = data.hasWriteWorktree ? 'worktree' : 'repo';
           state.skillConfirmOverwrite = false;
@@ -173,6 +178,8 @@ export function createCheckpointModal(deps) {
         state.skillConfirmOverwrite = false;
         state.skillWriteError = null;
         state.skillSavedResult = data;
+        state.initialSkillMarkdown = state.skillMarkdownDraft;
+        state.initialSkillSlug = slug;
         toast(t('cpSkillSavedToast', { path: data.summary.relativePath }));
         if (refreshWorkspace) void refreshWorkspace();
       } else if (status === 409 && data?.error === 'already_exists') {
@@ -297,6 +304,7 @@ export function createCheckpointModal(deps) {
         sd.hasWriteWorktree
           ? h('select', {
             class: 'cp-select',
+            'aria-label': t('ckWriteSectionTitle'),
             onchange: (e) => {
               state.skillScopeKind = e.target.value;
               state.skillConfirmOverwrite = false;
@@ -487,6 +495,8 @@ export function createCheckpointModal(deps) {
       state.skillData = null;
       state.skillMarkdownDraft = '';
       state.skillSlugDraft = '';
+      state.initialSkillMarkdown = '';
+      state.initialSkillSlug = '';
       state.skillTarget = 'agents-skill';
       state.skillScopeKind = 'repo';
       state.skillConfirmOverwrite = false;
@@ -522,6 +532,8 @@ export function createCheckpointModal(deps) {
       };
       state.skillMarkdownDraft = offer.markdown ?? '';
       state.skillSlugDraft = offer.slug ?? '';
+      state.initialSkillMarkdown = state.skillMarkdownDraft;
+      state.initialSkillSlug = state.skillSlugDraft;
       state.skillTarget = offer.target || 'agents-skill';
       state.skillScopeKind = 'repo';
       state.skillConfirmOverwrite = offer.offerKind === 'update';
@@ -530,6 +542,24 @@ export function createCheckpointModal(deps) {
       state.notesNotice = null;
       state.selectedNotes.clear();
       void loadCheckpoint(offer.workerId);
+    },
+    isBusy() {
+      return Boolean(state.distilling || state.skillWriting || state.savingNotes);
+    },
+    hasUnsavedChanges() {
+      if (!state.skillData) return false;
+      if (!state.skillSavedResult) return Boolean(state.skillMarkdownDraft.trim());
+      return state.skillMarkdownDraft !== state.initialSkillMarkdown
+        || state.skillSlugDraft.trim() !== state.initialSkillSlug.trim();
+    },
+    discardUnsavedChanges() {
+      state.skillData = null;
+      state.skillMarkdownDraft = '';
+      state.skillSlugDraft = '';
+      state.initialSkillMarkdown = '';
+      state.initialSkillSlug = '';
+      state.skillConfirmOverwrite = false;
+      state.skillWriteError = null;
     },
     title() {
       return t('ckDialogTitle', { worker: state.workerId ?? '' });

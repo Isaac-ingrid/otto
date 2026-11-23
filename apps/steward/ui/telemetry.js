@@ -505,17 +505,20 @@ export function createTelemetryPane(deps) {
           h('div', { class: 'cp-pills', role: 'group' }, TELEMETRY_DAYS_OPTIONS.map((opt) =>
             h('button', {
               type: 'button',
+              'aria-pressed': String(tm.days === opt.days),
               class: `cp-pill${tm.days === opt.days ? ' active' : ''}`,
               onclick: () => void load(opt.days),
             }, t(opt.labelKey)))),
           h('div', { class: 'cp-pills', role: 'group' },
             h('button', {
               type: 'button',
+              'aria-pressed': String(tm.mode === 'steward_usd'),
               class: `cp-pill${tm.mode === 'steward_usd' ? ' active' : ''}`,
               onclick: () => { tm.mode = 'steward_usd'; touch(); },
             }, t('tmModeSteward')),
             h('button', {
               type: 'button',
+              'aria-pressed': String(tm.mode === 'worker_tokens'),
               class: `cp-pill${tm.mode === 'worker_tokens' ? ' active' : ''}`,
               onclick: () => { tm.mode = 'worker_tokens'; touch(); },
             }, t('tmModeWorker')))),

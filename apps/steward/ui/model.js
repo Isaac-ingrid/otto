@@ -257,3 +257,51 @@ export function parseDiffLines(patch, maxLines = 1200) {
   }
   return { lines, truncated: rawLines.length > maxLines, totalLines: rawLines.length };
 }
+
+/** True during active IME composition or within Safari's post-compositionend Enter window. */
+export function isImeComposing(event, lastCompositionEndAt = -Infinity, windowMs = 50) {
+  if (event?.isComposing || event?.keyCode === 229) return true;
+  return Number.isFinite(lastCompositionEndAt)
+    && typeof event?.timeStamp === 'number'
+    && event.timeStamp >= lastCompositionEndAt
+    && event.timeStamp - lastCompositionEndAt < windowMs;
+}
+
+/** True when a pointer event's viewport coordinates fall strictly outside an element's box. */
+export function isPointOutsideRect(point, rect) {
+  if (!point || !rect) return false;
+  return point.clientX < rect.left
+    || point.clientX > rect.right
+    || point.clientY < rect.top
+    || point.clientY > rect.bottom;
+}
+
+export function serializeModelDraft(draft) {
+  if (!draft || typeof draft !== 'object') return '';
+  return JSON.stringify({
+    provider: String(draft.provider ?? ''),
+    modelId: String(draft.modelId ?? ''),
+    baseUrl: String(draft.baseUrl ?? ''),
+    apiKey: String(draft.apiKey ?? ''),
+    headersJson: String(draft.headersJson ?? ''),
+    thinkingJson: String(draft.thinkingJson ?? ''),
+    thinkingLevel: String(draft.thinkingLevel ?? ''),
+    customModel: Boolean(draft.customModel),
+  });
+}
+
+export function hasModelDraftChanges(initialSerialized, draft) {
+  if (!initialSerialized || !draft) return false;
+  return serializeModelDraft(draft) !== initialSerialized;
+}
+
+/** Computes the next active item for horizontal WAI-ARIA roving tabindex (`ArrowLeft`/`ArrowRight`/`Home`/`End`). */
+export function nextRovingItem(items, current, key) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const idx = Math.max(0, items.indexOf(current));
+  if (key === 'ArrowRight') return items[(idx + 1) % items.length];
+  if (key === 'ArrowLeft') return items[(idx - 1 + items.length) % items.length];
+  if (key === 'Home') return items[0];
+  if (key === 'End') return items[items.length - 1];
+  return null;
+}

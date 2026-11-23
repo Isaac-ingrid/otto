@@ -73,6 +73,7 @@ export const STRINGS = {
   chat: ['Chat', '对话'],
   mainNavigation: ['Main navigation', '主导航'],
   close: ['Close', '关闭'],
+  unsavedChangesConfirm: ['Discard unsaved changes?', '当前有未保存的修改，确定放弃并关闭吗？'],
   you: ['You', '你'],
   viaFeishu: ['Feishu', '飞书'],
   working: ['Otto is working…', 'Otto 正在处理…'],

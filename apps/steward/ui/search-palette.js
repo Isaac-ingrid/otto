@@ -4,6 +4,7 @@
 import { h, icon } from './dom.js';
 import { formatClock, formatDay, formatRelative } from './format.js';
 import { localeTag, t, tOr } from './i18n.js';
+import { isImeComposing, nextRovingItem } from './model.js';
 
 export const SEARCH_PALETTE_SCOPES = ['all', 'threads', 'messages', 'reports', 'pr', 'memory'];
 
@@ -145,6 +146,7 @@ export function createSearchPalette(deps) {
 
   let debounceTimer = null;
   let inflight = null;
+  let lastCompositionEndAt = -Infinity;
   let inputEl = null;
   let clearBtnEl = null;
   let spinnerEl = null;
@@ -334,11 +336,12 @@ export function createSearchPalette(deps) {
         scheduleSearch(false);
       },
       oncompositionend: (e) => {
+        lastCompositionEndAt = e.timeStamp;
         sp.q = e.target.value;
         scheduleSearch(false);
       },
       onkeydown: (e) => {
-        if (e.isComposing) return;
+        if (isImeComposing(e, lastCompositionEndAt)) return;
         const list = visibleList();
         if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) {
           e.preventDefault();
@@ -428,11 +431,29 @@ export function createSearchPalette(deps) {
     spinnerEl.hidden = sp.status !== 'loading';
 
     scopesBarEl.replaceChildren(
-      h('div', { class: 'cp-pills sp-scopes', role: 'tablist' },
+      h('div', {
+        class: 'cp-pills sp-scopes',
+        role: 'tablist',
+        'aria-label': t('spDialogTitle'),
+        onkeydown: (e) => {
+          const next = nextRovingItem(SEARCH_PALETTE_SCOPES, sp.scope, e.key);
+          if (!next) return;
+          e.preventDefault();
+          sp.scope = next;
+          sp.activeIndex = 0;
+          scheduleSearch(true);
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => document.getElementById(`sp-tab-${next}`)?.focus());
+          }
+        },
+      },
         SEARCH_PALETTE_SCOPES.map((scope) => h('button', {
+          id: `sp-tab-${scope}`,
           type: 'button',
           role: 'tab',
+          tabindex: sp.scope === scope ? '0' : '-1',
           'aria-selected': String(sp.scope === scope),
+          'aria-controls': 'search-palette-results',
           class: `cp-pill${sp.scope === scope ? ' active' : ''}`,
           onclick: () => {
             sp.scope = scope;

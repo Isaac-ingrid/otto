@@ -14,6 +14,7 @@ import { h, icon } from './dom.js';
 import { formatClock } from './format.js';
 import { localeTag, t, tOr } from './i18n.js';
 import { markup } from './markup.js';
+import { isImeComposing } from './model.js';
 import { branchOf, callSummary, clip, createAssembler, describeRecord, imageSrc, inputRows, placeOf } from './session-model.js';
 
 const PAGE_BYTES = 1024 * 1024; // per read; the page appears as the file loads
@@ -79,6 +80,11 @@ export function mountSessionViewer(root, { workerId, agentLabel, isActive, isRea
   // ---- direct worker chat (issue #84, ADR-0011, §6.8): this view already knows which worker it
   // is showing, so a send/interrupt here goes straight to the connector — no steward step.
   const composeInput = h('input', { type: 'text', class: 'sv-compose-input', placeholder: t('svComposePlaceholder'), autocomplete: 'off' });
+  let lastCompositionEndAt = -Infinity;
+  composeInput.addEventListener('compositionend', (event) => { lastCompositionEndAt = event.timeStamp; });
+  composeInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && isImeComposing(event, lastCompositionEndAt)) event.preventDefault();
+  });
   const sendButton = h('button', { type: 'submit', class: 'button primary sv-compose-send' }, t('svSendButton'));
   const interruptButton = h('button', { type: 'button', class: 'button danger sv-compose-interrupt' }, t('svInterruptButton'));
   const composeStatus = h('span', { class: 'sv-compose-status', role: 'status' });

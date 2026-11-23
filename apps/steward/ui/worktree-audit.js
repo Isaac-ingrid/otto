@@ -340,6 +340,7 @@ export function createWorktreeAuditPane(deps) {
         WORKTREE_STALE_OPTIONS.map((opt) =>
           h('button', {
             type: 'button',
+            'aria-pressed': String(wt.staleDays === opt.days),
             class: `cp-pill${wt.staleDays === opt.days ? ' active' : ''}`,
             disabled: !machine?.online || Boolean(wt.busyKey),
             onclick: () => void loadAudit(machine?.id, opt.days),
@@ -551,6 +552,7 @@ export function createWorktreeAuditPane(deps) {
             const label = `${t(worktreeCategoryI18nKey(cat))} (${catCounts[cat] ?? 0})`;
             return h('button', {
               type: 'button',
+              'aria-pressed': String(wt.category === cat),
               class: `cp-pill${wt.category === cat ? ' active' : ''}`,
               onclick: () => {
                 wt.category = cat;
@@ -561,6 +563,7 @@ export function createWorktreeAuditPane(deps) {
           totals.externalCount > 0
             ? h('button', {
               type: 'button',
+              'aria-pressed': String(wt.category === 'external_unmanaged'),
               class: `cp-pill${wt.category === 'external_unmanaged' ? ' active' : ''}`,
               onclick: () => {
                 wt.category = 'external_unmanaged';
@@ -770,6 +773,16 @@ export function createWorktreeAuditPane(deps) {
       return h('div', { class: 'cp-pane wt-pane' },
         renderToolbar(machines, machine),
         bodyNodes);
+    },
+    isRiskModalOpen() {
+      return Boolean(wt.riskModalOpen);
+    },
+    dismissRiskModal() {
+      if (!wt.riskModalOpen || wt.busyKey) return false;
+      wt.riskModalOpen = false;
+      wt.riskAckChecked = false;
+      touch();
+      return true;
     },
   };
 }

@@ -19,7 +19,7 @@ import { createSearchPalette } from './search-palette.js';
 import { classifyWorkerContext, formatCompactTokens } from './telemetry.js';
 import { mountSessionViewer } from './session.js';
 import {
-  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, attentionFor, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, isActiveWorker, initialSetupStep, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, withPending, workOn,
+  ACTION_KEYS, FATAL_COPY, KNOWN_TITLES, WORKTREE_STATUS_KEYS, attentionFor, availableChatModels, canAnswerCard, canInspectWorkerDiff, diffErrorKey, groupByDay, groupThreads, hasModelDraftChanges, initialSetupStep, isActiveWorker, isImeComposing, isPointOutsideRect, messagesFor, modelAfterProviderChange, modelRejectionKey, parseDiffLines, previewOf, serializeModelDraft, splitPatchByFile, summarize, thinkingAdjusted, thinkingAfterModelChange, withPending, workOn,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -99,12 +99,43 @@ function redraw(region, signature, draw) {
 /** Relative times ("5 min. ago") go stale; regions that show them are redrawn at least this often. */
 const minuteBucket = () => Math.floor(Date.now() / 30_000);
 
+function announce(text) {
+  const inModal = Boolean($('#dialog')?.open);
+  const target = inModal ? $('#dialog-announcer') : $('#announcer');
+  const other = inModal ? $('#announcer') : $('#dialog-announcer');
+  if (other) other.textContent = '';
+  if (!target) return;
+  if (target.textContent === text) {
+    target.textContent = '';
+    requestAnimationFrame(() => { target.textContent = text; });
+  } else {
+    target.textContent = text;
+  }
+}
+
+function syncToastTopLayer() {
+  const node = $('#toast');
+  if (!node || node.hidden || typeof node.showPopover !== 'function') return;
+  try {
+    if (node.matches?.(':popover-open')) node.hidePopover();
+    node.showPopover();
+  } catch { /* Top Layer popover unsupported or detached */ }
+}
+
 function toast(text) {
   const node = $('#toast');
+  if (!node) return;
   node.textContent = text;
   node.hidden = false;
+  syncToastTopLayer();
+  if ($('#dialog')?.open) announce(text);
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { node.hidden = true; }, 3600);
+  toast.timer = setTimeout(() => {
+    if (typeof node.hidePopover === 'function') {
+      try { if (node.matches?.(':popover-open')) node.hidePopover(); } catch { /* ignore */ }
+    }
+    node.hidden = true;
+  }, 3600);
 }
 
 /** Keeps keyboard focus on "the same" control across a re-render (items carry data-focus keys). */
@@ -1773,6 +1804,7 @@ function openProvider(id) {
   const selected = state.settings.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === state.modelDraft.modelId);
   state.modelDraft.customModel = provider.endsWith('-compatible') || Boolean(current?.provider === provider && !selected);
   state.modelDraft.thinkingLevel = provider === 'openai-compatible' ? (current?.provider === provider ? current.thinkingLevel : 'auto') : provider.endsWith('-compatible') ? 'off' : thinkingAfterModelChange(selected, current?.thinkingLevel);
+  state.dialog.initialDraft = serializeModelDraft(state.modelDraft);
   renderDialog();
   $('#model-key').focus();
 }
@@ -1961,8 +1993,10 @@ const searchPalette = createSearchPalette({
 
 function openSearchPalette() {
   if (!state.snapshot || state.onboarding || state.fatal) return;
-  if (state.dialog?.saving || securityState()?.passkeyAdd === 'creating') return;
+  if (isDialogBusy()) return;
   releaseDetailsOverlay({ restoreFocus: false });
+  discardDialogDrafts();
+  state.modelDraft = null;
   state.dialog = { type: 'search', rev: 0, pairing: null, confirm: null, passkeyAdd: null };
   drawn.delete('dialog');
   searchPalette.open();
@@ -2106,8 +2140,10 @@ function renderDialog() {
       if (nextPane) nextPane.scrollTop = paneTop;
     }
   });
+  syncDialogDismissPolicy();
   if (!$('#dialog').open) {
     $('#dialog').showModal();
+    syncToastTopLayer();
     if (type === 'search') searchPalette.focusInput();
   }
 }
@@ -2134,10 +2170,89 @@ function openDialog(type) {
   }
 }
 
-function closeDialog() {
-  if (state.dialog?.saving || securityState()?.passkeyAdd === 'creating') return;
+function isDialogBusy() {
+  if (!state.dialog) return false;
+  return Boolean(
+    state.dialog.saving
+    || state.dialog.testing
+    || state.dialog.importing
+    || securityState()?.passkeyAdd === 'creating'
+    || state.savingAgentModel
+    || state.refreshingAgentModels
+    || (state.dialog.type === 'archive-confirm' && state.archivingThreads.has(state.dialog.threadId))
+    || (state.dialog.type === 'control-plane' && controlPlane.isBusy())
+    || (state.dialog.type === 'checkpoint' && checkpointModal.isBusy())
+    || [...state.directoryForms.values()].some((form) => form.state === 'pending'),
+  );
+}
+
+function hasUnsavedDialogDraft() {
+  if (!state.dialog) return false;
+  switch (state.dialog.type) {
+    case 'provider':
+      return hasModelDraftChanges(state.dialog.initialDraft, state.modelDraft);
+    case 'account':
+      return Boolean(state.passkeyLabelDraft.trim());
+    case 'directory': {
+      if (!state.dialog.manual) return false;
+      const form = state.directoryForms.get(state.dialog.deviceId);
+      return Boolean(form?.path?.trim()) && form.path !== (state.dialog.initialManualPath ?? '');
+    }
+    case 'machines':
+      return [...state.directoryForms.values()].some((form) => (form.state === 'editing' || form.state === 'failed') && Boolean(form.path?.trim()));
+    case 'control-plane':
+      return controlPlane.hasUnsavedChanges();
+    case 'checkpoint':
+      return checkpointModal.hasUnsavedChanges();
+    default:
+      return false;
+  }
+}
+
+function discardDialogDrafts() {
+  if (!state.dialog) return;
+  if (state.dialog.type === 'account') state.passkeyLabelDraft = '';
+  if (state.dialog.type === 'machines') {
+    for (const [deviceId, form] of state.directoryForms) {
+      if (form.state === 'editing' || form.state === 'failed') state.directoryForms.delete(deviceId);
+    }
+  }
+  if (state.dialog.type === 'control-plane') controlPlane.discardUnsavedChanges();
+  if (state.dialog.type === 'checkpoint') checkpointModal.discardUnsavedChanges();
+}
+
+function isDialogLightDismissBlocked() {
+  if (!state.dialog) return true;
+  return Boolean(
+    isDialogBusy()
+    || hasUnsavedDialogDraft()
+    || state.dialog.type === 'archive-confirm'
+    || state.dialog.returnTo
+    || (state.dialog.type === 'control-plane' && controlPlane.isSubmodalOpen()),
+  );
+}
+
+function syncDialogDismissPolicy() {
+  const dialogEl = $('#dialog');
+  if (!dialogEl) return;
+  dialogEl.setAttribute('closedby', isDialogLightDismissBlocked() ? 'closerequest' : 'any');
+}
+
+function closeDialog(options = {}) {
+  const force = options?.force === true;
+  const confirmDirty = options?.confirmDirty === true;
+  if (!force && isDialogBusy()) return false;
+  if (!force && state.dialog?.type === 'control-plane' && controlPlane.isSubmodalOpen()) {
+    controlPlane.dismissSubmodal();
+    syncDialogDismissPolicy();
+    return false;
+  }
+  if (!force && confirmDirty && hasUnsavedDialogDraft()) {
+    if (typeof window.confirm === 'function' && !window.confirm(t('unsavedChangesConfirm'))) return false;
+  }
   if (state.dialog?.type === 'search') searchPalette.abort();
   if (state.dialog?.type === 'directory' && state.directoryForms.get(state.dialog.deviceId)?.state === 'editing') state.directoryForms.delete(state.dialog.deviceId);
+  if (confirmDirty) discardDialogDrafts();
   const returnTo = state.dialog?.returnTo;
   const returnFocus = state.dialog?.returnFocus;
   state.modelDraft = null;
@@ -2148,11 +2263,12 @@ function closeDialog() {
     const details = target?.closest('details');
     if (details) details.open = true;
     target?.focus();
-    return;
+    return true;
   }
   state.dialog = null;
   drawn.delete('dialog');
   if ($('#dialog').open) $('#dialog').close();
+  return true;
 }
 
 // ---- full-screen states ------------------------------------------------------------------------------
@@ -2328,7 +2444,7 @@ function accept(data) {
     toast(t('sessionMissing'));
   }
   const ids = new Set(data.attention.map((item) => item.id));
-  if (!first && [...ids].some((id) => !state.knownAttention.has(id))) $('#announcer').textContent = t('newDecision');
+  if (!first && [...ids].some((id) => !state.knownAttention.has(id))) announce(t('newDecision'));
   state.knownAttention = ids;
   // The words being written give way to the finished message the moment the snapshot has it.
   if (state.live && (state.live.ending || !data.busy)) state.live = null;
@@ -3187,8 +3303,17 @@ $('#message-input').addEventListener('input', () => {
   $('#send-button').disabled = state.changingModel || !$('#message-input').value.trim();
   resizeInput();
 });
+let lastImeEndAt = -Infinity;
+document.addEventListener('compositionend', (event) => {
+  lastImeEndAt = event.timeStamp;
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && event.target?.tagName === 'INPUT' && event.target.form && isImeComposing(event, lastImeEndAt)) {
+    event.preventDefault();
+  }
+}, true);
 $('#message-input').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  if (event.key === 'Enter' && !event.shiftKey && !isImeComposing(event, lastImeEndAt)) {
     event.preventDefault();
     $('#composer-form').requestSubmit();
   }
@@ -3214,25 +3339,47 @@ document.addEventListener('visibilitychange', () => {
   void refresh();
   if (socket && socket.readyState > 1 && !state.fatal) connect();
 });
+let backdropPointerDownOutside = false;
 $('#dialog').addEventListener('close', () => {
   if (!$('#dialog').open) {
     searchPalette.abort();
+    discardDialogDrafts();
     state.dialog = null;
     state.modelDraft = null;
+    drawn.delete('dialog');
+    backdropPointerDownOutside = false;
   }
 });
-$('#dialog').addEventListener('cancel', (event) => { event.preventDefault(); closeDialog(); });
-$('#dialog').addEventListener('click', (event) => {
-  if (event.target !== $('#dialog')) return;
-  const rect = $('#dialog').getBoundingClientRect();
-  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeDialog();
+$('#dialog').addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeDialog({ confirmDirty: true });
+});
+$('#dialog').addEventListener('pointerdown', (event) => {
+  backdropPointerDownOutside = event.button === 0
+    && event.target === $('#dialog')
+    && isPointOutsideRect(event, $('#dialog').getBoundingClientRect());
+});
+$('#dialog').addEventListener('pointerup', (event) => {
+  const shouldDismiss = backdropPointerDownOutside
+    && event.button === 0
+    && event.target === $('#dialog')
+    && isPointOutsideRect(event, $('#dialog').getBoundingClientRect());
+  backdropPointerDownOutside = false;
+  if (shouldDismiss && $('#dialog').open && !isDialogLightDismissBlocked()) closeDialog();
+});
+$('#dialog').addEventListener('pointercancel', () => {
+  backdropPointerDownOutside = false;
 });
 document.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
-    if (!state.onboarding && !state.fatal && !(state.dialog?.saving || securityState()?.passkeyAdd === 'creating')) {
+    if (!state.onboarding && !state.fatal && !isDialogBusy()) {
       event.preventDefault();
-      if ($('#dialog').open && state.dialog?.type === 'search') closeDialog();
-      else openSearchPalette();
+      if ($('#dialog').open && state.dialog?.type === 'search') {
+        closeDialog();
+      } else {
+        if ($('#dialog').open && hasUnsavedDialogDraft() && typeof window.confirm === 'function' && !window.confirm(t('unsavedChangesConfirm'))) return;
+        openSearchPalette();
+      }
     }
     return;
   }
@@ -3356,7 +3503,7 @@ document.addEventListener('click', (event) => {
     case 'machines': return openDialog('machines');
     case 'account': return openDialog('account');
     case 'scope': return openDialog('scope');
-    case 'close-dialog': return closeDialog();
+    case 'close-dialog': return closeDialog({ confirmDirty: true });
     case 'sidebar': return toggleSidebar();
     case 'details': return detailsOpen() ? closeDetails() : openDetails();
     case 'attention':
@@ -3386,6 +3533,7 @@ document.addEventListener('click', (event) => {
       dialog.manual = !dialog.manual;
       const form = state.directoryForms.get(dialog.deviceId);
       if (form?.state === 'editing') form.path = dialog.browse.listing?.path ?? '';
+      dialog.initialManualPath = form?.path ?? '';
       bumpDialog();
       if (dialog.manual) document.getElementById(`directory-path-${dialog.deviceId}`)?.focus();
       return;
@@ -3400,7 +3548,7 @@ document.addEventListener('click', (event) => {
       return void submitDirectory(dialog.deviceId);
     }
     case 'directory-close':
-      if (state.dialog?.type === 'directory') return closeDialog();
+      if (state.dialog?.type === 'directory') return closeDialog({ confirmDirty: true });
       state.directoryForms.delete(dataset.machine);
       return bumpDialog();
     case 'revoke':
@@ -3530,13 +3678,17 @@ document.addEventListener('input', (event) => {
     }
   }
   if (event.target.id === 'passkey-label') state.passkeyLabelDraft = event.target.value;
+  if ($('#dialog')?.open) syncDialogDismissPolicy();
 });
 document.addEventListener('change', (event) => {
   if (event.target.id === 'model-auto-test' && state.dialog) {
     state.dialog.autoTest = event.target.checked;
     return bumpDialog();
   }
-  if (event.target.id !== 'model-api' || !state.modelDraft) return;
+  if (event.target.id !== 'model-api' || !state.modelDraft) {
+    if ($('#dialog')?.open) syncDialogDismissPolicy();
+    return;
+  }
   state.modelDraft.provider = event.target.value;
   state.modelDraft.thinkingLevel = event.target.value === 'openai-compatible' ? 'auto' : 'off';
   state.dialog.importedModels = null;

@@ -81,8 +81,8 @@
     <nav class="mobile-tabs" data-i18n-label="mainNavigation" aria-label="Main navigation"><button class="active" data-mobile-view="chat"><span data-icon="chat"></span><span data-i18n="chat">Chat</span></button><button data-mobile-view="threads"><span data-icon="layers"></span><span data-i18n="threads">Threads</span><span id="mobile-count" hidden>0</span></button><button data-action="machines"><span data-icon="monitor"></span><span data-i18n="machines">Machines</span></button></nav>
   </div>
   <main id="onboarding" class="onboarding"><div class="onboarding-content"><p data-i18n="settingsLoading" role="status">Loading…</p></div></main>
-  <dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-shell"><header class="dialog-header"><h2 id="dialog-title"></h2><button class="icon-button" data-action="close-dialog" data-i18n-label="close" aria-label="Close" data-icon="close"></button></header><div id="dialog-body"></div></div></dialog>
-  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-shell"><header class="dialog-header"><h2 id="dialog-title"></h2><button class="icon-button" data-action="close-dialog" data-i18n-label="close" aria-label="Close" data-icon="close"></button></header><div id="dialog-body"></div><div class="sr-only" id="dialog-announcer" role="status" aria-live="polite"></div></div></dialog>
+  <div class="toast" id="toast" popover="manual" role="status" aria-live="polite" hidden></div>
   <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
   <noscript><p class="noscript">Otto needs JavaScript to run the workspace.</p></noscript>
 </body>

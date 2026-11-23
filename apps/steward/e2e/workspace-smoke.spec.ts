@@ -460,4 +460,108 @@ test.describe("Workspace browser smoke suite", () => {
       status: 409,
     });
   });
+
+  test("14. P0 UI invariants: Top Layer toast & live region in modal, drag-out & dirty-form dialog guards, Safari IME Enter, and defined CSS tokens", async () => {
+    await signInToWorkspace(page, server);
+
+    // Safari post-compositionend (<50ms) Enter must not prematurely submit #composer-form.
+    await page.locator("#message-input").fill("你好世界");
+    const submittedDuringImeWindow = await page.evaluate(() => {
+      const input = document.querySelector("#message-input") as HTMLTextAreaElement;
+      const form = document.querySelector("#composer-form") as HTMLFormElement;
+      let submitted = false;
+      const onSubmit = (e: Event) => {
+        submitted = true;
+        e.preventDefault();
+      };
+      form.addEventListener("submit", onSubmit, { once: true });
+      const compEnd = new CompositionEvent("compositionend", { bubbles: true, data: "你好世界" });
+      input.dispatchEvent(compEnd);
+      const enterAfterIme = new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      });
+      input.dispatchEvent(enterAfterIme);
+      form.removeEventListener("submit", onSubmit);
+      return submitted;
+    });
+    expect(submittedDuringImeWindow).toBe(false);
+    await expect(page.locator("#message-input")).toHaveValue("你好世界");
+    await page.locator("#message-input").fill("");
+
+    // Open Machines modal: clean top-level modal allows backdrop click, blocks drag-out dismiss,
+    // and promotes #toast into Top Layer while mirroring to #dialog-announcer.
+    await page.locator('[data-action="machines"]').first().click();
+    const dialog = page.locator("#dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("closedby", "any");
+
+    // Trigger a toast inside the open modal via pairing command creation + copy.
+    await page.locator('#dialog [data-action="create-pairing"]').click();
+    await expect(page.locator('#dialog [data-action="copy-pairing"]')).toBeVisible();
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.baseUrl });
+    await page.locator('#dialog [data-action="copy-pairing"]').click();
+    await expect(page.locator("#toast")).toBeVisible();
+    const toastInTopLayer = await page.locator("#toast").evaluate((el) => el.matches(":popover-open"));
+    expect(toastInTopLayer).toBe(true);
+    await expect(page.locator("#dialog-announcer")).not.toHaveText("");
+
+    // Dragging from inside #dialog out to the backdrop must NOT close #dialog.
+    const box = await dialog.boundingBox();
+    expect(box).not.toBeNull();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + 24);
+    await page.mouse.down();
+    await page.mouse.move(4, 4);
+    await page.mouse.up();
+    await expect(dialog).toBeVisible();
+
+    // Clean backdrop click outside #dialog bounds light-dismisses #dialog.
+    await page.mouse.click(4, 4);
+    await expect(dialog).toBeHidden();
+
+    // Open Account modal: verify .provider-variant uses defined --surface token (non-transparent)
+    // and dirty #passkey-label blocks backdrop light-dismiss and prompts on Escape.
+    await page.locator('[data-action="account"]').click();
+    await expect(dialog).toBeVisible();
+    await page.locator("#dialog .more-providers > summary").click();
+    await page.locator('#dialog .more-providers [data-action="provider"][data-provider="zai"]').click();
+    const firstVariant = page.locator("#dialog .provider-variant").first();
+    await expect(firstVariant).toBeVisible();
+    const variantBg = await firstVariant.evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(variantBg).not.toBe("rgba(0, 0, 0, 0)");
+    await page.locator('#dialog [data-action="close-dialog"]').first().click();
+    await expect(dialog).toBeVisible(); // returned to Account modal
+
+    const passkeyInput = page.locator("#passkey-label");
+    await passkeyInput.click();
+    await passkeyInput.fill("My MacBook Touch ID");
+    await expect(dialog).toHaveAttribute("closedby", "closerequest");
+
+    // Backdrop click must NOT dismiss when form is dirty.
+    await page.mouse.click(4, 4);
+    await expect(dialog).toBeVisible();
+
+    // Escape prompts confirmation; cancelling keeps draft intact, accepting closes dialog.
+    let confirmSeen = 0;
+    page.once("dialog", (confirmDialog) => {
+      confirmSeen += 1;
+      void confirmDialog.dismiss();
+    });
+    await page.keyboard.press("Escape");
+    expect(confirmSeen).toBe(1);
+    await expect(dialog).toBeVisible();
+    await expect(passkeyInput).toHaveValue("My MacBook Touch ID");
+
+    // Re-establish user activation before the second Escape so CloseWatcher fires cancel cleanly.
+    await passkeyInput.click();
+    page.once("dialog", (confirmDialog) => {
+      confirmSeen += 1;
+      void confirmDialog.accept();
+    });
+    await page.keyboard.press("Escape");
+    expect(confirmSeen).toBe(2);
+    await expect(dialog).toBeHidden();
+  });
 });

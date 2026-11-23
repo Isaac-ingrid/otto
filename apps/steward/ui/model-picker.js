@@ -1,5 +1,6 @@
 import { h, icon } from './dom.js';
 import { t } from './i18n.js';
+import { isImeComposing } from './model.js';
 
 /** A bounded, searchable choice list; native buttons keep pointer and keyboard behavior equal. */
 export function modelPicker(models, selected, onSelect, options = {}) {
@@ -14,7 +15,30 @@ export function modelPicker(models, selected, onSelect, options = {}) {
     leadingIcon ? icon(leadingIcon) : null, h('span', null, h('strong', null, current?.name ?? (selected || t('modelChoose'))),
       !compact && searchable && current && current.name !== current.id ? h('small', null, current.id) : null), icon('chevron-down'));
   const close = () => { panel.hidePopover(); trigger.focus(); };
-  panel.addEventListener('toggle', (event) => trigger.setAttribute('aria-expanded', String(event.newState === 'open')));
+  const positionPanel = () => {
+    if (!panel.matches(':popover-open')) return;
+    const vw = window.visualViewport?.width ?? innerWidth;
+    const vh = window.visualViewport?.height ?? innerHeight;
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.width, minWidth), vw - 24);
+    panel.style.width = `${width}px`;
+    panel.style.left = `${Math.max(12, Math.min(rect.left, vw - width - 12))}px`;
+    results.style.maxHeight = `${Math.min(240, Math.max(120, vh - 130))}px`;
+    const height = panel.getBoundingClientRect().height;
+    const top = rect.bottom + height + 6 <= vh - 12 ? rect.bottom + 6 : Math.max(12, rect.top - height - 6);
+    panel.style.top = `${top}px`;
+  };
+  panel.addEventListener('toggle', (event) => {
+    const isOpen = event.newState === 'open';
+    trigger.setAttribute('aria-expanded', String(isOpen));
+    if (isOpen) {
+      addEventListener('resize', positionPanel);
+      window.visualViewport?.addEventListener('resize', positionPanel);
+    } else {
+      removeEventListener('resize', positionPanel);
+      window.visualViewport?.removeEventListener('resize', positionPanel);
+    }
+  });
   const draw = () => {
     const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const matches = models.filter((model) => words.every((word) => `${model.name} ${model.id} ${model.group ?? ""}`.toLowerCase().includes(word)));
@@ -38,23 +62,18 @@ export function modelPicker(models, selected, onSelect, options = {}) {
     if (panel.matches(':popover-open')) return close();
     search.value = '';
     draw();
-    const rect = trigger.getBoundingClientRect();
-    const width = Math.min(Math.max(rect.width, minWidth), innerWidth - 24);
-    panel.style.width = `${width}px`;
-    panel.style.left = `${Math.max(12, Math.min(rect.left, innerWidth - width - 12))}px`;
-    results.style.maxHeight = `${Math.min(240, innerHeight - 130)}px`;
     panel.showPopover();
-    const height = panel.getBoundingClientRect().height;
-    const top = rect.bottom + height + 6 <= innerHeight - 12 ? rect.bottom + 6 : Math.max(12, rect.top - height - 6);
-    panel.style.top = `${top}px`;
+    positionPanel();
     if (searchable && !matchMedia('(pointer: coarse)').matches) search.focus();
     if (!searchable) results.querySelector('[aria-pressed="true"]')?.focus();
     results.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest' });
   });
+  let lastCompositionEndAt = -Infinity;
+  search.addEventListener('compositionend', (event) => { lastCompositionEndAt = event.timeStamp; });
   search.addEventListener('input', draw);
   const root = h('div', { class: `model-picker${compact ? ' compact' : ''}` }, trigger, panel);
   root.addEventListener('keydown', (event) => {
-    if (!panel.matches(':popover-open')) return;
+    if (!panel.matches(':popover-open') || isImeComposing(event, lastCompositionEndAt)) return;
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return; }
     const options = [...results.querySelectorAll('button')];
     if (event.key === 'Enter' && event.target === search) { event.preventDefault(); options[0]?.click(); return; }
