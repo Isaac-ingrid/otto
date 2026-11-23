@@ -10,6 +10,7 @@
     "test": "pnpm -r --if-present test",
     "dev:steward": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
+    "deploy:vps": "node scripts/deploy-vps.mjs",
     "test:improvement": "node --test scripts/improvement/improvement.test.mjs",
     "eval:compare": "node scripts/improvement/compare-results.mjs"
   },

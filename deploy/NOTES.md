@@ -93,28 +93,42 @@ message answered normally, and the level went back to `high`.
 
 ## Reload after a code change
 
+One-command end-to-end upgrade from the Mac checkout (`scripts/deploy-vps.mjs`):
+
 ```bash
-pnpm build:node                                   # on the Mac
-./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node
-./deploy/remote.sh 'systemctl restart otto && sleep 3 && systemctl is-active otto'
+pnpm deploy:vps                  # build, SQLite .backup, ship bundle + ui + doctor.sh, guard ACME/TLS, restart & doctor
+pnpm deploy:vps -- --apply-env   # also push deploy/aliyun.env -> /etc/otto/.dev.vars before restart
 ```
 
-The UI is shipped separately (`--copy apps/steward/ui /opt/otto/dist/ui`) and needs no restart.
+Manual step-by-step equivalent:
+
+```bash
+(cd apps/steward && node scripts/build-node.mjs)
+./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node
+./deploy/remote.sh 'rm -rf /opt/otto/dist/ui && mkdir -p /opt/otto/dist/ui'
+./deploy/remote.sh --copy apps/steward/ui /opt/otto/dist/ui
+./deploy/remote.sh 'chown -R root:otto /opt/otto/dist && chmod -R g+rX,o-rwx /opt/otto/dist'
+./deploy/remote.sh 'systemctl restart otto && sleep 3 && systemctl is-active otto'
+```
 
 ## Reload log after a code change
 
-`./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node` (after
-`pnpm --filter @isaac2ingrid/steward build:node`), then `systemctl restart otto`. The box keeps the
-bundle it replaced as `/opt/otto/dist/node/steward-node.mjs.prev`:
+`pnpm deploy:vps` keeps the replaced bundle/UI as `/opt/otto/dist/node/steward-node.mjs.prev` and
+`/opt/otto/dist/ui.prev`, takes an online SQLite `.backup` first, auto-heals the `:80` ACME
+challenge block if overwritten, and rolls code back automatically if `otto.service` fails to start.
 
-```bash
-./deploy/remote.sh 'cp /opt/otto/dist/node/steward-node.mjs /opt/otto/dist/node/steward-node.mjs.prev'
-./deploy/remote.sh --copy apps/steward/dist/node/steward-node.mjs /opt/otto/dist/node
-./deploy/remote.sh 'systemctl restart otto && sleep 3 && systemctl is-active otto'
-```
+Workspace evolution `042–048` & ACME webroot decoupling deployment (2026-11-23):
 
-Rollback is the copy in reverse plus a restart. The Thread database is untouched by any of this;
-`apps/steward/ui` only needs re-copying when the page itself changes.
+- Landed migrations `042` through `048` (worktree diff & archive cleanup, checkpoint/skill
+  distiller, 3-way stop, ambient memory/skill loop, PR CI/review/conflict triage, `Cmd+K` hybrid
+  FTS5 search, multi-day budget/context telemetry, and machine repo policy + stale worktree audit).
+- Fixed `node-host/main.ts` to prefer `../ui/workspace.html` (`/opt/otto/dist/ui`) on the VPS,
+  aligned `deploy/apply-env.sh` `WANTED` (`OTTO_GITHUB_READ_TOKEN`, push relay vars), exempted
+  offline `cleanup_worktree` rows in `deploy/doctor.sh`, and stripped macOS xattrs in `deploy/remote.sh`.
+- Decoupled `otto-ip` Let's Encrypt HTTP-01 challenge from `/root/tstock/dist` (where `tstock`'s
+  `location ~ /\.` rule blocked `/.well-known/acme-challenge/` with `403`) into `/var/www/letsencrypt`
+  via `location ^~ /.well-known/acme-challenge/` in `/etc/nginx/sites-available/default`. Renewed
+  certificate through `2026-11-29T23:26:26Z` and verified `deploy/doctor.sh` (`health checks failed: 0`).
 
 Local-pi discovery deployment (2026-11-17, explicitly owner approved):
 `/opt/otto/releases/agent-models-pi-local-catalog-9ac4510-dirty-20261117T085658Z/`.
@@ -260,13 +274,13 @@ python3 -m venv /usr/local/certbot-venv
 ln -sf /usr/local/certbot-venv/bin/certbot /usr/local/bin/certbot    # 5.9.0
 ```
 
-Issuance uses **webroot against the `default` vhost** (`root /root/tstock/dist`), so nginx serves
-the HTTP-01 challenge on `:80` and nothing has to be stopped or edited — but renewal then depends
-on that vhost and that directory staying where they are:
+Issuance and renewal use a dedicated **decoupled webroot `/var/www/letsencrypt`** mounted on the
+`:80` `default` vhost via `location ^~ /.well-known/acme-challenge/` (updated 2026-11-23 so `tstock`
+dotfile `location ~ /\.` rules and frontend rebuilds under `/root/tstock/dist` never block renewal):
 
 ```bash
 certbot certonly --preferred-profile shortlived \
-  --webroot --webroot-path /root/tstock/dist \
+  --webroot --webroot-path /var/www/letsencrypt \
   --ip-address 115.29.164.8 --cert-name otto-ip \
   --register-unsafely-without-email --agree-tos --non-interactive
 certbot renew --dry-run                       # proves the challenge path end to end
