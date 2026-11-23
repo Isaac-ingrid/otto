@@ -282,6 +282,8 @@ export interface WebDeps {
     | "checkpointWorker"
     | "distillWorker"
     | "repoSkillOp"
+    | "auditWorktrees"
+    | "cleanupWorktrees"
     | "stopWorker"
     | "stopThread"
     | "archiveThread"

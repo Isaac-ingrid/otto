@@ -254,11 +254,16 @@ export interface RepoSummaryRow {
   repoId: string;
   deviceId: string;
   name: string;
+  path: string;
+  defaultBranch: string | null;
   online: boolean;
   capabilityKind: "git" | "plain";
+  writeIsolation: "worktree" | "in-place";
+  writeConcurrency: "parallel" | "serial";
   hasSetupHook: boolean;
   hasArchiveHook: boolean;
   approved: boolean;
+  projectApproved: boolean;
 }
 
 export interface RepoContextRow {
@@ -889,7 +894,24 @@ export function createLedger(deps: LedgerDeps) {
   };
 
   function recordRepository(deviceId: string, repo: HelloMessage["repos"][number]): void {
-    const capabilityKind = repo.capabilityKind ?? capabilityOf(repo).kind;
+    const capability = capabilityOf(repo);
+    const capabilityKind = repo.capabilityKind ?? capability.kind;
+    const defaultBranch = capability.kind === "git" ? capability.defaultBranch : null;
+    const remote = capability.kind === "git" ? capability.remote : null;
+    const writeIsolation =
+      capabilityKind === "plain"
+        ? "in-place"
+        : repo.writePolicy?.isolation === "in-place"
+          ? "in-place"
+          : "worktree";
+    const writeConcurrency =
+      repo.writePolicy?.concurrency === "serial"
+        ? "serial"
+        : repo.writePolicy?.concurrency === "parallel"
+          ? "parallel"
+          : capabilityKind === "plain"
+            ? "serial"
+            : "parallel";
     const hasSetupHook = repo.hasSetupHook === true ? 1 : 0;
     const hasArchiveHook = repo.hasArchiveHook === true ? 1 : 0;
     const approved = (hasSetupHook === 1 || hasArchiveHook === 1) && repo.approved === true ? 1 : 0;
@@ -901,12 +923,12 @@ export function createLedger(deps: LedgerDeps) {
     sql`
       INSERT OR REPLACE INTO sh_repo (
         repoId, deviceId, name, path, defaultBranch, remote,
-        capabilityKind, hasSetupHook, hasArchiveHook, approved,
+        capabilityKind, writeIsolation, writeConcurrency, hasSetupHook, hasArchiveHook, approved,
         projectApproved, skillIndexJson, updatedAt
       )
       VALUES (
-        ${repo.repoId}, ${deviceId}, ${repo.name}, ${repo.path}, ${repo.defaultBranch}, ${repo.remote},
-        ${capabilityKind}, ${hasSetupHook}, ${hasArchiveHook}, ${approved},
+        ${repo.repoId}, ${deviceId}, ${repo.name}, ${repo.path}, ${defaultBranch ?? repo.defaultBranch ?? ""}, ${remote ?? repo.remote ?? ""},
+        ${capabilityKind}, ${writeIsolation}, ${writeConcurrency}, ${hasSetupHook}, ${hasArchiveHook}, ${approved},
         ${projectApproved}, ${JSON.stringify(briefs)}, ${now()}
       )
     `;
@@ -992,16 +1014,33 @@ export function createLedger(deps: LedgerDeps) {
     },
   };
 
-  const viewRepoSummary = (r: Record<string, unknown>): RepoSummaryRow => ({
-    repoId: r.repoId as string,
-    deviceId: r.deviceId as string,
-    name: r.name as string,
-    online: Number(r.online ?? 0) === 1,
-    capabilityKind: r.capabilityKind === "plain" ? "plain" : "git",
-    hasSetupHook: Number(r.hasSetupHook ?? 0) === 1,
-    hasArchiveHook: Number(r.hasArchiveHook ?? 0) === 1,
-    approved: Number(r.approved ?? 0) === 1,
-  });
+  const viewRepoSummary = (r: Record<string, unknown>): RepoSummaryRow => {
+    const capabilityKind = r.capabilityKind === "plain" ? "plain" : "git";
+    const rawBranch = typeof r.defaultBranch === "string" ? r.defaultBranch.trim() : "";
+    return {
+      repoId: r.repoId as string,
+      deviceId: r.deviceId as string,
+      name: r.name as string,
+      path: typeof r.path === "string" ? r.path : "",
+      defaultBranch: capabilityKind === "git" && rawBranch ? rawBranch : null,
+      online: Number(r.online ?? 0) === 1,
+      capabilityKind,
+      writeIsolation:
+        capabilityKind === "plain" || r.writeIsolation === "in-place" ? "in-place" : "worktree",
+      writeConcurrency:
+        r.writeConcurrency === "serial"
+          ? "serial"
+          : r.writeConcurrency === "parallel"
+            ? "parallel"
+            : capabilityKind === "plain"
+              ? "serial"
+              : "parallel",
+      hasSetupHook: Number(r.hasSetupHook ?? 0) === 1,
+      hasArchiveHook: Number(r.hasArchiveHook ?? 0) === 1,
+      approved: Number(r.approved ?? 0) === 1,
+      projectApproved: Number(r.projectApproved ?? 0) === 1,
+    };
+  };
 
   const repos = {
     recordRegistration: recordRepository,
@@ -1015,8 +1054,9 @@ export function createLedger(deps: LedgerDeps) {
     },
     get(repoId: string, deviceId: string): RepoSummaryRow | null {
       const row = sql<Record<string, unknown>>`
-        SELECT r.repoId, r.deviceId, r.name, COALESCE(m.online, 0) AS online,
-               r.capabilityKind, r.hasSetupHook, r.hasArchiveHook, r.approved
+        SELECT r.repoId, r.deviceId, r.name, r.path, r.defaultBranch, COALESCE(m.online, 0) AS online,
+               r.capabilityKind, r.writeIsolation, r.writeConcurrency,
+               r.hasSetupHook, r.hasArchiveHook, r.approved, r.projectApproved
         FROM sh_repo r LEFT JOIN sh_machine m ON m.deviceId = r.deviceId
         WHERE r.repoId = ${repoId} AND r.deviceId = ${deviceId}
       `[0];
@@ -1025,8 +1065,9 @@ export function createLedger(deps: LedgerDeps) {
     /** All registered repos (the brief's repos line, issue #7, plus Stage 2 boolean hook summary). */
     list(): RepoSummaryRow[] {
       return sql<Record<string, unknown>>`
-        SELECT r.repoId, r.deviceId, r.name, COALESCE(m.online, 0) AS online,
-               r.capabilityKind, r.hasSetupHook, r.hasArchiveHook, r.approved
+        SELECT r.repoId, r.deviceId, r.name, r.path, r.defaultBranch, COALESCE(m.online, 0) AS online,
+               r.capabilityKind, r.writeIsolation, r.writeConcurrency,
+               r.hasSetupHook, r.hasArchiveHook, r.approved, r.projectApproved
         FROM sh_repo r LEFT JOIN sh_machine m ON m.deviceId = r.deviceId
         ORDER BY r.name, r.repoId
       `.map(viewRepoSummary);

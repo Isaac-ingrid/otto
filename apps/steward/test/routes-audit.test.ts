@@ -47,6 +47,8 @@ const PROBE_PATHS = [
   "/app/api/repos/skills/read",
   "/app/api/repos/skills/write",
   "/app/api/repos/skills/delete",
+  "/app/api/machines/dev_probe/worktrees/audit",
+  "/app/api/machines/dev_probe/worktrees/cleanup",
   "/app/api/workers/w_probe/checkpoint",
   "/app/api/workers/w_probe/distill",
   "/app/api/workers/w_probe/stop",

@@ -448,8 +448,37 @@ export function workspaceSnapshot(input: {
   const view = ledger.views.workspace({ includeArchived: input.includeArchived });
   const machineName = new Map(devices.map((device) => [device.deviceId, device.name]));
   const repoNamesByMachine = new Map<string, string[]>();
+  const repoPoliciesByMachine = new Map<string, Array<{
+    repoId: string;
+    name: string;
+    path: string;
+    capabilityKind: "git" | "plain";
+    defaultBranch: string | null;
+    writeIsolation: "worktree" | "in-place";
+    writeConcurrency: "parallel" | "serial";
+    hasSetupHook: boolean;
+    hasArchiveHook: boolean;
+    hooksApproved: boolean;
+    projectApproved: boolean;
+  }>>();
   for (const repo of view.repos) {
     repoNamesByMachine.set(repo.deviceId, [...(repoNamesByMachine.get(repo.deviceId) ?? []), repo.name]);
+    repoPoliciesByMachine.set(repo.deviceId, [
+      ...(repoPoliciesByMachine.get(repo.deviceId) ?? []),
+      {
+        repoId: repo.repoId,
+        name: repo.name,
+        path: repo.path,
+        capabilityKind: repo.capabilityKind,
+        defaultBranch: repo.defaultBranch,
+        writeIsolation: repo.writeIsolation,
+        writeConcurrency: repo.writeConcurrency,
+        hasSetupHook: repo.hasSetupHook,
+        hasArchiveHook: repo.hasArchiveHook,
+        hooksApproved: repo.approved,
+        projectApproved: repo.projectApproved,
+      },
+    ]);
   }
   const repoName = new Map(view.repos.map((repo) => [repo.repoId, repo.name]));
   const ledgerMachines = new Map(view.machines.map((machine) => [machine.deviceId, machine]));
@@ -548,6 +577,7 @@ export function workspaceSnapshot(input: {
         agents: machine?.agents ?? [],
         slots: machine ? { running: machine.running, max: machine.maxWorkers } : null,
         repos: repoNamesByMachine.get(device.deviceId) ?? [],
+        repoPolicies: repoPoliciesByMachine.get(device.deviceId) ?? [],
       };
     }),
     messages,

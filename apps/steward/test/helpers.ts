@@ -364,6 +364,13 @@ export interface FakeRepo {
   repoId: string;
   name: string;
   path?: string;
+  defaultBranch?: string;
+  capabilityKind?: "git" | "plain";
+  writePolicy?: { isolation: "worktree" | "in-place"; concurrency: "parallel" | "serial" };
+  hasSetupHook?: boolean;
+  hasArchiveHook?: boolean;
+  approved?: boolean;
+  projectApproved?: boolean;
 }
 
 export interface FakeWorkerRun {
@@ -417,6 +424,8 @@ export class FakeConnector {
   workerCheckpoint = false;
   /** Advertises the repo skills capability in hello (off = old connector). */
   repoSkills = false;
+  /** Advertises the worktree audit/cleanup capability in hello (off = old connector). */
+  worktreeAudit = false;
   /** Every directory_list request received so far. */
   readonly directoryRequests: Array<Record<string, unknown>> = [];
   /** Every worker_diff request received so far. */
@@ -425,6 +434,10 @@ export class FakeConnector {
   readonly workerCheckpointRequests: Array<Record<string, unknown>> = [];
   /** Every repo_skill_op request received so far. */
   readonly repoSkillRequests: Array<Record<string, unknown>> = [];
+  /** Every worktree_audit request received so far. */
+  readonly worktreeAuditRequests: Array<Record<string, unknown>> = [];
+  /** Every worktree_cleanup request received so far. */
+  readonly worktreeCleanupRequests: Array<Record<string, unknown>> = [];
   /** Every history_req the machine was asked (the full-session reads carry `format`/`since`). */
   readonly historyRequests: Array<Record<string, unknown>> = [];
   /** When set, the connector drops its connection after sending this many chunks. */
@@ -494,6 +507,7 @@ export class FakeConnector {
       ...(this.workerDiff ? { workerDiff: true } : {}),
       ...(this.workerCheckpoint ? { workerCheckpoint: true } : {}),
       ...(this.repoSkills ? { repoSkills: true } : {}),
+      ...(this.worktreeAudit ? { worktreeAudit: true } : {}),
     };
     return {
       bootId: this.bootId,
@@ -505,8 +519,14 @@ export class FakeConnector {
         repoId: r.repoId,
         name: r.name,
         path: r.path ?? `/srv/${r.name}`,
-        defaultBranch: "main",
+        defaultBranch: r.defaultBranch ?? "main",
         remote: `git@github.com:example/${r.name}.git`,
+        ...(r.capabilityKind ? { capabilityKind: r.capabilityKind } : {}),
+        ...(r.writePolicy ? { writePolicy: r.writePolicy } : {}),
+        ...(r.hasSetupHook !== undefined ? { hasSetupHook: r.hasSetupHook } : {}),
+        ...(r.hasArchiveHook !== undefined ? { hasArchiveHook: r.hasArchiveHook } : {}),
+        ...(r.approved !== undefined ? { approved: r.approved } : {}),
+        ...(r.projectApproved !== undefined ? { projectApproved: r.projectApproved } : {}),
       })),
       limits: { maxWorkers: 4, running: 0 },
     };
@@ -551,6 +571,14 @@ export class FakeConnector {
       }
       if (message.t === "repo_skill_op") {
         this.repoSkillRequests.push(message);
+        continue;
+      }
+      if (message.t === "worktree_audit") {
+        this.worktreeAuditRequests.push(message);
+        continue;
+      }
+      if (message.t === "worktree_cleanup") {
+        this.worktreeCleanupRequests.push(message);
         continue;
       }
       if (message.t === "error") {
@@ -682,6 +710,28 @@ export class FakeConnector {
       if (this.repoSkillRequests.length >= count) return this.repoSkillRequests.slice(0, count);
       if (Date.now() - startedAt > timeoutMs) {
         throw new Error(`only ${this.repoSkillRequests.length}/${count} repo_skill_op requests arrived`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  async waitForWorktreeAuditRequests(count: number, timeoutMs = 5000): Promise<Array<Record<string, unknown>>> {
+    const startedAt = Date.now();
+    for (;;) {
+      if (this.worktreeAuditRequests.length >= count) return this.worktreeAuditRequests.slice(0, count);
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(`only ${this.worktreeAuditRequests.length}/${count} worktree_audit requests arrived`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  async waitForWorktreeCleanupRequests(count: number, timeoutMs = 5000): Promise<Array<Record<string, unknown>>> {
+    const startedAt = Date.now();
+    for (;;) {
+      if (this.worktreeCleanupRequests.length >= count) return this.worktreeCleanupRequests.slice(0, count);
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(`only ${this.worktreeCleanupRequests.length}/${count} worktree_cleanup requests arrived`);
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

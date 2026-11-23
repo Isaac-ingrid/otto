@@ -27,8 +27,12 @@ import {
   RepoSkillResultMessageSchema,
   WORKER_CHECKPOINT_TIMEOUT_MS,
   WORKER_DIFF_TIMEOUT_MS,
+  WORKTREE_AUDIT_TIMEOUT_MS,
+  WORKTREE_CLEANUP_TIMEOUT_MS,
   WorkerCheckpointResultMessageSchema,
   WorkerDiffResultMessageSchema,
+  WorktreeAuditResultMessageSchema,
+  WorktreeCleanupResultMessageSchema,
   mintToken,
   ulid,
   type RepoSkillData,
@@ -38,6 +42,14 @@ import {
   type WorkerCheckpointMessage,
   type WorkerCheckpointPayload,
   type WorkerCheckpointResult,
+  type WorktreeAuditArgs,
+  type WorktreeAuditMessage,
+  type WorktreeAuditPayload,
+  type WorktreeAuditResult,
+  type WorktreeCleanupArgs,
+  type WorktreeCleanupMessage,
+  type WorktreeCleanupPayload,
+  type WorktreeCleanupResult,
   type CmdResult,
   type DirectoryBrowseResult,
   type DirectoryListing,
@@ -69,6 +81,8 @@ type DirectoryReadResult = DirectoryBrowseResult | { ok: false; code: "machine_o
 type WorkerDiffReadResult = WorkerDiffResult | { ok: false; code: "machine_offline" | "diff_timeout" };
 type WorkerCheckpointReadResult = WorkerCheckpointResult | { ok: false; code: "machine_offline" | "checkpoint_timeout" };
 type RepoSkillReadResult = RepoSkillResult | { ok: false; code: "machine_offline" | "skill_timeout" };
+type WorktreeAuditReadResult = WorktreeAuditResult | { ok: false; code: "machine_offline" | "audit_timeout" };
+type WorktreeCleanupReadResult = WorktreeCleanupResult | { ok: false; code: "machine_offline" | "cleanup_timeout" };
 
 /** The pr_worker error codes (worker-manager.ts) → the failure card's stages (review
  *  finding 3): lets the failed-cmd_result path keep the stage-specific fix text even when it
@@ -159,6 +173,18 @@ export class ConnectorProtocol {
     connectionId: string;
     finish(result: RepoSkillReadResult): void;
   }>();
+  private worktreeAuditTimeoutMs = WORKTREE_AUDIT_TIMEOUT_MS;
+  private readonly worktreeAuditReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: WorktreeAuditReadResult): void;
+  }>();
+  private worktreeCleanupTimeoutMs = WORKTREE_CLEANUP_TIMEOUT_MS;
+  private readonly worktreeCleanupReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: WorktreeCleanupReadResult): void;
+  }>();
 
   constructor(private readonly deps: ConnectorProtocolDeps) {}
 
@@ -169,6 +195,10 @@ export class ConnectorProtocol {
   setWorkerDiffTimeoutForTest(ms: number): void { this.workerDiffTimeoutMs = ms; }
   setWorkerCheckpointTimeoutForTest(ms: number): void { this.workerCheckpointTimeoutMs = ms; }
   setRepoSkillTimeoutForTest(ms: number): void { this.repoSkillTimeoutMs = ms; }
+  setWorktreeAuditTimeoutForTest(ms: number): void {
+    this.worktreeAuditTimeoutMs = ms;
+    this.worktreeCleanupTimeoutMs = ms;
+  }
 
   handlePing(connection: Connection, raw: unknown): void {
     const parsed = PingMessageSchema.safeParse(raw);
@@ -211,6 +241,7 @@ export class ConnectorProtocol {
       workerDiff: hello.capabilities?.workerDiff === true,
       workerCheckpoint: hello.capabilities?.workerCheckpoint === true,
       repoSkills: hello.capabilities?.repoSkills === true,
+      worktreeAudit: hello.capabilities?.worktreeAudit === true,
     } satisfies ConnState);
     // hello is the machine/repo snapshot's source of truth (protocol §6.1, steward.md §2.2):
     // name, agents, limits, and the full repo list — removals included — land in the ledger.
@@ -1037,6 +1068,135 @@ export class ConnectorProtocol {
     pending.finish(parsed.success ? parsed.data : { ok: false, code: "io_failed" });
   }
 
+  auditMachineWorktrees(
+    deviceId: string,
+    args: WorktreeAuditArgs,
+    signal: AbortSignal,
+  ): Promise<WorktreeAuditPayload> {
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${deviceId}`[0];
+    if (!device || device.revoked) throw new WorkspaceError("not_found", 404);
+    if (args.repoId !== undefined && !this.deps.ledger.repos.get(args.repoId, deviceId)) {
+      throw new WorkspaceError("not_registered_repo", 404);
+    }
+    const connection = this.deps.connFor(deviceId);
+    if (!connection) throw new WorkspaceError("machine_offline", 409);
+    const connectionState = connection.state as ConnState | null;
+    if (!connectionState?.worktreeAudit) throw new WorkspaceError("unsupported", 409);
+    if (this.worktreeAuditReads.size >= 16) throw new WorkspaceError("busy", 429);
+    const id = ulid();
+    return new Promise((resolve, reject) => {
+      const finish = (result: WorktreeAuditReadResult) => {
+        if (!this.worktreeAuditReads.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        if (result.ok) {
+          resolve(result.audit);
+          return;
+        }
+        const status = {
+          not_registered_repo: 404,
+          unsupported: 409,
+          machine_offline: 409,
+          busy: 429,
+          audit_timeout: 504,
+          audit_failed: 502,
+        }[result.code];
+        reject(new WorkspaceError(result.code, status));
+      };
+      const abort = () => finish({ ok: false, code: "audit_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "audit_timeout" }), this.worktreeAuditTimeoutMs);
+      this.worktreeAuditReads.set(id, { deviceId, connectionId: connection.id, finish });
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(
+          JSON.stringify({
+            t: "worktree_audit",
+            id,
+            ...(args.repoId !== undefined ? { repoId: args.repoId } : {}),
+          } satisfies WorktreeAuditMessage),
+        );
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleWorktreeAuditResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.worktreeAuditReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = WorktreeAuditResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "audit_failed" });
+  }
+
+  cleanupMachineWorktrees(
+    deviceId: string,
+    op: WorktreeCleanupArgs,
+    signal: AbortSignal,
+  ): Promise<WorktreeCleanupPayload> {
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${deviceId}`[0];
+    if (!device || device.revoked) throw new WorkspaceError("not_found", 404);
+    const connection = this.deps.connFor(deviceId);
+    if (!connection) throw new WorkspaceError("machine_offline", 409);
+    const connectionState = connection.state as ConnState | null;
+    if (!connectionState?.worktreeAudit) throw new WorkspaceError("unsupported", 409);
+    if (this.worktreeCleanupReads.size >= 8) throw new WorkspaceError("busy", 429);
+    const id = ulid();
+    return new Promise((resolve, reject) => {
+      const finish = (result: WorktreeCleanupReadResult) => {
+        if (!this.worktreeCleanupReads.delete(id)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        if (result.ok) {
+          resolve(result.result);
+          return;
+        }
+        const status = {
+          bad_request: 400,
+          unsupported: 409,
+          machine_offline: 409,
+          busy: 429,
+          cleanup_timeout: 504,
+          cleanup_failed: 502,
+        }[result.code];
+        reject(new WorkspaceError(result.code, status));
+      };
+      const abort = () => finish({ ok: false, code: "cleanup_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "cleanup_timeout" }), this.worktreeCleanupTimeoutMs);
+      this.worktreeCleanupReads.set(id, { deviceId, connectionId: connection.id, finish });
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(
+          JSON.stringify({
+            t: "worktree_cleanup",
+            id,
+            op,
+          } satisfies WorktreeCleanupMessage),
+        );
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleWorktreeCleanupResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.worktreeCleanupReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = WorktreeCleanupResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "cleanup_failed" });
+  }
+
   // ---- Connection lifecycle cleanup hooks --------------------------------------------------------
 
   /** Cancel directory and diff reads whose connection is closing or device is going offline. */
@@ -1054,6 +1214,12 @@ export class ConnectorProtocol {
     for (const pending of this.repoSkillReads.values()) {
       if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
     }
+    for (const pending of this.worktreeAuditReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.worktreeCleanupReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
+    }
   }
 
   cancelReadsForDevice(deviceId: string, result: DirectoryReadResult): void {
@@ -1068,6 +1234,12 @@ export class ConnectorProtocol {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
     for (const pending of this.repoSkillReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.worktreeAuditReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.worktreeCleanupReads.values()) {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
   }

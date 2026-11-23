@@ -1523,4 +1523,24 @@ export const MIGRATIONS: readonly Migration[] = [
       });
     },
   },
+  {
+    // Direction E: Cache local repository write policy (`writeIsolation`, `writeConcurrency`)
+    // on `sh_repo` so the Web Control Plane and Machines view can display repo isolation &
+    // concurrency badges even when a machine is offline, while keeping mutations strictly
+    // CLI-only (`otto repo-config`) per ADR-0022.
+    id: "048_repo_policy_and_worktree_audit",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN writeIsolation TEXT NOT NULL DEFAULT 'worktree'`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_repo ADD COLUMN writeConcurrency TEXT NOT NULL DEFAULT 'parallel'`;
+      });
+      sql`
+        UPDATE sh_repo
+        SET writeIsolation = 'in-place', writeConcurrency = 'serial'
+        WHERE capabilityKind = 'plain' AND writeIsolation = 'worktree'
+      `;
+    },
+  },
 ];

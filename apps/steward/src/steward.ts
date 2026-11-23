@@ -53,6 +53,13 @@ import {
 import { diagnosePrFailureWithLlm, diagnosePrFeedbackWithLlm } from "./pr-failure-diagnoser.ts";
 import type { SpendAttribution } from "./telemetry.ts";
 import {
+  buildMachineWorktreeAuditResponse,
+  reconcileWorktreeCleanupOutcomes,
+  type MachineWorktreeAuditResponse,
+  type ReconciledWorktreeCleanupResponse,
+} from "./worktree-audit.ts";
+import type { WorktreeCleanupArgs } from "@isaac2ingrid/protocol";
+import {
   formatUsd,
   renderOverBudgetNote,
   renderSpendStatus,
@@ -863,6 +870,8 @@ export class Steward extends Agent<Env> {
         checkpointWorker: (workerId, signal) => this.connectorProto.checkpointWorker(workerId, signal),
         distillWorker: (input, signal) => this.distillWorker(input, signal),
         repoSkillOp: ({ deviceId, op }, signal) => this.connectorProto.repoSkillOp(deviceId, op, signal),
+        auditWorktrees: (input, signal) => this.auditWorktreesForWorkspace(input, signal),
+        cleanupWorktrees: (input, signal) => this.cleanupWorktreesForWorkspace(input, signal),
         stopWorker: (input) => this.stopWorkerByOwner(input),
         stopThread: (input) => this.stopThreadByOwner(input),
         archiveThread: (input) => this.archiveThread(input),
@@ -1605,6 +1614,12 @@ export class Steward extends Agent<Env> {
         return;
       case "repo_skill_result":
         this.connectorProto.handleRepoSkillResult(connection, message);
+        return;
+      case "worktree_audit_result":
+        this.connectorProto.handleWorktreeAuditResult(connection, message);
+        return;
+      case "worktree_cleanup_result":
+        this.connectorProto.handleWorktreeCleanupResult(connection, message);
         return;
       case "error":
         // A connector reply to something the DO itself sent. The only DO-originated requests
@@ -3586,6 +3601,72 @@ export class Steward extends Agent<Env> {
     this.connectorProto.setWorkerDiffTimeoutForTest(ms);
   }
 
+  async setWorktreeAuditTimeoutForTest(ms: number): Promise<void> {
+    this.connectorProto.setWorktreeAuditTimeoutForTest(ms);
+  }
+
+  private async auditWorktreesForWorkspace(
+    input: { deviceId: string; staleDays: number; repoId?: string },
+    signal: AbortSignal,
+  ): Promise<MachineWorktreeAuditResponse> {
+    const devRow = this.sql<{ name: string | null; revoked: number }>`
+      SELECT name, revoked FROM device WHERE deviceId = ${input.deviceId}
+    `[0];
+    if (!devRow || devRow.revoked) throw new WorkspaceError("not_found", 404);
+    const audit = await this.connectorProto.auditMachineWorktrees(
+      input.deviceId,
+      { ...(input.repoId !== undefined ? { repoId: input.repoId } : {}) },
+      signal,
+    );
+    const machine = this.ledger.machines.get(input.deviceId);
+    return buildMachineWorktreeAuditResponse({
+      ledger: this.ledger,
+      deviceId: input.deviceId,
+      machineName: machine?.name ?? devRow.name ?? input.deviceId,
+      audit,
+      staleDays: input.staleDays,
+      now: Date.now(),
+    });
+  }
+
+  private async cleanupWorktreesForWorkspace(
+    input: { id: string; deviceId: string; op: WorktreeCleanupArgs },
+    signal: AbortSignal,
+  ): Promise<ReconciledWorktreeCleanupResponse> {
+    const key = `worktree-cleanup:${input.id}`;
+    const reqSig = JSON.stringify({ deviceId: input.deviceId, op: input.op });
+    const previous = this.ledger.webRequests.get(key);
+    if (previous) {
+      const parsedPrev = JSON.parse(previous.payload) as { req?: string; res?: ReconciledWorktreeCleanupResponse };
+      if (parsedPrev.req !== reqSig) throw new WorkspaceError("id_conflict", 409);
+      if (previous.status === "done" && parsedPrev.res !== undefined) return parsedPrev.res;
+    }
+    if (input.op.targets.some((t) => t.force) && input.op.confirmedRisks !== true) {
+      throw new WorkspaceError("risk_confirmation_required", 400);
+    }
+    for (const target of input.op.targets) {
+      if (target.kind === "worker") {
+        const worker = this.ledger.workers.get(target.workerId);
+        if (worker && (ACTIVE_WORKER_STATES as readonly string[]).includes(worker.state)) {
+          throw new WorkspaceError("worker_active", 409, { workerId: worker.workerId });
+        }
+      }
+    }
+    const payload = await this.connectorProto.cleanupMachineWorktrees(input.deviceId, input.op, signal);
+    const res = this.ctx.storage.transactionSync(() => {
+      const reconciled = reconcileWorktreeCleanupOutcomes(this.ledger, input.deviceId, input.id, payload);
+      this.ledger.webRequests.start(key, JSON.stringify({ req: reqSig, res: reconciled }));
+      this.ledger.webRequests.complete(key);
+      return reconciled;
+    });
+    this.logChannel(
+      "web_worktrees_cleaned",
+      `${input.deviceId} cleaned=${res.cleanedCount} pruned=${res.prunedRepoIds.length}`,
+    );
+    this.notifyWorkspaces();
+    return res;
+  }
+
   async archiveThread(input: ThreadArchiveInput): Promise<ThreadArchiveResult> {
     const key = `archive:${input.id}`;
     const policy: ThreadCleanupPolicy = input.cleanupPolicy ?? "auto";
@@ -3921,7 +4002,8 @@ export class Steward extends Agent<Env> {
         row.id.startsWith("wstop:") ||
         row.id.startsWith("tstop:") ||
         row.id.startsWith("archive:") ||
-        row.id.startsWith("prdiag:")
+        row.id.startsWith("prdiag:") ||
+        row.id.startsWith("worktree-cleanup:")
       ) {
         continue;
       }

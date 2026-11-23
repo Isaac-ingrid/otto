@@ -15,6 +15,7 @@ import {
   RegisterRepoArgsSchema,
   RepoSkillOpArgsSchema,
   WorkerDiffArgsSchema,
+  WorktreeCleanupArgsSchema,
   type DirectoryBrowseArgs,
   type DirectoryListing,
   type RegisterRepoResult,
@@ -23,6 +24,7 @@ import {
   type WorkerCheckpointPayload,
   type WorkerDiffArgs,
   type WorkerDiffPayload,
+  type WorktreeCleanupArgs,
 } from "@isaac2ingrid/protocol";
 import type { DistillMode, DistillResult } from "./distiller.ts";
 import {
@@ -34,6 +36,11 @@ import {
 } from "./control-plane.ts";
 import type { Ledger } from "./ledger.ts";
 import { parseTelemetryDays, type WorkspaceTelemetryResponse } from "./telemetry.ts";
+import {
+  parseAuditStaleDays,
+  type MachineWorktreeAuditResponse,
+  type ReconciledWorktreeCleanupResponse,
+} from "./worktree-audit.ts";
 import type { PrFailureSnapshot, PrFeedbackSnapshot, PrMergeState, PrReviewDecision } from "./pr-evidence.ts";
 import type { PrActionKind, PrDiagnosisStatus, PrFailureDiagnosis, PrFeedbackTriage } from "./pr-failure-diagnoser.ts";
 import type { PrWatchRow } from "./pr-watch.ts";
@@ -198,6 +205,8 @@ export interface WorkspaceApiDeps {
   checkpointWorker?(workerId: string, signal: AbortSignal): Promise<WorkerCheckpointPayload>;
   distillWorker?(input: { id: string; workerId: string; mode: DistillMode }, signal: AbortSignal): Promise<DistillResult>;
   repoSkillOp?(input: { deviceId: string; op: RepoSkillOpArgs }, signal: AbortSignal): Promise<RepoSkillData>;
+  auditWorktrees?(input: { deviceId: string; staleDays: number; repoId?: string }, signal: AbortSignal): Promise<MachineWorktreeAuditResponse>;
+  cleanupWorktrees?(input: { id: string; deviceId: string; op: WorktreeCleanupArgs }, signal: AbortSignal): Promise<ReconciledWorktreeCleanupResponse>;
   stopWorker?(input: WorkerStopInput): Promise<WorkerStopResult>;
   stopThread?(input: ThreadStopInput): Promise<ThreadStopResult>;
   archiveThread?(input: ThreadArchiveInput): Promise<ThreadArchiveResult>;
@@ -496,6 +505,26 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     }
     if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   }
+  const worktreeAuditMatch = /^\/app\/api\/machines\/([\w-]{1,128})\/worktrees\/audit$/.exec(url.pathname);
+  if (worktreeAuditMatch && deps.auditWorktrees) {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    try {
+      const staleDays = parseAuditStaleDays(url.searchParams.get("staleDays"));
+      if (staleDays === null) throw new WorkspaceError("invalid_stale_days", 400);
+      const rawRepoId = url.searchParams.get("repoId");
+      const repoId = rawRepoId !== null && rawRepoId.trim() !== "" ? rawRepoId.trim() : undefined;
+      if (repoId !== undefined && repoId.length > 1024) throw new WorkspaceError("bad_request", 400);
+      return json(
+        await deps.auditWorktrees(
+          { deviceId: worktreeAuditMatch[1]!, staleDays, ...(repoId !== undefined ? { repoId } : {}) },
+          request.signal,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof WorkspaceError) return json({ error: error.code, ...(error.details ?? {}) }, error.status);
+      throw error;
+    }
+  }
   if (request.method !== "POST") return json({ error: "not_found" }, 404);
 
   const origin = request.headers.get("origin");
@@ -505,6 +534,7 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
     url.pathname === "/app/api/schedules" ||
     url.pathname === "/app/api/settings/agent-model/refresh" ||
     url.pathname.startsWith("/app/api/machines/directories") ||
+    /^\/app\/api\/machines\/[\w-]{1,128}\/worktrees\/cleanup$/.test(url.pathname) ||
     url.pathname.startsWith("/app/api/repos/skills/") ||
     url.pathname.startsWith("/app/api/workers/") ||
     /^\/app\/api\/pr-watches\/[A-Za-z0-9_-]{1,80}\/diagnosis$/.test(url.pathname) ||
@@ -853,6 +883,28 @@ export async function handleWorkspaceApi(request: Request, url: URL, session: Ap
           request.signal,
         ),
       );
+    }
+    const worktreeCleanupMatch = /^\/app\/api\/machines\/([\w-]{1,128})\/worktrees\/cleanup$/.exec(url.pathname);
+    if (worktreeCleanupMatch && deps.cleanupWorktrees) {
+      const body = await readJson(request);
+      const { id } = body;
+      if (typeof id !== "string" || !REQUEST_ID.test(id)) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      const parsedOp = WorktreeCleanupArgsSchema.safeParse({
+        targets: body.targets ?? [],
+        ...(body.pruneRepoIds !== undefined ? { pruneRepoIds: body.pruneRepoIds } : {}),
+        ...(body.confirmedRisks !== undefined ? { confirmedRisks: body.confirmedRisks } : {}),
+      });
+      if (!parsedOp.success) throw new WorkspaceError("bad_request", 400);
+      const op = parsedOp.data;
+      if (op.targets.length === 0 && (!op.pruneRepoIds || op.pruneRepoIds.length === 0)) {
+        throw new WorkspaceError("bad_request", 400);
+      }
+      if (op.targets.some((t) => t.force) && op.confirmedRisks !== true) {
+        throw new WorkspaceError("risk_confirmation_required", 400);
+      }
+      return json(await deps.cleanupWorktrees({ id, deviceId: worktreeCleanupMatch[1]!, op }, request.signal));
     }
     if (url.pathname === "/app/api/memory") {
       const body = await readJson(request);
