@@ -138,12 +138,15 @@ function toast(text) {
   }, 3600);
 }
 
-/** Keeps keyboard focus on "the same" control across a re-render (items carry data-focus keys). */
+/** Keeps keyboard focus on "the same" control across a re-render (items carry data-focus keys or stable ids). */
 function preservingFocus(container, render) {
   const active = document.activeElement;
-  const key = active && container.contains(active) ? active.dataset?.focus : null;
+  const inside = Boolean(active && container.contains(active));
+  const key = inside ? active.dataset?.focus : null;
+  const id = inside && !key ? active.id : '';
   render();
   if (key) container.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+  else if (id) container.querySelector(`#${CSS.escape(id)}`)?.focus({ preventScroll: true });
 }
 
 function stateBadge(value) {
@@ -2145,6 +2148,7 @@ function renderDialog() {
     $('#dialog').showModal();
     syncToastTopLayer();
     if (type === 'search') searchPalette.focusInput();
+    else if (type === 'control-plane') $('#dialog [role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
   }
 }
 

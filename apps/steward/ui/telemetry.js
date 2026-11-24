@@ -4,6 +4,7 @@
 import { h, icon, svg } from './dom.js';
 import { formatClock, formatUsd } from './format.js';
 import { t } from './i18n.js';
+import { nextRovingItem } from './model.js';
 
 export const TELEMETRY_CATEGORIES = [
   'chat',
@@ -502,25 +503,67 @@ export function createTelemetryPane(deps) {
       const data = tm.data;
       return h('div', { class: 'cp-pane tm-pane' },
         h('div', { class: 'cp-toolbar tm-toolbar' },
-          h('div', { class: 'cp-pills', role: 'group' }, TELEMETRY_DAYS_OPTIONS.map((opt) =>
+          h('div', {
+            class: 'cp-pills',
+            role: 'group',
+            onkeydown: (e) => {
+              const dayList = TELEMETRY_DAYS_OPTIONS.map((o) => o.days);
+              const nextDays = nextRovingItem(dayList, tm.days, e.key);
+              if (nextDays == null) return;
+              e.preventDefault();
+              void load(nextDays);
+              document.getElementById(`tm-days-${nextDays}`)?.focus({ preventScroll: true });
+            },
+          }, TELEMETRY_DAYS_OPTIONS.map((opt) =>
             h('button', {
+              id: `tm-days-${opt.days}`,
               type: 'button',
+              dataset: { focus: `tm-days:${opt.days}` },
+              tabindex: tm.days === opt.days ? '0' : '-1',
               'aria-pressed': String(tm.days === opt.days),
               class: `cp-pill${tm.days === opt.days ? ' active' : ''}`,
-              onclick: () => void load(opt.days),
+              onclick: () => {
+                void load(opt.days);
+                document.getElementById(`tm-days-${opt.days}`)?.focus({ preventScroll: true });
+              },
             }, t(opt.labelKey)))),
-          h('div', { class: 'cp-pills', role: 'group' },
+          h('div', {
+            class: 'cp-pills',
+            role: 'group',
+            onkeydown: (e) => {
+              const nextMode = nextRovingItem(['steward_usd', 'worker_tokens'], tm.mode, e.key);
+              if (!nextMode) return;
+              e.preventDefault();
+              tm.mode = nextMode;
+              touch();
+              document.getElementById(`tm-mode-${nextMode}`)?.focus({ preventScroll: true });
+            },
+          },
             h('button', {
+              id: 'tm-mode-steward_usd',
               type: 'button',
+              dataset: { focus: 'tm-mode:steward_usd' },
+              tabindex: tm.mode === 'steward_usd' ? '0' : '-1',
               'aria-pressed': String(tm.mode === 'steward_usd'),
               class: `cp-pill${tm.mode === 'steward_usd' ? ' active' : ''}`,
-              onclick: () => { tm.mode = 'steward_usd'; touch(); },
+              onclick: () => {
+                tm.mode = 'steward_usd';
+                touch();
+                document.getElementById('tm-mode-steward_usd')?.focus({ preventScroll: true });
+              },
             }, t('tmModeSteward')),
             h('button', {
+              id: 'tm-mode-worker_tokens',
               type: 'button',
+              dataset: { focus: 'tm-mode:worker_tokens' },
+              tabindex: tm.mode === 'worker_tokens' ? '0' : '-1',
               'aria-pressed': String(tm.mode === 'worker_tokens'),
               class: `cp-pill${tm.mode === 'worker_tokens' ? ' active' : ''}`,
-              onclick: () => { tm.mode = 'worker_tokens'; touch(); },
+              onclick: () => {
+                tm.mode = 'worker_tokens';
+                touch();
+                document.getElementById('tm-mode-worker_tokens')?.focus({ preventScroll: true });
+              },
             }, t('tmModeWorker')))),
         tm.status === 'loading' && !data
           ? h('p', { class: 'cp-empty' }, t('cpLoading'))

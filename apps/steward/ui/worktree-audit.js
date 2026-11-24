@@ -4,6 +4,7 @@
 import { h, icon } from './dom.js';
 import { safeUrl } from './format.js';
 import { t, tOr } from './i18n.js';
+import { nextRovingItem } from './model.js';
 
 export const WORKTREE_CATEGORIES = [
   'all',
@@ -336,14 +337,32 @@ export function createWorktreeAuditPane(deps) {
         },
       }, machines.map((m) =>
         h('option', { value: m.id, selected: m.id === machine?.id }, machineOptionLabel(m)))),
-      h('div', { class: 'cp-pills', role: 'group', 'aria-label': t('wtStaleThresholdLabel') },
+      h('div', {
+        class: 'cp-pills',
+        role: 'group',
+        'aria-label': t('wtStaleThresholdLabel'),
+        onkeydown: (e) => {
+          if (!machine?.online || wt.busyKey) return;
+          const nextDays = nextRovingItem(WORKTREE_STALE_OPTIONS.map((o) => o.days), wt.staleDays, e.key);
+          if (nextDays == null) return;
+          e.preventDefault();
+          void loadAudit(machine?.id, nextDays);
+          document.getElementById(`wt-stale-${nextDays}`)?.focus({ preventScroll: true });
+        },
+      },
         WORKTREE_STALE_OPTIONS.map((opt) =>
           h('button', {
+            id: `wt-stale-${opt.days}`,
             type: 'button',
+            dataset: { focus: `wt-stale:${opt.days}` },
+            tabindex: wt.staleDays === opt.days ? '0' : '-1',
             'aria-pressed': String(wt.staleDays === opt.days),
             class: `cp-pill${wt.staleDays === opt.days ? ' active' : ''}`,
             disabled: !machine?.online || Boolean(wt.busyKey),
-            onclick: () => void loadAudit(machine?.id, opt.days),
+            onclick: () => {
+              void loadAudit(machine?.id, opt.days);
+              document.getElementById(`wt-stale-${opt.days}`)?.focus({ preventScroll: true });
+            },
           }, t(opt.labelKey)))),
       repos.length > 1
         ? h('select', {
@@ -547,27 +566,47 @@ export function createWorktreeAuditPane(deps) {
 
     return h('div', { class: 'wt-controls-stack' },
       h('div', { class: 'cp-toolbar wt-filter-bar' },
-        h('div', { class: 'cp-pills', role: 'group' },
+        h('div', {
+          class: 'cp-pills',
+          role: 'group',
+          onkeydown: (e) => {
+            const cats = totals.externalCount > 0 ? [...WORKTREE_CATEGORIES, 'external_unmanaged'] : WORKTREE_CATEGORIES;
+            const nextCat = nextRovingItem(cats, wt.category, e.key);
+            if (!nextCat) return;
+            e.preventDefault();
+            wt.category = nextCat;
+            touch();
+            document.getElementById(`wt-cat-${nextCat}`)?.focus({ preventScroll: true });
+          },
+        },
           WORKTREE_CATEGORIES.map((cat) => {
             const label = `${t(worktreeCategoryI18nKey(cat))} (${catCounts[cat] ?? 0})`;
             return h('button', {
+              id: `wt-cat-${cat}`,
               type: 'button',
+              dataset: { focus: `wt-cat:${cat}` },
+              tabindex: wt.category === cat ? '0' : '-1',
               'aria-pressed': String(wt.category === cat),
               class: `cp-pill${wt.category === cat ? ' active' : ''}`,
               onclick: () => {
                 wt.category = cat;
                 touch();
+                document.getElementById(`wt-cat-${cat}`)?.focus({ preventScroll: true });
               },
             }, label);
           }),
           totals.externalCount > 0
             ? h('button', {
+              id: 'wt-cat-external_unmanaged',
               type: 'button',
+              dataset: { focus: 'wt-cat:external_unmanaged' },
+              tabindex: wt.category === 'external_unmanaged' ? '0' : '-1',
               'aria-pressed': String(wt.category === 'external_unmanaged'),
               class: `cp-pill${wt.category === 'external_unmanaged' ? ' active' : ''}`,
               onclick: () => {
                 wt.category = 'external_unmanaged';
                 touch();
+                document.getElementById('wt-cat-external_unmanaged')?.focus({ preventScroll: true });
               },
             }, `${t('wtCat_external_unmanaged')} (${totals.externalCount})`)
             : null)),

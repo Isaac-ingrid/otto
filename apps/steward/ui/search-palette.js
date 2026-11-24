@@ -361,6 +361,16 @@ export function createSearchPalette(deps) {
           }
           return;
         }
+        if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.shiftKey && !e.metaKey && !e.ctrlKey && (!inputEl.value || e.altKey)) {
+          const next = nextRovingItem(SEARCH_PALETTE_SCOPES, sp.scope, e.key);
+          if (next) {
+            e.preventDefault();
+            sp.scope = next;
+            sp.activeIndex = 0;
+            scheduleSearch(true);
+            return;
+          }
+        }
         if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
           e.preventDefault();
           const idx = SEARCH_PALETTE_SCOPES.indexOf(sp.scope);
@@ -430,20 +440,35 @@ export function createSearchPalette(deps) {
     spinnerEl.textContent = t('spLoading');
     spinnerEl.hidden = sp.status !== 'loading';
 
+    const keepScopeTabFocus = Boolean(
+      document.activeElement
+      && scopesBarEl.contains(document.activeElement)
+      && document.activeElement.getAttribute('role') === 'tab',
+    );
     scopesBarEl.replaceChildren(
       h('div', {
         class: 'cp-pills sp-scopes',
         role: 'tablist',
         'aria-label': t('spDialogTitle'),
         onkeydown: (e) => {
+          if (isImeComposing(e, lastCompositionEndAt)) return;
           const next = nextRovingItem(SEARCH_PALETTE_SCOPES, sp.scope, e.key);
-          if (!next) return;
-          e.preventDefault();
-          sp.scope = next;
-          sp.activeIndex = 0;
-          scheduleSearch(true);
-          if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(() => document.getElementById(`sp-tab-${next}`)?.focus());
+          if (next) {
+            e.preventDefault();
+            sp.scope = next;
+            sp.activeIndex = 0;
+            scheduleSearch(true);
+            document.getElementById(`sp-tab-${next}`)?.focus({ preventScroll: true });
+            return;
+          }
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            inputEl?.focus({ preventScroll: true });
+            return;
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            close();
           }
         },
       },
@@ -451,6 +476,7 @@ export function createSearchPalette(deps) {
           id: `sp-tab-${scope}`,
           type: 'button',
           role: 'tab',
+          dataset: { focus: `sp-tab:${scope}` },
           tabindex: sp.scope === scope ? '0' : '-1',
           'aria-selected': String(sp.scope === scope),
           'aria-controls': 'search-palette-results',
@@ -459,7 +485,7 @@ export function createSearchPalette(deps) {
             sp.scope = scope;
             sp.activeIndex = 0;
             scheduleSearch(true);
-            inputEl?.focus();
+            document.getElementById(`sp-tab-${scope}`)?.focus({ preventScroll: true });
           },
         }, t(`spScope_${scope}`)))),
       selectedThread
@@ -476,6 +502,9 @@ export function createSearchPalette(deps) {
           },
         }, icon('layers'), t('spCurrentThreadOnly'))
         : null);
+    if (keepScopeTabFocus) {
+      document.getElementById(`sp-tab-${sp.scope}`)?.focus({ preventScroll: true });
+    }
 
     const len = codePointLen(sp.q);
     const list = visibleList();

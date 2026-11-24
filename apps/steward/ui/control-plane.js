@@ -726,18 +726,50 @@ export function createControlPlane(deps) {
             'aria-label': t('cpSearchNotes'),
             value: cp.memory.q,
             dataset: { focus: 'cp-memory-search' },
+            onkeydown: (e) => {
+              if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.shiftKey && !e.metaKey && !e.ctrlKey && (!e.target.value || e.altKey)) {
+                const next = nextRovingItem(LAYERS, cp.memory.layer, e.key);
+                if (next) {
+                  e.preventDefault();
+                  cp.memory.layer = next;
+                  touch();
+                  void loadMemory();
+                }
+              }
+            },
             oninput: (e) => {
               cp.memory.q = e.target.value;
               clearTimeout(searchTimer);
               searchTimer = setTimeout(() => void loadMemory(), 260);
             },
           })),
-        h('div', { class: 'cp-pills', role: 'group' }, LAYERS.map((layer) =>
+        h('div', {
+          class: 'cp-pills',
+          role: 'group',
+          'aria-label': t('cpTabMemory'),
+          onkeydown: (e) => {
+            const next = nextRovingItem(LAYERS, cp.memory.layer, e.key);
+            if (!next) return;
+            e.preventDefault();
+            cp.memory.layer = next;
+            touch();
+            document.getElementById(`cp-layer-${next}`)?.focus({ preventScroll: true });
+            void loadMemory();
+          },
+        }, LAYERS.map((layer) =>
           h('button', {
+            id: `cp-layer-${layer}`,
             type: 'button',
+            dataset: { focus: `cp-layer:${layer}` },
+            tabindex: cp.memory.layer === layer ? '0' : '-1',
             'aria-pressed': String(cp.memory.layer === layer),
             class: `cp-pill${cp.memory.layer === layer ? ' active' : ''}`,
-            onclick: () => { cp.memory.layer = layer; void loadMemory(); },
+            onclick: () => {
+              cp.memory.layer = layer;
+              touch();
+              document.getElementById(`cp-layer-${layer}`)?.focus({ preventScroll: true });
+              void loadMemory();
+            },
           }, t(`cpLayer_${layer}`)))),
         cp.memory.repos.length > 0
           ? h('select', {
@@ -1233,25 +1265,30 @@ export function createControlPlane(deps) {
     },
     render(summary) {
       const counts = controlPlaneCounts(summary);
-      const activateTab = (next, focusBtn = false) => {
+      const activateTab = (next, focusBtn = true) => {
         cp.tab = next;
         if (next === 'telemetry') telemetryPane.ensureLoaded();
         if (next === 'skills' && cp.skills.status === 'idle') void loadRepoSkills();
         if (next === 'worktrees') worktreePane.ensureLoaded();
         touch();
-        if (focusBtn && typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(() => document.getElementById(`cp-tab-${next}`)?.focus());
+        if (focusBtn) {
+          const btn = document.getElementById(`cp-tab-${next}`);
+          if (btn) btn.focus({ preventScroll: true });
+          else if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => document.getElementById(`cp-tab-${next}`)?.focus({ preventScroll: true }));
+          }
         }
       };
       const tabProps = (id) => ({
         id: `cp-tab-${id}`,
         type: 'button',
         role: 'tab',
+        dataset: { focus: `cp-tab:${id}` },
         tabindex: cp.tab === id ? '0' : '-1',
         'aria-selected': String(cp.tab === id),
         'aria-controls': `cp-panel-${id}`,
         class: `cp-tab${cp.tab === id ? ' active' : ''}`,
-        onclick: () => activateTab(id, false),
+        onclick: () => activateTab(id, true),
       });
       const activePane = cp.tab === 'memory'
         ? renderMemoryTab()
