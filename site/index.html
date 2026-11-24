@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#070a08">
+  <title>Otto · 在一个网页里调度你几台电脑上的 coding agent</title>
+  <meta name="description" content="Otto 在你自己的服务器上跑一个常驻进程，把各台电脑上的 pi、Claude Code、Codex CLI 连到同一个网页里用，代码和会话留在原机器上。">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Otto">
+  <meta property="og:description" content="Coordinate the coding agents on your computers from one self-hosted web workspace.">
+  <meta property="og:image" content="./og-card.svg">
+  <link rel="icon" type="image/svg+xml" href="./brand/otto.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand-link" href="#top" aria-label="Otto Home">
+        <img src="./brand/otto.svg" width="30" height="30" alt="">
+        <span>Otto</span>
+        <span class="brand-tag">MIT</span>
+      </a>
+
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#preview" data-i18n="navPreview">界面示例</a>
+        <a href="#architecture" data-i18n="navArch">系统结构</a>
+        <a href="#boundaries" data-i18n="navBoundaries">设计取舍</a>
+        <a href="#quickstart" data-i18n="navQuickstart">安装运行</a>
+        <a href="#docs" data-i18n="navDocs">文档</a>
+      </nav>
+
+      <div class="header-actions">
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" data-lang="zh" lang="zh-CN" aria-pressed="true">中文</button>
+          <button type="button" data-lang="en" lang="en" aria-pressed="false">EN</button>
+        </div>
+        <a class="btn btn-sm" id="repo-top-link" href="#docs" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2Z"/></svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="container">
+        <span class="eyebrow-pill">
+          <span class="status-dot"></span>
+          <span data-i18n="heroEyebrow">开源 · 自托管</span>
+        </span>
+        <h1 data-i18n="heroTitle">在一个网页里，调度你几台电脑上的 coding agent。</h1>
+        <p class="hero-lead" data-i18n="heroLead">在笔记本、台式机和手机之间切换工作时，往往很难集中追踪各台机器上的任务进度。Otto 在你自己的服务器上运行一个常驻进程（Steward），统一维护对话、事项状态与待办提醒；涉及读写代码的任务则分发给各台电脑上的 pi、Claude Code 或 Codex CLI 执行，代码仓库与完整会话日志始终留在本地。</p>
+
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#quickstart" data-i18n="heroCtaStart">安装与运行</a>
+          <a class="btn" href="#preview" data-i18n="heroCtaPreview">查看典型场景</a>
+          <div class="install-strip">
+            <span class="prompt">$</span>
+            <code id="hero-cmd">otto --version</code>
+            <button type="button" class="copy-btn" data-copy-target="hero-cmd" data-i18n="copyBtn">复制</button>
+          </div>
+        </div>
+
+        <div class="hero-facts">
+          <span><i></i><span data-i18n="factAgents">本地适配器：pi · Claude Code · Codex CLI · Antigravity</span></span>
+          <span><i></i><span data-i18n="factOS">连接器运行环境：macOS · Linux · Windows（出站连接，无需端口映射）</span></span>
+          <span><i></i><span data-i18n="factHost">服务端运行环境：Linux VPS（Node.js + SQLite）或 Cloudflare Workers</span></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="preview">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-kicker" data-i18n="previewKicker">界面示例</span>
+          <h2 data-i18n="previewTitle">日常使用的四个典型场景</h2>
+          <p data-i18n="previewSub">点击下方标签（或按键盘 ← / → 方向键）切换不同工作流。</p>
+        </div>
+
+        <div class="scenario-tabs" role="tablist" aria-label="Otto Scenarios" id="scenario-tablist">
+          <button type="button" class="scenario-tab" role="tab" id="sc-tab-dispatch" aria-selected="true" aria-controls="sc-panel" tabindex="0" data-scenario="dispatch">
+            <span class="tab-num">01</span>
+            <span data-i18n="scTabDispatch">派发本地任务</span>
+          </button>
+          <button type="button" class="scenario-tab" role="tab" id="sc-tab-pr" aria-selected="false" aria-controls="sc-panel" tabindex="-1" data-scenario="pr">
+            <span class="tab-num">02</span>
+            <span data-i18n="scTabPr">跟进 GitHub PR</span>
+          </button>
+          <button type="button" class="scenario-tab" role="tab" id="sc-tab-memory" aria-selected="false" aria-controls="sc-panel" tabindex="-1" data-scenario="memory">
+            <span class="tab-num">03</span>
+            <span data-i18n="scTabMemory">项目记忆与技能</span>
+          </button>
+          <button type="button" class="scenario-tab" role="tab" id="sc-tab-audit" aria-selected="false" aria-controls="sc-panel" tabindex="-1" data-scenario="audit">
+            <span class="tab-num">04</span>
+            <span data-i18n="scTabAudit">费用与目录清理</span>
+          </button>
+        </div>
+
+        <div class="stamped-card mock-window" id="sc-panel" role="tabpanel" tabindex="0" aria-labelledby="sc-tab-dispatch">
+          <div class="mock-topbar">
+            <div class="mock-topbar-left">
+              <span class="mock-brand"><img src="./brand/otto.svg" alt=""> Otto</span>
+              <span class="mock-stat"><span class="status-dot"></span> Machines <strong id="mock-machines-stat">2/3</strong></span>
+              <span class="mock-stat">Running <strong id="mock-running-stat">1</strong></span>
+              <span class="mock-stat"><span class="status-dot amber"></span> Needs you <strong id="mock-waiting-stat">1</strong></span>
+            </div>
+            <div class="mock-topbar-right">
+              <span class="mock-stat tabular">Today <strong id="mock-spend-stat">$0.14</strong></span>
+              <span class="mock-kbd">⌘ K</span>
+            </div>
+          </div>
+
+          <div class="mock-grid">
+            <aside class="mock-sidebar">
+              <div>
+                <span class="mock-label" data-i18n="mockThreadsLabel">事项列表</span>
+                <div class="mock-thread-list" id="mock-threads">
+                  <div class="mock-thread active"><div>排查并发状态刷新失败</div><small>pi · mac-studio · running</small></div>
+                  <div class="mock-thread"><div>跟进 PR #42 CI 状态</div><small>watch · github</small></div>
+                </div>
+              </div>
+              <div>
+                <span class="mock-label" data-i18n="mockMachinesLabel">已连接的电脑</span>
+                <div class="mock-machine-list">
+                  <div class="mock-machine"><span class="mock-machine-name"><span class="status-dot"></span> mac-studio</span><span class="tabular">1/2</span></div>
+                  <div class="mock-machine"><span class="mock-machine-name"><span class="status-dot"></span> thinkpad-linux</span><span class="tabular">0/2</span></div>
+                  <div class="mock-machine"><span class="mock-machine-name"><span class="status-dot gray"></span> win-desktop</span><span>offline</span></div>
+                </div>
+              </div>
+            </aside>
+
+            <div class="mock-main" id="mock-main-pane">
+              <div class="mock-main-head">
+                <h3 id="mock-pane-title">排查并发状态刷新失败</h3>
+                <span id="mock-pane-sub">Thread · otto/fix-state-race</span>
+              </div>
+              <div class="mock-feed" id="mock-feed">
+                <div class="mock-msg-user">在 mac-studio 上用 pi 排查偶发状态刷新失效的问题，拉独立 worktree 运行，保留我当前分支上的未提交改动。</div>
+                <div class="mock-msg-agent">
+                  <span class="mock-msg-meta">OTTO · 刚刚</span>
+                  <div>已在 mac-studio 检出独立目录 otto/fix-state-race 并启动 pi。定位到并发刷新请求存在状态覆盖，正在补充互斥锁与回归测试。</div>
+                </div>
+              </div>
+            </div>
+
+            <aside class="mock-context" id="mock-context-pane">
+              <span class="mock-label" data-i18n="mockContextLabel">当前状态</span>
+              <div class="mock-fact-box">
+                <strong>mac-studio · pi</strong>
+                <p>在独立 Git worktree 中修改文件，原目录未提交的改动不受影响。</p>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <p class="scenario-caption" id="scenario-caption">
+          从手机或另一台电脑下发任务时，连接器会按仓库策略检出独立 Git worktree，不干扰本地正在开发的分支。
+        </p>
+      </div>
+    </section>
+
+    <section class="section" id="architecture">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-kicker" data-i18n="archKicker">系统结构</span>
+          <h2 data-i18n="archTitle">整体架构与职责划分</h2>
+          <p data-i18n="archSub">服务端使用单个 SQLite 文件持久化状态；本地电脑通过出站 WebSocket 连接服务端，无需公网 IP 或端口映射。</p>
+        </div>
+
+        <div class="stamped-card arch-card">
+          <svg class="arch-svg" viewBox="0 0 980 250" role="img" aria-label="Otto architecture diagram">
+            <defs>
+              <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#5ECB4A"/>
+              </marker>
+            </defs>
+
+            <rect x="16" y="34" width="248" height="182" rx="5" fill="#0F1410" stroke="#2B362A" stroke-width="1.5"/>
+            <text x="34" y="64" fill="#8DFF62" font-family="ui-monospace, Menlo, monospace" font-size="11" letter-spacing="1.2">01 · WEB WORKSPACE</text>
+            <text x="34" y="92" fill="#F1F7EE" font-family="-apple-system, PingFang SC, sans-serif" font-size="16" font-weight="600" data-i18n="svgT1Title">电脑与手机浏览器</text>
+            <text x="34" y="118" fill="#959F98" font-family="-apple-system, PingFang SC, sans-serif" font-size="12.5" data-i18n="svgT1B1">• 对话记录与待处理卡片</text>
+            <text x="34" y="142" fill="#959F98" font-family="-apple-system, PingFang SC, sans-serif" font-size="12.5" data-i18n="svgT1B2">• Cmd/Ctrl+K 全文检索</text>
+            <text x="34" y="166" fill="#959F98" font-family="-apple-system, PingFang SC, sans-serif" font-size="12.5" data-i18n="svgT1B3">• Passkey 登录与可选推送</text>
+            <text x="34" y="192" fill="#6C7A70" font-family="ui-monospace, Menlo, monospace" font-size="11">ES Modules · No bundler</text>
+
+            <line x1="268" y1="112" x2="348" y2="112" stroke="#5ECB4A" stroke-width="1.6" marker-end="url(#arrow-green)" marker-start="url(#arrow-green)"/>
+            <text x="308" y="98" text-anchor="middle" fill="#959F98" font-family="ui-monospace, Menlo, monospace" font-size="10.5">HTTPS / WS</text>
+            <text x="308" y="132" text-anchor="middle" fill="#6C7A70" font-family="ui-monospace, Menlo, monospace" font-size="10" data-i18n="svgLink1">实时同步</text>
+
+            <rect x="354" y="18" width="284" height="214" rx="5" fill="#101810" stroke="#5ECB4A" stroke-width="1.5"/>
+            <text x="374" y="48" fill="#8DFF62" font-family="ui-monospace, Menlo, monospace" font-size="11" letter-spacing="1.2">02 · STEWARD</text>
+            <text x="374" y="76" fill="#F1F7EE" font-family="-apple-system, PingFang SC, sans-serif" font-size="16" font-weight="600" data-i18n="svgT2Title">云服务器（或 Workers）</text>
+            <rect x="374" y="92" width="244" height="34" rx="3" fill="#0B0F0C" stroke="#263824"/>
+            <text x="386" y="113" fill="#DBE4D7" font-family="ui-monospace, Menlo, monospace" font-size="11.5" data-i18n="svgT2B1">常规逻辑：队列 / 定时 / PR 检查</text>
+            <rect x="374" y="134" width="244" height="34" rx="3" fill="#0B0F0C" stroke="#263824"/>
+            <text x="386" y="155" fill="#DBE4D7" font-family="ui-monospace, Menlo, monospace" font-size="11.5" data-i18n="svgT2B2">模型调用：路由判断 / 进度整理</text>
+            <rect x="374" y="176" width="244" height="36" rx="3" fill="#0B0F0C" stroke="#263824"/>
+            <text x="386" y="198" fill="#8DFF62" font-family="ui-monospace, Menlo, monospace" font-size="11.5" data-i18n="svgT2B3">单文件 SQLite + FTS5 数据库</text>
+
+            <line x1="722" y1="112" x2="642" y2="112" stroke="#5ECB4A" stroke-width="1.6" marker-end="url(#arrow-green)"/>
+            <text x="682" y="98" text-anchor="middle" fill="#959F98" font-family="ui-monospace, Menlo, monospace" font-size="10.5" data-i18n="svgLink2Top">出站连接</text>
+            <text x="682" y="132" text-anchor="middle" fill="#6C7A70" font-family="ui-monospace, Menlo, monospace" font-size="10" data-i18n="svgLink2Bot">免开入站端口</text>
+
+            <rect x="726" y="34" width="238" height="182" rx="5" fill="#0F1410" stroke="#2B362A" stroke-width="1.5"/>
+            <text x="744" y="64" fill="#F5B455" font-family="ui-monospace, Menlo, monospace" font-size="11" letter-spacing="1.2">03 · CONNECTORS</text>
+            <text x="744" y="92" fill="#F1F7EE" font-family="-apple-system, PingFang SC, sans-serif" font-size="16" font-weight="600">macOS / Linux / Windows</text>
+            <text x="744" y="118" fill="#959F98" font-family="-apple-system, PingFang SC, sans-serif" font-size="12.5" data-i18n="svgT3B1">• 调用本机 pi / Claude Code / Codex</text>
+            <text x="744" y="142" fill="#959F98" font-family="-apple-system, PingFang SC, sans-serif" font-size="12.5" data-i18n="svgT3B2">• Worktree 隔离、Diff 查看与清理</text>
+            <text x="744" y="166" fill="#959F98" font-family="-apple-system, PingFang SC, sans-serif" font-size="12.5" data-i18n="svgT3B3">• 仓库与完整日志留在本机磁盘</text>
+            <text x="744" y="192" fill="#6C7A70" font-family="ui-monospace, Menlo, monospace" font-size="11">@isaac2ingrid/otto</text>
+          </svg>
+        </div>
+
+        <div class="pillar-grid">
+          <article class="info-card">
+            <span class="tag" data-i18n="pillarATag">离线可用</span>
+            <h3 data-i18n="pillarATitle">本地设备休眠时仍可记录与排期</h3>
+            <p data-i18n="pillarABody">笔记本休眠期间，网页端依然可以发起对话、记录备忘、查看历史事项与 PR 状态。需要读写代码的任务会先进入队列，待目标机器重连后自动下发。</p>
+          </article>
+          <article class="info-card">
+            <span class="tag" data-i18n="pillarBTag">网络与密钥</span>
+            <h3 data-i18n="pillarBTitle">纯出站连接，模型密钥各自独立</h3>
+            <p data-i18n="pillarBBody">家庭或办公电脑只需能访问服务器的 HTTPS 地址即可接入，无需开通入站端口。服务端进程与本地 coding agent 各自读取独立的模型配置，本地密钥不会上传至服务端。</p>
+          </article>
+          <article class="info-card">
+            <span class="tag" data-i18n="pillarCTag">部署方式</span>
+            <h3 data-i18n="pillarCTitle">常规 Linux VPS 即可独立运行</h3>
+            <p data-i18n="pillarCBody">服务端编译产物为单个 Node.js 文件配合 SQLite 数据库，通过 systemd 即可托管；如不想维护服务器，同一套代码也支持运行在 Cloudflare Workers 上。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="boundaries">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-kicker" data-i18n="boundKicker">设计取舍</span>
+          <h2 data-i18n="boundTitle">关键工程取舍</h2>
+          <p data-i18n="boundSub">针对长周期任务中常见的上下文遗忘、接口异常与误操作问题，系统在实现上做了以下约束。</p>
+        </div>
+
+        <div class="boundary-grid">
+          <article class="info-card">
+            <span class="tag" data-i18n="bound1Tag">状态存储</span>
+            <h3 data-i18n="bound1Title">事项进度与项目备注独立存入 SQLite</h3>
+            <p data-i18n="bound1Body">事项状态、worker 汇报和项目约定都保存在结构化表里，每轮对话仅向模型注入当前状态摘要，避免长对话压缩历史记录时丢失早期约定。</p>
+          </article>
+          <article class="info-card">
+            <span class="tag" data-i18n="bound2Tag">减少模型依赖</span>
+            <h3 data-i18n="bound2Title">固定流程直接由常规代码驱动</h3>
+            <p data-i18n="bound2Body">超时检测、队列重试、PR 定时轮询与完成通知均直接走确定性的代码逻辑，无需逐次调用大模型。即便模型接口异常或达到单日预算上限，待处理的确认卡片仍会正常送达。</p>
+          </article>
+          <article class="info-card">
+            <span class="tag" data-i18n="bound3Tag">权限确认</span>
+            <h3 data-i18n="bound3Title">涉及外部变更的操作必须点击确认卡</h3>
+            <p data-i18n="bound3Body">开启或取消 PR 跟进、清理含未合并提交的 worktree、写入仓库技能文件，均需点击对应的确认按钮，在聊天框回复“同意”不会触发执行；联网搜索轮次亦默认隔离执行工具。</p>
+          </article>
+          <article class="info-card">
+            <span class="tag" data-i18n="bound4Tag">中断控制</span>
+            <h3 data-i18n="bound4Title">停止回复与中断本地任务相互独立</h3>
+            <p data-i18n="bound4Body">终止当前文字回复、中断本地运行中的 coding agent、取消后台 PR 跟进是三个分离的控制项，打断单轮回复不会误停后台正在执行的编码任务。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="quickstart">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-kicker" data-i18n="qsKicker">上手步骤</span>
+          <h2 data-i18n="qsTitle">安装与运行</h2>
+          <p data-i18n="qsSub">可以先在本地启动临时环境体验完整流程，确认符合需求后再部署到云服务器长期运行。</p>
+        </div>
+
+        <div class="scenario-tabs" role="tablist" aria-label="Quickstart Modes" id="qs-tablist">
+          <button type="button" class="scenario-tab" role="tab" id="qs-tab-local" aria-selected="true" aria-controls="qs-panel" tabindex="0" data-qs="local">
+            <span class="tab-num">1</span>
+            <span data-i18n="qsTabLocal">本地快速体验</span>
+          </button>
+          <button type="button" class="scenario-tab" role="tab" id="qs-tab-vps" aria-selected="false" aria-controls="qs-panel" tabindex="-1" data-qs="vps">
+            <span class="tab-num">2</span>
+            <span data-i18n="qsTabVps">部署至云服务器</span>
+          </button>
+          <button type="button" class="scenario-tab" role="tab" id="qs-tab-connect" aria-selected="false" aria-controls="qs-panel" tabindex="-1" data-qs="connect">
+            <span class="tab-num">3</span>
+            <span data-i18n="qsTabConnect">接入工作电脑</span>
+          </button>
+        </div>
+
+        <div class="stamped-card qs-panel" id="qs-panel" role="tabpanel" tabindex="0" aria-labelledby="qs-tab-local">
+          <p class="qs-desc" id="qs-desc">拉下代码后执行一条命令，即可在临时目录启动本地服务端（127.0.0.1:8787）与测试连接器，并输出登录链接：</p>
+          <div class="code-block">
+            <div class="code-head">
+              <span id="qs-code-label">Local dev stack</span>
+              <button type="button" class="copy-btn" data-copy-target="qs-code" data-i18n="copyBtn">复制</button>
+            </div>
+            <pre><code id="qs-code">corepack pnpm install --frozen-lockfile
+pnpm local:up</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="docs">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-kicker" data-i18n="docsKicker">文档</span>
+          <h2 data-i18n="docsTitle">说明文档</h2>
+          <p data-i18n="docsSub">具体的反向代理配置、常见故障排查、API 格式与已知边界说明均整理在仓库的 docs/ 目录中。</p>
+        </div>
+
+        <div class="docs-grid" id="docs-grid"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <span data-i18n="footerCopy">Otto · MIT License</span>
+      <div class="footer-links" id="footer-links"></div>
+    </div>
+  </footer>
+
+  <div class="sr-only" id="live-announcer" role="status" aria-live="polite"></div>
+</body>
+</html>
