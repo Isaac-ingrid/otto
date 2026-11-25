@@ -1569,4 +1569,117 @@ export const MIGRATIONS: readonly Migration[] = [
       });
     },
   },
+  {
+    // Agent Autoloop Adoptions Stage 1: Dual-granularity quota cooldown hold (`sh_agent_cooldown`),
+    // keyed on `(deviceId, scopeKey)` (`pi:<provider>` for multi-provider `pi`, `agent:<kind>`
+    // for standalone CLIs). Parks rate-limited workers in `idle` (`error:rate_limited`) without
+    // burning auto-resume budgets or marking sessions `broken`, dedupes notifications per window,
+    // and wakes/resumes parked sessions when `limitedUntil` expires.
+    id: "050_quota_hold_and_cooldown",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_agent_cooldown (
+        deviceId TEXT NOT NULL,
+        scopeKey TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        provider TEXT,
+        limitedUntil INTEGER NOT NULL,
+        reason TEXT,
+        parkedWorkerIdsJson TEXT NOT NULL DEFAULT '[]',
+        notifiedBucket INTEGER,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (deviceId, scopeKey)
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_agent_cooldown_due ON sh_agent_cooldown (limitedUntil)`;
+    },
+  },
+  {
+    // Agent Autoloop Adoptions Stage 3: Zero-token local probes (`kind = 'probe'`, `probeName`,
+    // `deviceId`, `pausedUntil` on `sh_routine`; `approvedProbes` on `sh_machine`), cross-turn
+    // autonomous loop circuit breaker (`autoHops <= 8` on `sh_wake`, `sh_run`, `sh_thread`),
+    // and synchronous HMAC webhook sources (`sh_inbound_source`) + paused `sh_skipped_event` replay.
+    id: "051_probes_autohops_and_replay",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_machine ADD COLUMN approvedProbes TEXT`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_routine ADD COLUMN probeName TEXT`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_routine ADD COLUMN deviceId TEXT`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_routine ADD COLUMN pausedUntil INTEGER`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_wake ADD COLUMN autoHops INTEGER NOT NULL DEFAULT 0`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_run ADD COLUMN autoHops INTEGER NOT NULL DEFAULT 0`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_thread ADD COLUMN autoHops INTEGER NOT NULL DEFAULT 0`;
+      });
+      sql`CREATE TABLE IF NOT EXISTS sh_inbound_source (
+        source TEXT PRIMARY KEY,
+        secretEnc TEXT NOT NULL,
+        pausedUntil INTEGER,
+        updatedAt INTEGER NOT NULL
+      )`;
+      sql`CREATE TABLE IF NOT EXISTS sh_skipped_event (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        eventKey TEXT NOT NULL UNIQUE,
+        summary TEXT NOT NULL,
+        payloadJson TEXT NOT NULL,
+        receivedAt INTEGER NOT NULL,
+        replayedAt INTEGER
+      )`;
+      sql`CREATE INDEX IF NOT EXISTS sh_skipped_event_replay ON sh_skipped_event (replayedAt, receivedAt)`;
+    },
+  },
+  {
+    // Agent Autoloop Adoptions Stage 4: PR Watch stuck detection (`stateSince`, `stuckNotifiedHead`,
+    // `blindReviewStatus` on `sh_pr_watch`) and zero-checkout blind PR review ledger (`sh_pr_blind_review`).
+    id: "052_pr_watch_stuck_and_review",
+    up: (sql) => {
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_pr_watch ADD COLUMN stateSince INTEGER`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_pr_watch ADD COLUMN stuckNotifiedHead TEXT`;
+      });
+      ignoringDuplicateColumn(() => {
+        sql`ALTER TABLE sh_pr_watch ADD COLUMN blindReviewStatus TEXT`;
+      });
+      sql`CREATE TABLE IF NOT EXISTS sh_pr_blind_review (
+        watchId TEXT NOT NULL,
+        head TEXT NOT NULL,
+        reviewerAgent TEXT NOT NULL,
+        authorAgent TEXT,
+        diffStatJson TEXT NOT NULL,
+        reviewJson TEXT,
+        status TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (watchId, head)
+      )`;
+    },
+  },
+  {
+    // Agent Autoloop Adoptions Stage 5: Multi-channel signed outbound webhooks (`sh_outbound_webhook`).
+    id: "053_outbound_webhooks",
+    up: (sql) => {
+      sql`CREATE TABLE IF NOT EXISTS sh_outbound_webhook (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        url TEXT NOT NULL,
+        secretEnc TEXT,
+        eventsJson TEXT NOT NULL DEFAULT '["*"]',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      )`;
+    },
+  },
 ];

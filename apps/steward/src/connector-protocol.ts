@@ -29,12 +29,20 @@ import {
   WORKER_DIFF_TIMEOUT_MS,
   WORKTREE_AUDIT_TIMEOUT_MS,
   WORKTREE_CLEANUP_TIMEOUT_MS,
+  RUN_PROBE_TIMEOUT_MS,
+  GIT_PR_DIFF_TIMEOUT_MS,
+  ProbeResultMessageSchema,
+  GitPrDiffResultMessageSchema,
   WorkerCheckpointResultMessageSchema,
   WorkerDiffResultMessageSchema,
   WorktreeAuditResultMessageSchema,
   WorktreeCleanupResultMessageSchema,
   mintToken,
   ulid,
+  type RunProbeMessage,
+  type ProbeResultMessage,
+  type GitPrDiffMessage,
+  type GitPrDiffResultMessage,
   type RepoSkillData,
   type RepoSkillOpArgs,
   type RepoSkillOpMessage,
@@ -83,6 +91,8 @@ type WorkerCheckpointReadResult = WorkerCheckpointResult | { ok: false; code: "m
 type RepoSkillReadResult = RepoSkillResult | { ok: false; code: "machine_offline" | "skill_timeout" };
 type WorktreeAuditReadResult = WorktreeAuditResult | { ok: false; code: "machine_offline" | "audit_timeout" };
 type WorktreeCleanupReadResult = WorktreeCleanupResult | { ok: false; code: "machine_offline" | "cleanup_timeout" };
+type ProbeReadResult = ProbeResultMessage | { ok: false; code: "machine_offline" | "probe_timeout" | "unsupported" | "probe_failed" };
+type GitPrDiffReadResult = GitPrDiffResultMessage | { ok: false; code: "machine_offline" | "diff_timeout" | "unsupported" | "git_failed" };
 
 /** The pr_worker error codes (worker-manager.ts) → the failure card's stages (review
  *  finding 3): lets the failed-cmd_result path keep the stage-specific fix text even when it
@@ -185,6 +195,18 @@ export class ConnectorProtocol {
     connectionId: string;
     finish(result: WorktreeCleanupReadResult): void;
   }>();
+  private probeTimeoutMs = RUN_PROBE_TIMEOUT_MS + 5_000;
+  private readonly probeReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: ProbeReadResult): void;
+  }>();
+  private gitPrDiffTimeoutMs = GIT_PR_DIFF_TIMEOUT_MS;
+  private readonly gitPrDiffReads = new Map<string, {
+    deviceId: string;
+    connectionId: string;
+    finish(result: GitPrDiffReadResult): void;
+  }>();
 
   constructor(private readonly deps: ConnectorProtocolDeps) {}
 
@@ -242,6 +264,8 @@ export class ConnectorProtocol {
       workerCheckpoint: hello.capabilities?.workerCheckpoint === true,
       repoSkills: hello.capabilities?.repoSkills === true,
       worktreeAudit: hello.capabilities?.worktreeAudit === true,
+      localProbes: hello.capabilities?.localProbes === true,
+      gitPrDiff: hello.capabilities?.gitPrDiff === true,
     } satisfies ConnState);
     // hello is the machine/repo snapshot's source of truth (protocol §6.1, steward.md §2.2):
     // name, agents, limits, and the full repo list — removals included — land in the ledger.
@@ -1220,6 +1244,120 @@ export class ConnectorProtocol {
     for (const pending of this.worktreeCleanupReads.values()) {
       if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
     }
+    for (const pending of this.probeReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.gitPrDiffReads.values()) {
+      if (pending.connectionId === connectionId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+  }
+
+  runMachineProbe(
+    deviceId: string,
+    args: { probeName: string; repoId?: string; timeoutMs?: number },
+    signal?: AbortSignal,
+  ): Promise<ProbeReadResult> {
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${deviceId}`[0];
+    if (!device || device.revoked) return Promise.resolve({ ok: false, code: "machine_offline" });
+    const connection = this.deps.connFor(deviceId);
+    if (!connection) return Promise.resolve({ ok: false, code: "machine_offline" });
+    const connectionState = connection.state as ConnState | null;
+    if (!connectionState?.localProbes) return Promise.resolve({ ok: false, code: "unsupported" });
+    if (this.probeReads.size >= 16) return Promise.resolve({ ok: false, code: "probe_failed" });
+    const id = ulid();
+    const waitMs = Math.max(1_000, (args.timeoutMs ?? RUN_PROBE_TIMEOUT_MS) + 5_000);
+    return new Promise((resolve) => {
+      const finish = (result: ProbeReadResult) => {
+        if (!this.probeReads.delete(id)) return;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        resolve(result);
+      };
+      const abort = () => finish({ ok: false, code: "probe_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "probe_timeout" }), Math.min(waitMs, this.probeTimeoutMs));
+      this.probeReads.set(id, { deviceId, connectionId: connection.id, finish });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(
+          JSON.stringify({
+            t: "run_probe",
+            id,
+            probeName: args.probeName,
+            ...(args.repoId !== undefined ? { repoId: args.repoId } : {}),
+          } satisfies RunProbeMessage),
+        );
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleProbeResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.probeReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = ProbeResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "probe_failed" });
+  }
+
+  readGitPrDiff(
+    deviceId: string,
+    args: { repoId: string; prNumber?: number; headSha?: string; baseRef?: string; maxBytes?: number },
+    signal?: AbortSignal,
+  ): Promise<GitPrDiffReadResult> {
+    const device = this.sql<{ revoked: number }>`SELECT revoked FROM device WHERE deviceId = ${deviceId}`[0];
+    if (!device || device.revoked) return Promise.resolve({ ok: false, code: "machine_offline" });
+    const connection = this.deps.connFor(deviceId);
+    if (!connection) return Promise.resolve({ ok: false, code: "machine_offline" });
+    const connectionState = connection.state as ConnState | null;
+    if (!connectionState?.gitPrDiff) return Promise.resolve({ ok: false, code: "unsupported" });
+    if (this.gitPrDiffReads.size >= 8) return Promise.resolve({ ok: false, code: "git_failed" });
+    const id = ulid();
+    return new Promise((resolve) => {
+      const finish = (result: GitPrDiffReadResult) => {
+        if (!this.gitPrDiffReads.delete(id)) return;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        resolve(result);
+      };
+      const abort = () => finish({ ok: false, code: "git_failed" });
+      const timer = setTimeout(() => finish({ ok: false, code: "diff_timeout" }), this.gitPrDiffTimeoutMs);
+      this.gitPrDiffReads.set(id, { deviceId, connectionId: connection.id, finish });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      try {
+        connection.send(
+          JSON.stringify({
+            t: "git_pr_diff",
+            id,
+            repoId: args.repoId,
+            ...(args.prNumber !== undefined ? { prNumber: args.prNumber } : {}),
+            ...(args.headSha !== undefined ? { headSha: args.headSha } : {}),
+            ...(args.baseRef !== undefined ? { baseRef: args.baseRef } : {}),
+            ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}),
+          } satisfies GitPrDiffMessage),
+        );
+      } catch {
+        finish({ ok: false, code: "machine_offline" });
+      }
+    });
+  }
+
+  handleGitPrDiffResult(connection: Connection, raw: unknown): void {
+    if (raw === null || typeof raw !== "object" || !("re" in raw) || typeof raw.re !== "string") return;
+    const pending = this.gitPrDiffReads.get(raw.re);
+    const state = connection.state as ConnState | null;
+    if (!pending || pending.connectionId !== connection.id || pending.deviceId !== state?.deviceId) return;
+    const parsed = GitPrDiffResultMessageSchema.safeParse(raw);
+    pending.finish(parsed.success ? parsed.data : { ok: false, code: "git_failed" });
   }
 
   cancelReadsForDevice(deviceId: string, result: DirectoryReadResult): void {
@@ -1240,6 +1378,12 @@ export class ConnectorProtocol {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
     for (const pending of this.worktreeCleanupReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.probeReads.values()) {
+      if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
+    }
+    for (const pending of this.gitPrDiffReads.values()) {
       if (pending.deviceId === deviceId) pending.finish({ ok: false, code: "machine_offline" });
     }
   }

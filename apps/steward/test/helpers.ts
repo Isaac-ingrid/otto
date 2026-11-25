@@ -54,7 +54,8 @@ export async function resetLedgerState(): Promise<void> {
       "sh_agent_model_default", "sh_machine", "sh_repo", "sh_thread", "sh_thread_repo", "sh_thread_summary", "sh_worker", "sh_report",
       "sh_timeline", "sh_question", "sh_notify", "sh_offline_dispatch", "sh_note", "sh_note_log", "event_inbox", "worker_ack", "outbox",
       "sh_web_link", "sh_web_session", "sh_web_request", "sh_web_pairing", "sh_deploy", "device", "pairing", "sh_reap_pending", "sh_pr_consent",
-      "sh_web_credential", "sh_web_webauthn_nonce", "sh_proposal", "sh_skill_offer", "sh_worker_usage",
+      "sh_web_credential", "sh_web_webauthn_nonce", "sh_proposal", "sh_skill_offer", "sh_worker_usage", "sh_agent_cooldown",
+      "sh_inbound_source", "sh_skipped_event", "sh_pr_blind_review", "sh_outbound_webhook",
       // sh_usage_day / sh_usage_cursor / sh_usage_event are NOT here: resetLlmStateForTests (called just
       // above) owns them, because pi's tables and the cursor must reset TOGETHER — dropping
       // both here would leave the cursor absent and swallow the next run's spend as a
@@ -65,6 +66,8 @@ export async function resetLedgerState(): Promise<void> {
     await instance.setAmbientSkillRepliesForTest(null);
   await instance.setPrDiagnosisRepliesForTest(null);
   await instance.setPrFeedbackRepliesForTest(null);
+  instance.setOutboundWebhookFetchForTest(undefined);
+  instance.setPrWatchStuckThresholdForTest(undefined);
   });
 }
 
@@ -426,6 +429,11 @@ export class FakeConnector {
   repoSkills = false;
   /** Advertises the worktree audit/cleanup capability in hello (off = old connector). */
   worktreeAudit = false;
+  localProbes = false;
+  gitPrDiff = false;
+  approvedProbes: string[] = [];
+  probeResponder?: (req: Record<string, unknown>) => Record<string, unknown>;
+  gitPrDiffResponder?: (req: Record<string, unknown>) => Record<string, unknown>;
   /** Every directory_list request received so far. */
   readonly directoryRequests: Array<Record<string, unknown>> = [];
   /** Every worker_diff request received so far. */
@@ -438,6 +446,8 @@ export class FakeConnector {
   readonly worktreeAuditRequests: Array<Record<string, unknown>> = [];
   /** Every worktree_cleanup request received so far. */
   readonly worktreeCleanupRequests: Array<Record<string, unknown>> = [];
+  readonly probeRequests: Array<Record<string, unknown>> = [];
+  readonly gitPrDiffRequests: Array<Record<string, unknown>> = [];
   /** Every history_req the machine was asked (the full-session reads carry `format`/`since`). */
   readonly historyRequests: Array<Record<string, unknown>> = [];
   /** When set, the connector drops its connection after sending this many chunks. */
@@ -508,10 +518,13 @@ export class FakeConnector {
       ...(this.workerCheckpoint ? { workerCheckpoint: true } : {}),
       ...(this.repoSkills ? { repoSkills: true } : {}),
       ...(this.worktreeAudit ? { worktreeAudit: true } : {}),
+      ...(this.localProbes ? { localProbes: true } : {}),
+      ...(this.gitPrDiff ? { gitPrDiff: true } : {}),
     };
     return {
       bootId: this.bootId,
       ...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
+      ...(this.approvedProbes.length > 0 ? { approvedProbes: this.approvedProbes } : {}),
       workers: this.workers,
       machine: { name: this.machineName, memTotalMB: 65536, memFreeMB: 31000 },
       agents: this.agents.map((kind) => ({ kind, version: "1.0.0-test", capabilities: caps(kind) })),
@@ -579,6 +592,20 @@ export class FakeConnector {
       }
       if (message.t === "worktree_cleanup") {
         this.worktreeCleanupRequests.push(message);
+        continue;
+      }
+      if (message.t === "run_probe") {
+        this.probeRequests.push(message);
+        if (this.probeResponder) {
+          this.send({ t: "probe_result", re: message.id, ...this.probeResponder(message) });
+        }
+        continue;
+      }
+      if (message.t === "git_pr_diff") {
+        this.gitPrDiffRequests.push(message);
+        if (this.gitPrDiffResponder) {
+          this.send({ t: "git_pr_diff_result", re: message.id, ...this.gitPrDiffResponder(message) });
+        }
         continue;
       }
       if (message.t === "error") {

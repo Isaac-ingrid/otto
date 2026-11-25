@@ -352,12 +352,15 @@ export class WebApp {
     return this.#deps.publicOrigin ?? (this.#sql<{ origin: string }>`SELECT origin FROM sh_deploy WHERE id = 1`[0]?.origin ?? null);
   }
 
-  /** Absolute login URL for a message card's 查看详情 button, or null before any origin is known. */
-  async linkUrl(target: string): Promise<string | null> {
+  /** Absolute login URL for a message card's 查看详情 button, or null before any origin is known.
+   *  Optional `ttlMsOverride` lets external Feishu/webhook cards mint 7-day (`7 * 86_400_000` ms)
+   *  single-use links while keeping default local links at policy TTL. */
+  async linkUrl(target: string, ttlMsOverride?: number): Promise<string | null> {
     const origin = this.origin();
     if (!origin) return null;
     const policy = this.#deps.loginLinkPolicy ?? DEFAULT_LOGIN_LINK_POLICY;
-    const { token, expiresAt } = await mintLinkToken(this.#deps.secrets[0]!, target, this.#now(), policy.ttlMs);
+    const ttlMs = ttlMsOverride && Number.isSafeInteger(ttlMsOverride) && ttlMsOverride > 0 ? ttlMsOverride : policy.ttlMs;
+    const { token, expiresAt } = await mintLinkToken(this.#deps.secrets[0]!, target, this.#now(), ttlMs);
     this.#sql`
       INSERT INTO sh_web_link (tokenHash, target, expiresAt, createdAt)
       VALUES (${await sha256Hex(token)}, ${target}, ${expiresAt}, ${this.#now()})

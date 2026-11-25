@@ -1,16 +1,18 @@
 // The proactive-behavior service (issue #20, steward.md §8, spec §8): routines (what the
 // owner prescribed by conversation) and follow-ups (a Thread-scoped alarm). Deterministic
 // code, no LLM anywhere in here — digest routines render straight from the ledger
-// (spike-conclusions §2), instruction routines queue a ⟦routine⟧ steward input whose
-// operationId (routine:<id>:<fireTime>) dedups duplicate fires (steward.md §8.2/§11).
+// (spike-conclusions §2), probe routines run a local SHA-256-approved script at zero LLM
+// token cost when `triggered === false` (Agent Autoloop Stage 3), and instruction/triggered
+// probe routines queue a ⟦routine⟧ steward input whose operationId (`routine:<id>:<fireTime>`)
+// dedups duplicate fires (steward.md §8.2/§11).
 //
 // "Proactive behavior must have provenance" (spec §8.3) is enforced in the data layer:
 // createdFromMsg / sourceRef are NOT NULL and verified against sh_inbound / sh_routine at
 // creation time. Suggestions (§8.5) send a button card only; the tap is what creates.
-import { ulid } from "@isaac2ingrid/protocol";
+import { ulid, type ProbeResultMessage } from "@isaac2ingrid/protocol";
 import type { FollowupRow, Ledger, RoutineKind, RoutineRow, RoutineSpecStored } from "./ledger.ts";
 import { digestCard, digestIsEmpty, digestSection, routineOfferCard, type DigestData, type QuietSection } from "./report-template.ts";
-import { followupWakeText, routineWakeText } from "./wake-text.ts";
+import { escapeMarkers, followupWakeText, routineWakeText } from "./wake-text.ts";
 
 /** What a schedule payload carries into the Agents SDK callback. */
 export interface RoutineFirePayload {
@@ -19,6 +21,8 @@ export interface RoutineFirePayload {
 export interface FollowupFirePayload {
   followupId: string;
 }
+
+export type ProbeExecOutcome = ProbeResultMessage | { ok: false; code: string; detail?: string };
 
 export interface RoutineServiceDeps {
   ledger: Ledger;
@@ -42,6 +46,8 @@ export interface RoutineServiceDeps {
     id?: string;
   }): Promise<{ id: string }>;
   ownerOpenId(): string | null;
+  /** Executes a locally SHA-256-approved probe script on `deviceId` (zero LLM tokens). */
+  runProbe?: (deviceId: string, args: { probeName: string; repoId?: string }) => Promise<ProbeExecOutcome>;
   /** Nudge the wake drain (a queued routine wake wants an immediate submit). */
   onWakeQueued(): void;
   audit(kind: string, detail: string): void;
@@ -51,6 +57,8 @@ export interface RoutineServiceDeps {
 export interface RoutineSpecInput {
   instruction: string;
   kind: RoutineKind;
+  probeName?: string;
+  deviceId?: string;
   cron?: string;
   onceAt?: number;
   threadId?: string;
@@ -61,6 +69,14 @@ export interface RoutineSpecInput {
 export function validateRoutineSpec(spec: RoutineSpecInput, now: number): string | null {
   if (spec.instruction.trim().length === 0) return "instruction 不能为空。";
   if (spec.instruction.length > 300) return `instruction 超长（${spec.instruction.length} > 300 字）。`;
+  if (spec.kind === "probe") {
+    if (!spec.probeName || !/^[A-Za-z0-9._-]{1,80}$/.test(spec.probeName)) {
+      return "probe 类型的例行任务必须指定合法的本地已批准探针名称（probeName）。";
+    }
+    if (!spec.deviceId || spec.deviceId.trim().length === 0) {
+      return "probe 类型的例行任务必须绑定执行探针的目标机器（deviceId）。";
+    }
+  }
   const hasCron = spec.cron !== undefined && spec.cron.length > 0;
   const hasOnce = spec.onceAt !== undefined;
   if (hasCron === hasOnce) return "触发条件必须二选一：cron（周期）或 atIso（一次性）。";
@@ -109,6 +125,17 @@ export class RoutineService {
   async create(input: RoutineSpecInput & { routineId: string; createdFromMsg: string }): Promise<{ ok: true; routine: RoutineRow } | { ok: false; reason: string }> {
     const violation = validateRoutineSpec(input, this.now());
     if (violation) return { ok: false, reason: violation };
+    if (input.kind === "probe") {
+      const machine = this.ledger.machines.get(input.deviceId!);
+      if (!machine) return { ok: false, reason: `未找到目标机器 ${input.deviceId}。` };
+      const approved = machine.approvedProbes ?? [];
+      if (!approved.includes(input.probeName!)) {
+        return {
+          ok: false,
+          reason: `机器 ${machine.name} 尚未在本地批准探针「${input.probeName}」（请在该机器执行 otto probe approve ${input.probeName}）。`,
+        };
+      }
+    }
     const routine = this.ledger.routines.create({
       routineId: input.routineId,
       kind: input.kind,
@@ -117,6 +144,8 @@ export class RoutineService {
       cron: input.cron ?? null,
       onceAt: input.onceAt ?? null,
       instruction: input.instruction.trim(),
+      probeName: input.probeName ?? null,
+      deviceId: input.deviceId ?? null,
       threadId: input.threadId ?? null,
       repoId: input.repoId ?? null,
     });
@@ -130,8 +159,8 @@ export class RoutineService {
     this.ledger.timeline.add(
       routine.threadId,
       "routine",
-      `创建例行任务 ${routine.routineId}（${describeSchedule(routine)}）：${routine.instruction}`,
-      { routineId: routine.routineId, createdFromMsg: routine.createdFromMsg, kind: routine.kind },
+      `创建例行任务 ${routine.routineId}（${describeSchedule(routine)}${routine.kind === "probe" ? ` · 探针 ${routine.probeName}` : ""}）：${routine.instruction}`,
+      { routineId: routine.routineId, createdFromMsg: routine.createdFromMsg, kind: routine.kind, probeName: routine.probeName },
     );
     return { ok: true, routine };
   }
@@ -145,18 +174,14 @@ export class RoutineService {
     const spec: RoutineSpecStored = {
       instruction: input.instruction.trim(),
       kind: input.kind,
+      ...(input.probeName !== undefined ? { probeName: input.probeName } : {}),
+      ...(input.deviceId !== undefined ? { deviceId: input.deviceId } : {}),
       ...(input.cron !== undefined ? { cron: input.cron } : {}),
       ...(input.onceAt !== undefined ? { onceAt: input.onceAt } : {}),
       ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
       ...(input.repoId !== undefined ? { repoId: input.repoId } : {}),
     };
-    // The card's outbound id doubles as the offer's resolver: the tap handler finds the row
-    // through providerMsgId → outbound id "offer:<offerId>" (steward.md §3.1's rule — no
-    // ids stuffed into button values).
     const outboundId = `offer:${input.offerId}`;
-    // Row FIRST, card second (review #47-4): a crash between the two then leaves an offer
-    // row without a card (harmless, never tappable) — never a live card whose tap finds no
-    // row and lies "已经处理过了".
     this.ledger.offers.create({ offerId: input.offerId, spec, sourceMsg: input.sourceMsg, outboundId });
     await this.#deps.enqueueOutbound({
       id: outboundId,
@@ -222,7 +247,7 @@ export class RoutineService {
     return { ok: true, followup };
   }
 
-  // ---- management (conversation: list / pause / cancel) ------------------------------------------
+  // ---- management (conversation: list / pause / pauseUntil / cancel) -----------------------------
 
   /** cancel_schedule: a routine id or a follow-up id; user runs only (enforced by the tool). */
   async cancel(scheduleId: string): Promise<{ ok: true; what: string } | { ok: false; reason: string }> {
@@ -252,6 +277,7 @@ export class RoutineService {
     }
     const target = paused ? "paused" : "active";
     if (!this.ledger.routines.setStatus(routineId, target)) return { ok: false, reason: "状态更新失败。" };
+    if (!paused) this.ledger.routines.setPausedUntil(routineId, null);
     await this.#cancelScheduleOf(routine.scheduleId);
     if (!paused) {
       try {
@@ -264,34 +290,71 @@ export class RoutineService {
     return { ok: true, what: `例行任务 ${routineId} 已${paused ? "暂停" : "恢复"}。` };
   }
 
+  /** Stage 3 `pausedUntil` timed snooze: skips recurring fires until `untilMs` without cancelling
+   *  the cron schedule, auto-resuming on the first fire after `untilMs` (or when `untilMs === null`). */
+  pauseUntil(routineId: string, untilMs: number | null): { ok: true; what: string } | { ok: false; reason: string } {
+    const routine = this.ledger.routines.get(routineId);
+    if (!routine) return { ok: false, reason: `例行任务 ${routineId} 不存在。` };
+    if (routine.status === "cancelled" || routine.status === "done") {
+      return { ok: false, reason: `例行任务 ${routineId} 已${routine.status === "done" ? "结束" : "取消"}。` };
+    }
+    if (untilMs !== null && (!Number.isFinite(untilMs) || untilMs <= this.now())) {
+      return { ok: false, reason: "pausedUntil 必须是未来时间戳，或传 null 立即恢复。" };
+    }
+    this.ledger.routines.setPausedUntil(routineId, untilMs !== null ? Math.round(untilMs) : null);
+    const label = untilMs !== null ? `已静默暂停至 ${new Date(untilMs).toISOString()}（到期自动恢复）` : "已解除定时暂停";
+    this.ledger.timeline.add(routine.threadId, "routine", `例行任务 ${routineId} ${label}`, { routineId, pausedUntil: untilMs });
+    return { ok: true, what: `例行任务 ${routineId} ${label}。` };
+  }
+
   // ---- the scheduled callbacks -------------------------------------------------------------------
 
   /**
    * The Agents SDK cron/once callback (steward.md §8.2). `fireTime` is the fire's scheduled
    * second — the operationId `routine:<id>:<fireTime>` is the dedup: duplicate job dispatches
    * (SDK retries, alarm replays) process exactly once. Digests render here with NO LLM;
-   * instruction routines queue a ⟦routine⟧ wake.
+   * probes execute locally at zero LLM tokens when `triggered === false`; instruction/triggered
+   * probe routines queue a ⟦routine⟧ wake.
    */
   async fire(routineId: string, schedule?: { id?: string; time?: number }): Promise<void> {
     const routine = this.ledger.routines.get(routineId);
     if (!routine) {
-      // The row is gone (only tests delete routines) — don't let the schedule linger.
       await this.#cancelScheduleOf(schedule?.id);
       return;
     }
     if (routine.status !== "active") {
-      // A paused/cancelled routine must not fire again — kill the recurring schedule.
       await this.#cancelScheduleOf(schedule?.id ?? routine.scheduleId);
       return;
     }
-    const fireTime = schedule?.time ?? Math.floor(this.now() / 1000);
+    const nowMs = this.now();
+    if (routine.pausedUntil !== null) {
+      if (routine.pausedUntil > nowMs) {
+        this.#deps.audit("routine_paused_until_skip", `${routineId} until=${new Date(routine.pausedUntil).toISOString()}`);
+        this.ledger.timeline.add(
+          routine.threadId,
+          "routine",
+          `例行任务 ${routineId} 处于静默暂停窗口（至 ${new Date(routine.pausedUntil).toISOString()}），跳过本次触发`,
+          { routineId, pausedUntil: routine.pausedUntil },
+        );
+        return;
+      }
+      // Auto-resume once `pausedUntil` has elapsed.
+      this.ledger.routines.setPausedUntil(routineId, null);
+    }
+
+    const fireTime = schedule?.time ?? Math.floor(nowMs / 1000);
     const operationId = `routine:${routineId}:${fireTime}`;
     if (routine.kind === "digest") {
       await this.#fireDigest(routine, operationId);
       return;
     }
+    if (routine.kind === "probe") {
+      await this.#fireProbe(routine, operationId);
+      return;
+    }
     if (!this.ledger.routines.beginFire(routineId, operationId, "fired")) return; // duplicate fire
     const thread = routine.threadId ? this.ledger.threads.get(routine.threadId) : null;
+    const nextHops = (thread?.autoHops ?? 0) + 1;
     this.ledger.wakes.queue(
       "routine",
       operationId,
@@ -300,13 +363,78 @@ export class RoutineService {
         createdFromMsg: routine.createdFromMsg,
         thread: thread ? { threadId: thread.threadId, title: thread.title } : null,
       }),
-      { operationId },
+      { operationId, autoHops: nextHops },
     );
     this.ledger.timeline.add(
       routine.threadId,
       "routine",
       `例行任务 ${routineId} 触发（${describeSchedule(routine)}），已交给总管执行`,
       { routineId, operationId, instruction: routine.instruction },
+    );
+    this.#deps.onWakeQueued();
+  }
+
+  /** Stage 3 zero-token local probe execution: runs approved local script via ConnectorProtocol.
+   *  When `triggered === false`, records `silent:probe_untriggered` with ZERO Steward LLM calls. */
+  async #fireProbe(routine: RoutineRow, operationId: string): Promise<void> {
+    if (!this.ledger.routines.beginFire(routine.routineId, operationId, "probe_running")) return;
+    if (!routine.deviceId || !routine.probeName || !this.#deps.runProbe) {
+      this.ledger.routines.recordOutcome(routine.routineId, "probe_error:unconfigured");
+      return;
+    }
+    const res = await this.#deps.runProbe(routine.deviceId, {
+      probeName: routine.probeName,
+      ...(routine.repoId ? { repoId: routine.repoId } : {}),
+    });
+    if (!res.ok) {
+      this.ledger.routines.recordOutcome(routine.routineId, `probe_error:${res.code}`);
+      this.ledger.timeline.add(
+        routine.threadId,
+        "routine",
+        `本地探针 ${routine.probeName} 未能执行（${res.code}），未消耗模型 Token`,
+        { routineId: routine.routineId, operationId, probeName: routine.probeName, code: res.code },
+      );
+      return;
+    }
+    if (!res.output.triggered) {
+      this.ledger.routines.recordOutcome(routine.routineId, "silent:probe_untriggered");
+      this.ledger.timeline.add(
+        routine.threadId,
+        "routine",
+        `本地探针 ${routine.probeName} 检查完成：无新变化（零 Token 静默跳过）`,
+        { routineId: routine.routineId, operationId, probeName: routine.probeName },
+      );
+      return;
+    }
+
+    const thread = routine.threadId ? this.ledger.threads.get(routine.threadId) : null;
+    const nextHops = (thread?.autoHops ?? 0) + 1;
+    const safeSummary = escapeMarkers((res.output.summary ?? "").slice(0, 500));
+    const safePayload =
+      res.output.data !== undefined
+        ? escapeMarkers(JSON.stringify(res.output.data).slice(0, 4_000))
+        : "";
+    const enrichedInstruction = [
+      routine.instruction,
+      `本地探针「${escapeMarkers(routine.probeName)}」命中新变化${safeSummary ? `：${safeSummary}` : ""}`,
+      ...(safePayload ? [`探针结构化载荷：${safePayload}`] : []),
+    ].join("\n");
+
+    this.ledger.wakes.queue(
+      "routine",
+      operationId,
+      routineWakeText(routine.routineId, enrichedInstruction, {
+        schedule: describeSchedule(routine),
+        createdFromMsg: routine.createdFromMsg,
+        thread: thread ? { threadId: thread.threadId, title: thread.title } : null,
+      }),
+      { operationId, autoHops: nextHops },
+    );
+    this.ledger.timeline.add(
+      routine.threadId,
+      "routine",
+      `本地探针 ${routine.probeName} 命中变化${safeSummary ? `（${safeSummary}）` : ""}，唤醒总管处理`,
+      { routineId: routine.routineId, operationId, probeName: routine.probeName },
     );
     this.#deps.onWakeQueued();
   }
@@ -325,7 +453,6 @@ export class RoutineService {
     }
     const owner = this.#deps.ownerOpenId();
     if (!owner) {
-      // Nobody to tell — record the skip instead of claiming a card went out.
       this.ledger.routines.recordOutcome(routine.routineId, "silent:尚未绑定主人，未发送");
       this.ledger.timeline.add(routine.threadId, "routine", `例行任务 ${routine.routineId} 触发：尚未绑定主人，保持沉默`, {
         routineId: routine.routineId,
@@ -333,18 +460,15 @@ export class RoutineService {
       });
       return;
     }
-    // spec §7.6: only "waiting on you" justifies buzzing the phone; a quiet digest does not.
     const urgency = data.waiting.length > 0 ? "push" : "quiet";
     const digestFooter = `例行任务 ${routine.routineId} · ${describeSchedule(routine)} · 引用回复可继续对应 Thread`;
     await this.#deps.enqueueOutbound({
-      // Stable id: a re-dispatched fire converges on the one card (§11).
       id: `digest:${operationId}`,
       kind: "card",
       to: owner,
       card: digestCard(data, digestFooter),
       threadId: routine.threadId,
       urgency,
-      // The merge section (issue #11): a quiet digest can fold into a shared window's card.
       ...(urgency === "quiet" ? { part: digestSection(data, digestFooter) satisfies QuietSection } : {}),
     });
     this.ledger.routines.recordOutcome(routine.routineId, `card:${data.running.length} 跑/${data.waiting.length} 等/${data.unreadIdle.length} 未读`);
@@ -362,6 +486,7 @@ export class RoutineService {
     if (!followup || followup.status !== "open") return;
     if (!this.ledger.followups.beginFire(followupId, "fired")) return; // duplicate fire
     const thread = this.ledger.threads.get(followup.threadId);
+    const nextHops = (thread?.autoHops ?? 0) + 1;
     this.ledger.wakes.queue(
       "followup",
       `followup:${followupId}`,
@@ -370,7 +495,7 @@ export class RoutineService {
         sourceRef: followup.sourceRef,
         createdBy: followup.createdBy,
       }),
-      { operationId: `followup:${followupId}` },
+      { operationId: `followup:${followupId}`, autoHops: nextHops },
     );
     this.ledger.timeline.add(
       followup.threadId,
@@ -383,9 +508,7 @@ export class RoutineService {
 
   /**
    * onStart reconciliation: the sh_routine row and the SDK schedule row live in different
-   * stores — a crash between INSERT and schedule() must not silently kill a routine. Active
-   * rows get their schedule re-armed (cron dedups by expression+payload; a once dedups by
-   * callback+payload); everything else has its schedule cancelled.
+   * stores — a crash between INSERT and schedule() must not silently kill a routine.
    */
   async reconcile(schedules: Array<{ id: string; callback: string; type: string; time: number; payload: unknown }>): Promise<void> {
     const byRoutine = new Map<string, string[]>();
@@ -401,9 +524,6 @@ export class RoutineService {
     for (const routine of this.ledger.routines.list()) {
       const ids = byRoutine.get(routine.routineId) ?? [];
       if (routine.status === "active") {
-        // No schedule at all = the crash window between INSERT and schedule() (a fired
-        // once-routine is already `done`, so this cannot double-fire one). Re-arm; the
-        // idempotent insert dedups onto any row that actually exists.
         if (ids.length === 0) {
           try {
             await this.#arm(routine);
@@ -419,15 +539,11 @@ export class RoutineService {
     for (const followup of this.ledger.followups.list()) {
       const ids = byFollowup.get(followup.followupId) ?? [];
       if (followup.status === "open" && ids.length === 0) {
-        // Late is better than stranded (review #47-3): re-arm at the ORIGINAL dueAt — a past
-        // moment fires immediately — instead of leaving the row wedged open forever. This is
-        // exactly the crash window reconcile exists for (short afterMinutes make it certain).
         try {
           const sched = await this.#deps.schedule(new Date(followup.dueAt), "fireFollowup", { followupId: followup.followupId }, { idempotent: true });
           this.ledger.followups.setScheduleId(followup.followupId, sched.id);
           this.#deps.audit("followup_rearmed", followup.followupId);
         } catch {
-          // The wake would never fire; log and let it be visible in list_schedules.
           this.#deps.audit("followup_rearm_failed", followup.followupId);
         }
       } else if (followup.status !== "open") {

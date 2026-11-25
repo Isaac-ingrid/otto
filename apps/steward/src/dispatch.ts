@@ -116,6 +116,8 @@ export interface StartWorkerInput {
   model?: string;
   /** Frozen offline/replay selection. Omitted only before initial resolution. */
   modelSource?: 'agent-default' | 'task-default' | 'override';
+  /** Owner-explicit override allowing a manual probe of an agent/provider currently in quota cooldown. */
+  allowCooldownProbe?: boolean;
   /** The authorizing run: `user:<msgId>` / `evt:…` / `routine:…` (steward.md §7.1). */
   provenance: string;
   /** `tool:<taskId>` — the idempotency key for replays (protocol §7.1). */
@@ -346,6 +348,19 @@ export class Dispatcher {
         const model = reuses ? previous?.requestedModel ?? null : input.modelSource !== undefined ? input.model ?? null : input.model ?? this.#deps.agentModelDefault?.(choice.deviceId, agent) ?? null;
         const modelSource = reuses ? previous?.modelSource ?? 'agent-default' : input.modelSource ?? (input.model ? 'override' : model ? 'task-default' : 'agent-default');
         if (!acceptsAgentModel(agentModelCatalogFor(machine.modelCatalogs, agent), model)) return { kind: 'refused', reason: '目标机器/agent 不支持所选模型；请升级 connector 或恢复跟随 agent 默认。' };
+        if (!input.allowCooldownProbe) {
+          const observedId = reuses ? (previous?.lastObservedModel?.id ?? previous?.launchObservedModel?.id ?? null) : null;
+          const cdScope = this.ledger.cooldowns.scopeFor({ agent, model, observedModelId: observedId });
+          const activeCd = this.ledger.cooldowns.activeFor(choice.deviceId, cdScope.scopeKey);
+          if (activeCd) {
+            const alt = this.ledger.cooldowns.alternativesFor(choice.deviceId, cdScope.scopeKey);
+            const altHint = alt.length > 0 ? `；可改用同机未限流的 ${alt.join('、')}，或等冷却结束后继续` : '；请等冷却窗口结束后继续';
+            return {
+              kind: 'refused',
+              reason: `机器「${machine.name}」上的 ${cdScope.label} 当前处于额度冷却期（预计 ${new Date(activeCd.limitedUntil).toISOString()} 恢复）${altHint}。`,
+            };
+          }
+        }
         const selection = { model: model ?? undefined, modelSource };
         let thread = attach;
         let created = false;

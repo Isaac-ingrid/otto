@@ -63,6 +63,8 @@ export const SUMMARY_VERSIONS_KEPT = 5;
 export const SUMMARY_REWRITE_EVERY = 10;
 /** The wake merge window (steward.md §5.1/§5.4): events within it become one steward input. */
 export const WAKE_MERGE_MS = 3_000;
+/** Cross-turn autonomous loop circuit breaker (Agent Autoloop Stage 3): max hops without an owner turn. */
+export const MAX_AUTO_HOPS = 8;
 /** The quiet merge window (issue #11, spec §7.6 / steward.md §6.4): `urgency: quiet` outbound
  *  holds this long per channel+receiver, so notifications landing together leave as one. */
 export const QUIET_MERGE_MS = 60_000;
@@ -119,6 +121,7 @@ export interface ThreadRow {
   lastMachine: string | null;
   lastActivityAt: number;
   archived: boolean;
+  autoHops?: number;
   createdFromMsg: string | null;
   createdAt: number;
 }
@@ -220,6 +223,7 @@ export interface MachineRow {
   agents: string[];
   agentCapabilities?: Record<string, Record<string, boolean>>;
   modelCatalogs?: Record<string, AgentModelCatalog>;
+  approvedProbes?: string[];
   maxWorkers: number;
   /** The connector process generation (protocol §6.1): changes on every connector restart. */
   bootId: string | null;
@@ -329,7 +333,8 @@ export interface NotifyRow {
     | "waited_started"
     | "pr_created"
     | "pr_failed"
-    | "proposal_confirm";
+    | "proposal_confirm"
+    | "quota_hold";
   threadId: string;
   workerId: string | null;
   questionId: string | null;
@@ -403,8 +408,9 @@ export interface WakeRow {
   dedupeKey: string;
   text: string;
   priority: "low" | "normal" | "high";
-  /** 'skipped' = the daily budget cap kept this wake from the model (issue #28, steward.md §12). */
+  /** 'skipped' = the daily budget cap or autoHops circuit breaker kept this wake from the model. */
   status: "pending" | "merged" | "submitted" | "skipped";
+  autoHops?: number;
   dueAt: number;
   mergedInto: number | null;
   createdAt: number;
@@ -422,6 +428,7 @@ export interface RunRow {
   /** `cancelled` is ADR-0017's terminal state for a turn the owner stopped: the input was
    *  withdrawn before it acted (pi settles it `unanswered`/`aborted`), never a failure. */
   status: "open" | "settled" | "cancelled";
+  autoHops?: number;
   resultStatus: string | null;
   resultReason: string | null;
   resultText: string | null;
@@ -523,7 +530,7 @@ export function ftsMatchExpression(text: string): string | null {
 
 // ---- proactive behavior (issue #20, steward.md §8) ----------------------------------------------
 
-export type RoutineKind = "digest" | "instruction";
+export type RoutineKind = "digest" | "instruction" | "probe";
 export type RoutineStatus = "active" | "paused" | "done" | "cancelled";
 export type FollowupStatus = "open" | "fired" | "cancelled";
 
@@ -535,6 +542,9 @@ export interface RoutineRow {
   cron: string | null;
   onceAt: number | null;
   instruction: string;
+  probeName: string | null;
+  deviceId: string | null;
+  pausedUntil: number | null;
   repoId: string | null;
   threadId: string | null;
   status: RoutineStatus;
@@ -577,6 +587,8 @@ export interface RoutineOfferRow {
 export interface RoutineSpecStored {
   instruction: string;
   kind: RoutineKind;
+  probeName?: string;
+  deviceId?: string;
   cron?: string;
   onceAt?: number;
   threadId?: string;
@@ -664,6 +676,7 @@ const viewMachine = (r: Record<string, unknown>): MachineRow => ({
   agents: jsonOrNull<string[]>(r.agents as string | null) ?? [],
   agentCapabilities: jsonOrNull<Record<string, Record<string, boolean>>>(r.agentCapabilities as string | null) ?? {},
   modelCatalogs: jsonOrNull<Record<string, AgentModelCatalog>>(r.modelCatalogs as string | null) ?? {},
+  approvedProbes: jsonOrNull<string[]>(r.approvedProbes as string | null) ?? [],
   maxWorkers: (r.maxWorkers as number | null) ?? 1,
   bootId: (r.bootId as string | null) ?? null,
   reliability: jsonOrNull<MachineReliability>(r.reliability as string | null),
@@ -785,6 +798,9 @@ const viewRoutine = (r: Record<string, unknown>): RoutineRow => ({
   cron: (r.cron as string | null) ?? null,
   onceAt: (r.onceAt as number | null) ?? null,
   instruction: r.instruction as string,
+  probeName: (r.probeName as string | null) ?? null,
+  deviceId: (r.deviceId as string | null) ?? null,
+  pausedUntil: typeof r.pausedUntil === "number" ? r.pausedUntil : null,
   repoId: (r.repoId as string | null) ?? null,
   threadId: (r.threadId as string | null) ?? null,
   status: r.status as RoutineStatus,
@@ -877,6 +893,7 @@ export function createLedger(deps: LedgerDeps) {
     lastMachine: (r.lastMachine as string | null) ?? null,
     lastActivityAt: r.lastActivityAt as number,
     archived: !!r.archived,
+    autoHops: typeof r.autoHops === "number" ? r.autoHops : 0,
     createdFromMsg: (r.createdFromMsg as string | null) ?? null,
     createdAt: r.createdAt as number,
   });
@@ -973,13 +990,15 @@ export function createLedger(deps: LedgerDeps) {
           ]),
         ),
       );
+      const approvedProbesJson = JSON.stringify(hello.approvedProbes ?? []);
       sql`
-        INSERT INTO sh_machine (deviceId, name, online, lastSeen, agents, agentCapabilities, maxWorkers, bootId, modelCatalogs)
-        VALUES (${hello.deviceId}, ${hello.machine.name}, 1, ${ts}, ${JSON.stringify(hello.agents.map((a) => a.kind))}, ${agentCapabilities}, ${hello.limits.maxWorkers}, ${hello.bootId}, ${JSON.stringify(Object.fromEntries(hello.agents.filter(a => a.modelCatalog).map(a => [a.kind, a.modelCatalog])))})
+        INSERT INTO sh_machine (deviceId, name, online, lastSeen, agents, agentCapabilities, maxWorkers, bootId, modelCatalogs, approvedProbes)
+        VALUES (${hello.deviceId}, ${hello.machine.name}, 1, ${ts}, ${JSON.stringify(hello.agents.map((a) => a.kind))}, ${agentCapabilities}, ${hello.limits.maxWorkers}, ${hello.bootId}, ${JSON.stringify(Object.fromEntries(hello.agents.filter(a => a.modelCatalog).map(a => [a.kind, a.modelCatalog])))}, ${approvedProbesJson})
         ON CONFLICT (deviceId) DO UPDATE SET
           name = excluded.name, online = 1, lastSeen = excluded.lastSeen,
           agents = excluded.agents, agentCapabilities = excluded.agentCapabilities,
-          maxWorkers = excluded.maxWorkers, bootId = excluded.bootId, modelCatalogs = excluded.modelCatalogs
+          maxWorkers = excluded.maxWorkers, bootId = excluded.bootId, modelCatalogs = excluded.modelCatalogs,
+          approvedProbes = excluded.approvedProbes
       `;
       for (const snapshot of hello.workers) {
         if (workers.get(snapshot.workerId)?.deviceId === hello.deviceId) recordModelObservations(snapshot.workerId, snapshot);
@@ -1211,6 +1230,12 @@ export function createLedger(deps: LedgerDeps) {
     /** Reply or card click on the Thread's message = the user has seen it (§6.5). */
     markRead(threadId: string): void {
       sql`UPDATE sh_thread SET unread = 0 WHERE threadId = ${threadId}`;
+    },
+    setAutoHops(threadId: string, hops: number): void {
+      sql`UPDATE sh_thread SET autoHops = ${Math.max(0, Math.trunc(hops))} WHERE threadId = ${threadId}`;
+    },
+    resetAutoHops(threadId: string): void {
+      sql`UPDATE sh_thread SET autoHops = 0 WHERE threadId = ${threadId}`;
     },
     /** The steward's bookkeeping update (§2.6): summaries capped at 600 characters; each
      *  landed summary is versioned (last 5 kept) and the Nth-bounded updates trigger the
@@ -2659,13 +2684,14 @@ export function createLedger(deps: LedgerDeps) {
    *  `opts.operationId` (routine/follow-up fires): a fixed id with NO merging — each fire is
    *  its own steward input, and the operationId itself is the dedup (§8.2/§11). */
   const wakes = {
-    queue(kind: WakeRow["kind"], dedupeKey: string, text: string, opts: { priority?: WakeRow["priority"]; mergeMs?: number; operationId?: string; dueAt?: number } = {}): void {
+    queue(kind: WakeRow["kind"], dedupeKey: string, text: string, opts: { priority?: WakeRow["priority"]; mergeMs?: number; operationId?: string; dueAt?: number; autoHops?: number } = {}): void {
       const ts = now();
+      const autoHops = Math.max(0, Math.trunc(opts.autoHops ?? 0));
       if (sql`SELECT 1 FROM sh_wake WHERE dedupeKey = ${dedupeKey}`.length > 0) return;
       if (opts.operationId !== undefined) {
         sql`
-          INSERT OR IGNORE INTO sh_wake (operationId, kind, dedupeKey, text, priority, status, dueAt, createdAt)
-          VALUES (${opts.operationId}, ${kind}, ${dedupeKey}, ${text}, ${opts.priority ?? "normal"}, 'pending', ${opts.dueAt ?? ts}, ${ts})
+          INSERT OR IGNORE INTO sh_wake (operationId, kind, dedupeKey, text, priority, status, autoHops, dueAt, createdAt)
+          VALUES (${opts.operationId}, ${kind}, ${dedupeKey}, ${text}, ${opts.priority ?? "normal"}, 'pending', ${autoHops}, ${opts.dueAt ?? ts}, ${ts})
         `;
         return;
       }
@@ -2684,16 +2710,17 @@ export function createLedger(deps: LedgerDeps) {
         // pending row's text. The row keeps its operationId: one steward input, ever.
         sql`UPDATE sh_wake SET text = ${open.text + "\n" + text},
           priority = CASE WHEN ${opts.priority ?? 'normal'} = 'high' THEN 'high' ELSE priority END,
+          autoHops = MAX(autoHops, ${autoHops}),
           dueAt = MIN(dueAt, ${ts + mergeMs}) WHERE id = ${open.id}`;
         sql`
-          INSERT OR IGNORE INTO sh_wake (operationId, kind, dedupeKey, text, priority, status, dueAt, mergedInto, createdAt)
-          VALUES (${"evt:" + ulid()}, ${kind}, ${dedupeKey}, ${text}, ${opts.priority ?? "normal"}, 'merged', ${ts + mergeMs}, ${open.id}, ${ts})
+          INSERT OR IGNORE INTO sh_wake (operationId, kind, dedupeKey, text, priority, status, autoHops, dueAt, mergedInto, createdAt)
+          VALUES (${"evt:" + ulid()}, ${kind}, ${dedupeKey}, ${text}, ${opts.priority ?? "normal"}, 'merged', ${autoHops}, ${ts + mergeMs}, ${open.id}, ${ts})
         `;
         return;
       }
       sql`
-        INSERT OR IGNORE INTO sh_wake (operationId, kind, dedupeKey, text, priority, status, dueAt, createdAt)
-        VALUES (${"evt:" + ulid()}, ${kind}, ${dedupeKey}, ${text}, ${opts.priority ?? "normal"}, 'pending', ${ts + mergeMs}, ${ts})
+        INSERT OR IGNORE INTO sh_wake (operationId, kind, dedupeKey, text, priority, status, autoHops, dueAt, createdAt)
+        VALUES (${"evt:" + ulid()}, ${kind}, ${dedupeKey}, ${text}, ${opts.priority ?? "normal"}, 'pending', ${autoHops}, ${ts + mergeMs}, ${ts})
       `;
     },
     due(nowMs: number): WakeRow[] {
@@ -2748,14 +2775,15 @@ export function createLedger(deps: LedgerDeps) {
       operationId: string,
       kind: RunRow["kind"],
       text: string,
-      opts: { replyTo?: string; channel?: string; routedThreadId?: string | null } = {},
+      opts: { replyTo?: string; channel?: string; routedThreadId?: string | null; autoHops?: number } = {},
     ): boolean {
       const exists = sql`SELECT 1 AS one FROM sh_run WHERE operationId = ${operationId}`;
       if (exists.length > 0) return false;
+      const autoHops = kind === "user" ? 0 : Math.max(0, Math.trunc(opts.autoHops ?? 0));
       sql`
-        INSERT INTO sh_run (operationId, kind, replyTo, channel, routedThreadId, text, status, createdAt)
+        INSERT INTO sh_run (operationId, kind, replyTo, channel, routedThreadId, text, status, autoHops, createdAt)
         VALUES (${operationId}, ${kind}, ${opts.replyTo ?? null}, ${opts.channel ?? null}, ${opts.routedThreadId ?? null},
-                ${text}, 'open', ${now()})
+                ${text}, 'open', ${autoHops}, ${now()})
       `;
       return true;
     },
@@ -2806,14 +2834,17 @@ export function createLedger(deps: LedgerDeps) {
       cron?: string | null;
       onceAt?: number | null;
       instruction: string;
+      probeName?: string | null;
+      deviceId?: string | null;
+      pausedUntil?: number | null;
       threadId?: string | null;
       repoId?: string | null;
     }): RoutineRow {
       const ts = now();
       sql`
-        INSERT OR IGNORE INTO sh_routine (routineId, kind, createdFromMsg, scheduleKind, cron, onceAt, instruction, repoId, threadId, status, createdAt)
+        INSERT OR IGNORE INTO sh_routine (routineId, kind, createdFromMsg, scheduleKind, cron, onceAt, instruction, probeName, deviceId, pausedUntil, repoId, threadId, status, createdAt)
         VALUES (${input.routineId}, ${input.kind}, ${input.createdFromMsg}, ${input.scheduleKind}, ${input.cron ?? null}, ${input.onceAt ?? null},
-                ${input.instruction}, ${input.repoId ?? null}, ${input.threadId ?? null}, 'active', ${ts})
+                ${input.instruction}, ${input.probeName ?? null}, ${input.deviceId ?? null}, ${input.pausedUntil ?? null}, ${input.repoId ?? null}, ${input.threadId ?? null}, 'active', ${ts})
       `;
       return routines.get(input.routineId)!;
     },
@@ -2832,6 +2863,10 @@ export function createLedger(deps: LedgerDeps) {
     },
     setStatus(routineId: string, status: RoutineStatus): boolean {
       sql`UPDATE sh_routine SET status = ${status} WHERE routineId = ${routineId}`;
+      return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
+    },
+    setPausedUntil(routineId: string, pausedUntil: number | null): boolean {
+      sql`UPDATE sh_routine SET pausedUntil = ${pausedUntil} WHERE routineId = ${routineId}`;
       return sql<{ changes: number }>`SELECT changes() AS changes`[0]!.changes > 0;
     },
     /**
@@ -3163,10 +3198,20 @@ export function createLedger(deps: LedgerDeps) {
           UPDATE sh_worker SET state = 'running', sessionId = ${str(event.sessionId)},
                               branch = COALESCE(${str(event.branch)}, branch),
                               worktreeStatus = CASE WHEN ${str(event.branch)} IS NOT NULL AND worktreeStatus = 'none' THEN 'active' ELSE worktreeStatus END,
-                              lastOutcome = CASE WHEN lastOutcome = 'reaped' THEN NULL ELSE lastOutcome END,
+                              lastOutcome = CASE WHEN lastOutcome IN ('reaped', 'error:rate_limited') THEN NULL ELSE lastOutcome END,
                               lastEventAt = ${ts}, updatedAt = ${now()}
           WHERE workerId = ${workerId}
         `;
+        const refreshedStarted = workers.get(workerId) ?? worker;
+        const startedScope = cooldowns.scopeFor({
+          agent: refreshedStarted.agent,
+          model: refreshedStarted.requestedModel,
+          observedModelId: refreshedStarted.lastObservedModel?.id ?? refreshedStarted.launchObservedModel?.id,
+        });
+        cooldowns.clear(refreshedStarted.deviceId, startedScope.scopeKey);
+        if (refreshedStarted.agent === "pi" && startedScope.provider !== "default") {
+          cooldowns.clear(refreshedStarted.deviceId, "pi:default");
+        }
         timeline.add(worker.threadId, "started", `worker 开始运行${event.branch ? `（分支 ${String(event.branch)}）` : ""}`, {
           workerId,
           seq,
@@ -3258,11 +3303,13 @@ export function createLedger(deps: LedgerDeps) {
         }
         // §5.3: report events wake the steward for bookkeeping (summary, notes). The
         // deterministic card above still goes out on its own — the LLM is not on its path.
+        const currentThreadRow = threads.get(worker.threadId);
+        const nextReportAutoHops = (currentThreadRow?.autoHops ?? 0) + 1;
         wakes.queue(
           "event",
           `report:${workerId}:${seq}`,
           eventWakeText({
-            thread: threads.get(worker.threadId),
+            thread: currentThreadRow,
             worker: workers.get(workerId)!,
             machine: machines.get(worker.deviceId),
             report: {
@@ -3282,7 +3329,7 @@ export function createLedger(deps: LedgerDeps) {
             ...(status === "done" && !isSibling && threads.summaryStatus(worker.threadId).rewriteDue ? { summaryRewriteDue: true } : {}),
             ...(status !== "done" ? { questionId: `q_${workerId}_${seq}` } : {}),
           }),
-          { priority: status === "done" ? "normal" : "high" },
+          { priority: status === "done" ? "normal" : "high", autoHops: nextReportAutoHops },
         );
         if (relayDone) {
           sql`UPDATE worker_ack SET processedUpTo = ${seq} WHERE workerId = ${workerId}`;
@@ -3294,9 +3341,27 @@ export function createLedger(deps: LedgerDeps) {
       case "settled": {
         const outcome = String(event.outcome ?? "");
         const errorClass = event.errorClass ? String(event.errorClass) : null;
+        const nowMs = now();
+        const rawLimitedUntil = typeof event.limitedUntil === "number" ? event.limitedUntil : null;
+        const validCooldownUntil =
+          outcome === "error" && errorClass === "rate_limited"
+            ? rawLimitedUntil === null
+              ? nowMs + 60 * 60_000
+              : rawLimitedUntil > nowMs && rawLimitedUntil <= nowMs + 8 * 86_400_000
+                ? Math.round(rawLimitedUntil)
+                : null
+            : null;
         if (outcome === "reported" || outcome === "aborted") {
+          if (outcome === "reported") {
+            const repScope = cooldowns.scopeFor({
+              agent: worker.agent,
+              model: worker.requestedModel,
+              observedModelId: worker.lastObservedModel?.id ?? worker.launchObservedModel?.id,
+            });
+            cooldowns.clear(worker.deviceId, repScope.scopeKey);
+          }
           sql`
-            UPDATE sh_worker SET state = 'idle', lastOutcome = ${worker.lastOutcome ?? `settled:${outcome}`}, lastEventAt = ${ts}, updatedAt = ${now()}
+            UPDATE sh_worker SET state = 'idle', lastOutcome = ${worker.lastOutcome ?? `settled:${outcome}`}, lastEventAt = ${ts}, updatedAt = ${nowMs}
             WHERE workerId = ${workerId}
           `;
           timeline.add(worker.threadId, "settled", outcome === "aborted" ? "运行被中断" : "运行结束", { workerId, seq });
@@ -3304,34 +3369,96 @@ export function createLedger(deps: LedgerDeps) {
           // The connector auto-resumes (connector-pi §9.2): the run is still in flight from
           // the Thread's point of view — state stays, nothing is sent.
           timeline.add(worker.threadId, "settled", "瞬时错误，连接器将自动重试", { workerId, seq, errorClass });
+        } else if (validCooldownUntil !== null) {
+          const scope = cooldowns.scopeFor({
+            agent: worker.agent,
+            model: worker.requestedModel,
+            observedModelId: worker.lastObservedModel?.id ?? worker.launchObservedModel?.id,
+          });
+          const { row: cdRow, shouldNotify } = cooldowns.record({
+            deviceId: worker.deviceId,
+            agent: worker.agent,
+            provider: scope.provider,
+            scopeKey: scope.scopeKey,
+            limitedUntil: validCooldownUntil,
+            reason: str(event.errorMessage) ?? str(event.lastText),
+            workerId,
+          });
+          sql`
+            UPDATE sh_worker SET state = 'idle', lastOutcome = 'error:rate_limited', lastEventAt = ${ts}, updatedAt = ${nowMs}
+            WHERE workerId = ${workerId}
+          `;
+          const alt = cooldowns.alternativesFor(worker.deviceId, scope.scopeKey, nowMs);
+          const resetIso = new Date(cdRow.limitedUntil).toISOString();
+          const altHint = alt.length > 0 ? `；也可直接切到同机未限流的 ${alt.join("、")} 继续` : "";
+          const noteText = `${scope.label} 额度已达窗口上限，原会话已挂起保留，将于 ${resetIso} 到期后自动恢复${altHint}`;
+          const bucket = Math.floor(cdRow.limitedUntil / 60_000);
+          if (shouldNotify) {
+            timeline.add(worker.threadId, "note", noteText, {
+              workerId,
+              seq,
+              errorClass: "rate_limited",
+              scopeKey: scope.scopeKey,
+              limitedUntil: cdRow.limitedUntil,
+              alternatives: alt,
+            });
+            sql`UPDATE sh_thread SET unread = 1 WHERE threadId = ${worker.threadId}`;
+            notifications.queue(
+              `cooldown:${worker.deviceId}:${scope.scopeKey}:${bucket}`,
+              "quota_hold",
+              worker.threadId,
+              workerId,
+              null,
+              JSON.stringify({
+                scopeLabel: scope.label,
+                limitedUntil: cdRow.limitedUntil,
+                resetIso,
+                alternatives: alt,
+                detail: str(event.errorMessage) ?? "",
+              }),
+            );
+          }
+          const machineName = machines.get(worker.deviceId)?.name ?? worker.deviceId;
+          wakes.queue(
+            "followup",
+            `cooldown_due:${worker.deviceId}:${scope.scopeKey}:${bucket}`,
+            `【额度冷却恢复】机器 ${machineName} 上的 ${scope.label} 冷却窗口已到期，挂起会话：${cdRow.parkedWorkerIds.join(", ")}`,
+            {
+              operationId: `cooldown:${worker.deviceId}:${scope.scopeKey}:${bucket}`,
+              dueAt: cdRow.limitedUntil,
+              priority: "normal",
+            },
+          );
         } else {
-          const text = settledQuestionText(outcome, errorClass, event);
+          const effectiveErrorClass = errorClass === "rate_limited" ? "unknown" : errorClass;
+          const text = settledQuestionText(outcome, effectiveErrorClass, event);
           const qid = `q_${workerId}_${seq}`;
           const unreported = outcome === 'unreported';
           questions.insert({ qid, threadId: worker.threadId, workerId, text, kind: unreported ? 'unreported' : 'failure' });
           sql`
-            UPDATE sh_worker SET state = ${unreported || errorClass === 'context' ? 'idle' : 'broken'},
-              lastOutcome = ${unreported ? 'unreported' : `error:${errorClass ?? outcome}`}, lastEventAt = ${ts}, updatedAt = ${now()}
+            UPDATE sh_worker SET state = ${unreported || effectiveErrorClass === 'context' ? 'idle' : 'broken'},
+              lastOutcome = ${unreported ? 'unreported' : `error:${effectiveErrorClass ?? outcome}`}, lastEventAt = ${ts}, updatedAt = ${nowMs}
             WHERE workerId = ${workerId}
           `;
           sql`UPDATE sh_thread SET unread = 1 WHERE threadId = ${worker.threadId}`;
-          timeline.add(worker.threadId, "question", text, { workerId, seq, errorClass });
+          timeline.add(worker.threadId, "question", text, { workerId, seq, errorClass: effectiveErrorClass });
           if (!unreported) notifications.queue(`settled:${workerId}:${seq}`, "failure_push", worker.threadId, workerId, qid);
           // §5.3: failure-class settles wake the steward (it may classify, note, or add
           // context on top of the deterministic push the user already received).
+          const settledThreadRow = threads.get(worker.threadId);
           wakes.queue(
             "event",
             `settled:${workerId}:${seq}`,
             eventWakeText({
-              thread: threads.get(worker.threadId),
+              thread: settledThreadRow,
               worker: workers.get(workerId)!,
               machine: machines.get(worker.deviceId),
               report: null,
-              settled: { outcome, errorClass, text },
+              settled: { outcome, errorClass: effectiveErrorClass, text },
               notified: !unreported,
               questionId: qid,
             }),
-            { priority: "high" },
+            { priority: "high", autoHops: (settledThreadRow?.autoHops ?? 0) + 1 },
           );
         }
         if (event.usage) {
@@ -4175,9 +4302,283 @@ export function createLedger(deps: LedgerDeps) {
     },
   };
 
+  const cooldowns = {
+    scopeFor(input: { agent: string; model?: string | null; observedModelId?: string | null }): {
+      scopeKey: string;
+      provider: string | null;
+      label: string;
+    } {
+      if (input.agent === "pi") {
+        const raw = (input.observedModelId ?? input.model ?? "").trim();
+        const slash = raw.indexOf("/");
+        const provider = slash > 0 ? raw.slice(0, slash) : "default";
+        return {
+          scopeKey: `pi:${provider}`,
+          provider,
+          label: provider === "default" ? "pi" : `pi (${provider})`,
+        };
+      }
+      return {
+        scopeKey: `agent:${input.agent}`,
+        provider: null,
+        label: input.agent,
+      };
+    },
+    activeFor(deviceId: string, scopeKey: string, nowMs: number = now()) {
+      const row = sql<Record<string, unknown>>`
+        SELECT * FROM sh_agent_cooldown
+        WHERE deviceId = ${deviceId} AND scopeKey = ${scopeKey} AND limitedUntil > ${nowMs}
+      `[0];
+      if (!row) return null;
+      return {
+        deviceId: String(row.deviceId),
+        scopeKey: String(row.scopeKey),
+        agent: String(row.agent),
+        provider: (row.provider as string | null) ?? null,
+        limitedUntil: Number(row.limitedUntil),
+        reason: (row.reason as string | null) ?? null,
+        parkedWorkerIds: jsonOrNull<string[]>(row.parkedWorkerIdsJson as string | null) ?? [],
+        notifiedBucket: typeof row.notifiedBucket === "number" ? row.notifiedBucket : null,
+        updatedAt: Number(row.updatedAt),
+      };
+    },
+    listActive(deviceId?: string, nowMs: number = now()) {
+      const rows = deviceId
+        ? sql<Record<string, unknown>>`
+            SELECT * FROM sh_agent_cooldown
+            WHERE deviceId = ${deviceId} AND limitedUntil > ${nowMs}
+            ORDER BY limitedUntil, scopeKey
+          `
+        : sql<Record<string, unknown>>`
+            SELECT * FROM sh_agent_cooldown
+            WHERE limitedUntil > ${nowMs}
+            ORDER BY limitedUntil, deviceId, scopeKey
+          `;
+      return rows.map((row) => ({
+        deviceId: String(row.deviceId),
+        scopeKey: String(row.scopeKey),
+        agent: String(row.agent),
+        provider: (row.provider as string | null) ?? null,
+        limitedUntil: Number(row.limitedUntil),
+        reason: (row.reason as string | null) ?? null,
+        parkedWorkerIds: jsonOrNull<string[]>(row.parkedWorkerIdsJson as string | null) ?? [],
+        notifiedBucket: typeof row.notifiedBucket === "number" ? row.notifiedBucket : null,
+        updatedAt: Number(row.updatedAt),
+      }));
+    },
+    record(input: {
+      deviceId: string;
+      agent: string;
+      provider?: string | null;
+      scopeKey?: string;
+      limitedUntil: number;
+      reason?: string | null;
+      workerId?: string;
+    }) {
+      const tsNow = now();
+      const resolvedScope =
+        input.scopeKey ?? cooldowns.scopeFor({ agent: input.agent, model: input.provider ? `${input.provider}/x` : null }).scopeKey;
+      const existingRow = sql<Record<string, unknown>>`
+        SELECT * FROM sh_agent_cooldown WHERE deviceId = ${input.deviceId} AND scopeKey = ${resolvedScope}
+      `[0];
+      const existingActive = existingRow && Number(existingRow.limitedUntil) > tsNow ? existingRow : null;
+      const effectiveUntil = existingActive
+        ? Math.max(Number(existingActive.limitedUntil), Math.round(input.limitedUntil))
+        : Math.round(input.limitedUntil);
+      const priorParked = existingActive
+        ? (jsonOrNull<string[]>(existingActive.parkedWorkerIdsJson as string | null) ?? [])
+        : [];
+      const parkedWorkerIds = input.workerId
+        ? [...new Set([...priorParked, input.workerId])]
+        : priorParked;
+      const bucket = Math.floor(effectiveUntil / 60_000);
+      const priorBucket =
+        existingActive && typeof existingActive.notifiedBucket === "number"
+          ? existingActive.notifiedBucket
+          : null;
+      const shouldNotify = priorBucket !== bucket;
+      sql`
+        INSERT INTO sh_agent_cooldown (
+          deviceId, scopeKey, agent, provider, limitedUntil, reason, parkedWorkerIdsJson, notifiedBucket, updatedAt
+        )
+        VALUES (
+          ${input.deviceId}, ${resolvedScope}, ${input.agent}, ${input.provider ?? null},
+          ${effectiveUntil}, ${input.reason ? input.reason.slice(0, 400) : null},
+          ${JSON.stringify(parkedWorkerIds)}, ${bucket}, ${tsNow}
+        )
+        ON CONFLICT (deviceId, scopeKey) DO UPDATE SET
+          agent = excluded.agent,
+          provider = excluded.provider,
+          limitedUntil = excluded.limitedUntil,
+          reason = COALESCE(excluded.reason, sh_agent_cooldown.reason),
+          parkedWorkerIdsJson = excluded.parkedWorkerIdsJson,
+          notifiedBucket = excluded.notifiedBucket,
+          updatedAt = excluded.updatedAt
+      `;
+      return {
+        row: {
+          deviceId: input.deviceId,
+          scopeKey: resolvedScope,
+          agent: input.agent,
+          provider: input.provider ?? null,
+          limitedUntil: effectiveUntil,
+          reason: input.reason ? input.reason.slice(0, 400) : null,
+          parkedWorkerIds,
+          notifiedBucket: bucket,
+          updatedAt: tsNow,
+        },
+        shouldNotify,
+      };
+    },
+    clear(deviceId: string, scopeKey: string): boolean {
+      sql`DELETE FROM sh_agent_cooldown WHERE deviceId = ${deviceId} AND scopeKey = ${scopeKey}`;
+      return sql<{ n: number }>`SELECT changes() AS n`[0]!.n > 0;
+    },
+    alternativesFor(deviceId: string, blockedScopeKey: string, nowMs: number = now()): string[] {
+      const machine = machines.get(deviceId);
+      if (!machine) return [];
+      const activeKeys = new Set(cooldowns.listActive(deviceId, nowMs).map((c) => c.scopeKey));
+      activeKeys.add(blockedScopeKey);
+      const out: string[] = [];
+      if (machine.agents.includes("pi")) {
+        const piCatalog = machine.modelCatalogs?.pi;
+        const providers = new Set<string>();
+        for (const m of piCatalog?.models ?? []) {
+          const slash = m.id.indexOf("/");
+          if (slash > 0) providers.add(m.id.slice(0, slash));
+        }
+        for (const provider of providers) {
+          const key = `pi:${provider}`;
+          if (!activeKeys.has(key)) out.push(`pi (${provider})`);
+        }
+        if (providers.size === 0 && !activeKeys.has("pi:default") && !blockedScopeKey.startsWith("pi:")) {
+          out.push("pi");
+        }
+      }
+      for (const agent of machine.agents) {
+        if (agent === "pi") continue;
+        const key = `agent:${agent}`;
+        if (!activeKeys.has(key)) out.push(agent);
+      }
+      return out.slice(0, 6);
+    },
+    sweepExpired(nowMs: number = now()): Array<{
+      deviceId: string;
+      scopeKey: string;
+      agent: string;
+      provider: string | null;
+      resumableWorkerIds: string[];
+    }> {
+      return tx(() => {
+        const due = sql<Record<string, unknown>>`
+          SELECT * FROM sh_agent_cooldown WHERE limitedUntil <= ${nowMs} ORDER BY limitedUntil, deviceId, scopeKey
+        `;
+        if (due.length === 0) return [];
+        const results: Array<{
+          deviceId: string;
+          scopeKey: string;
+          agent: string;
+          provider: string | null;
+          resumableWorkerIds: string[];
+        }> = [];
+        for (const row of due) {
+          const deviceId = String(row.deviceId);
+          const scopeKey = String(row.scopeKey);
+          const agent = String(row.agent);
+          const provider = (row.provider as string | null) ?? null;
+          const parked = jsonOrNull<string[]>(row.parkedWorkerIdsJson as string | null) ?? [];
+          sql`DELETE FROM sh_agent_cooldown WHERE deviceId = ${deviceId} AND scopeKey = ${scopeKey}`;
+          const resumableWorkerIds: string[] = [];
+          for (const wId of parked) {
+            const w = workers.get(wId);
+            if (w && w.state === "idle" && w.lastOutcome === "error:rate_limited" && w.sessionId) {
+              resumableWorkerIds.push(wId);
+              timeline.add(w.threadId, "note", `额度冷却窗口已到期（${provider ? `pi (${provider})` : agent}），可继续原会话`, {
+                workerId: wId,
+                scopeKey,
+              });
+            }
+          }
+          results.push({ deviceId, scopeKey, agent, provider, resumableWorkerIds });
+        }
+        return results;
+      });
+    },
+  };
+
+  const inboundSources = {
+    get(source: string): { source: string; secretEnc: string; pausedUntil: number | null; updatedAt: number } | null {
+      const row = sql<Record<string, unknown>>`SELECT * FROM sh_inbound_source WHERE source = ${source}`[0];
+      if (!row) return null;
+      return {
+        source: String(row.source),
+        secretEnc: String(row.secretEnc),
+        pausedUntil: typeof row.pausedUntil === "number" ? row.pausedUntil : null,
+        updatedAt: Number(row.updatedAt),
+      };
+    },
+    list(): Array<{ source: string; pausedUntil: number | null; updatedAt: number }> {
+      return sql<Record<string, unknown>>`SELECT source, pausedUntil, updatedAt FROM sh_inbound_source ORDER BY source`.map((row) => ({
+        source: String(row.source),
+        pausedUntil: typeof row.pausedUntil === "number" ? row.pausedUntil : null,
+        updatedAt: Number(row.updatedAt),
+      }));
+    },
+    upsert(source: string, secretEnc: string, pausedUntil?: number | null): void {
+      const tsNow = now();
+      sql`
+        INSERT INTO sh_inbound_source (source, secretEnc, pausedUntil, updatedAt)
+        VALUES (${source}, ${secretEnc}, ${pausedUntil ?? null}, ${tsNow})
+        ON CONFLICT (source) DO UPDATE SET
+          secretEnc = excluded.secretEnc,
+          pausedUntil = COALESCE(${pausedUntil !== undefined ? (pausedUntil ?? null) : null}, sh_inbound_source.pausedUntil),
+          updatedAt = excluded.updatedAt
+      `;
+    },
+    setPausedUntil(source: string, pausedUntil: number | null): boolean {
+      sql`UPDATE sh_inbound_source SET pausedUntil = ${pausedUntil}, updatedAt = ${now()} WHERE source = ${source}`;
+      return sql<{ n: number }>`SELECT changes() AS n`[0]!.n > 0;
+    },
+  };
+
+  const skippedEvents = {
+    record(input: { source: string; eventKey: string; summary: string; payloadJson: string }): { id: string; duplicate: boolean } {
+      const existing = sql<{ id: string }>`SELECT id FROM sh_skipped_event WHERE eventKey = ${input.eventKey}`[0];
+      if (existing) return { id: existing.id, duplicate: true };
+      const id = `skip_${ulid()}`;
+      sql`
+        INSERT INTO sh_skipped_event (id, source, eventKey, summary, payloadJson, receivedAt, replayedAt)
+        VALUES (${id}, ${input.source}, ${input.eventKey}, ${input.summary.slice(0, 400)}, ${input.payloadJson}, ${now()}, NULL)
+      `;
+      return { id, duplicate: false };
+    },
+    listPending(source?: string, limit = 50): Array<{ id: string; source: string; eventKey: string; summary: string; payloadJson: string; receivedAt: number }> {
+      const cap = Math.max(1, Math.min(200, Math.trunc(limit)));
+      const rows = source
+        ? sql<Record<string, unknown>>`
+            SELECT * FROM sh_skipped_event WHERE source = ${source} AND replayedAt IS NULL ORDER BY receivedAt ASC, id ASC LIMIT ${cap}
+          `
+        : sql<Record<string, unknown>>`
+            SELECT * FROM sh_skipped_event WHERE replayedAt IS NULL ORDER BY receivedAt ASC, id ASC LIMIT ${cap}
+          `;
+      return rows.map((r) => ({
+        id: String(r.id),
+        source: String(r.source),
+        eventKey: String(r.eventKey),
+        summary: String(r.summary),
+        payloadJson: String(r.payloadJson),
+        receivedAt: Number(r.receivedAt),
+      }));
+    },
+    markReplayed(id: string): boolean {
+      sql`UPDATE sh_skipped_event SET replayedAt = ${now()} WHERE id = ${id} AND replayedAt IS NULL`;
+      return sql<{ n: number }>`SELECT changes() AS n`[0]!.n > 0;
+    },
+  };
+
   return {
     machines, machineStatus, offlineDispatches, repos, threads, workers, reports, questions, timeline, notifications, outbound,
-    runs, ownerInputs, webRequests, wakes, notes, budget, telemetry, routines, followups, offers, skillOffers, handoff, proposals, views, applyPendingEvents, recomputeThreadState, debug,
+    runs, ownerInputs, webRequests, wakes, notes, budget, telemetry, routines, followups, offers, skillOffers, handoff, proposals, cooldowns, inboundSources, skippedEvents, views, applyPendingEvents, recomputeThreadState, debug,
     prConsent, search,
   };
 }

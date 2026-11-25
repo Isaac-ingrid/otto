@@ -48,6 +48,8 @@ export interface ConnState {
   workerCheckpoint?: boolean;
   repoSkills?: boolean;
   worktreeAudit?: boolean;
+  localProbes?: boolean;
+  gitPrDiff?: boolean;
   /** Set on a browser connection by `subscribe` (issue #84, §6.8): the one worker session
    *  view it currently has open, and the only `workerId` it may send `worker_cmd` to. */
   viewingWorkerId?: string;

@@ -29,11 +29,21 @@ import {
   type PrFeedbackTriageOutcome,
 } from "./pr-failure-diagnoser.ts";
 
+export const PR_WATCH_STUCK_THRESHOLD_MS = 2 * 3_600_000;
+
+export interface PrWatchStuckAlert {
+  watch: PrWatchRow;
+  head: string;
+  stalledMs: number;
+  reason: string;
+}
+
 export interface PrWatchRow {
   id: string; threadId: string; url: string; status: "active" | "completed" | "cancelled" | "expired";
   createdAt: number; expiresAt: number; intervalMs: number; nextCheckAt: number; generation: number;
   head: string | null; observedState: string | null; checkedAt: number | null; lastError: string | null;
   checks: number; failed: number; pending: number; evidenceMode: PrEvidenceMode; watchGoal: PrWatchGoal;
+  stateSince?: number | null; stuckNotifiedHead?: string | null; blindReviewStatus?: string | null;
 }
 
 export interface PrWatchDiagnosisRecord {
@@ -107,6 +117,8 @@ export interface PrWatchDeps {
   tx<T>(fn: () => T): T;
   threadExists(id: string): boolean;
   notify(input: Notice): Promise<void>;
+  notifyStuck?(alert: PrWatchStuckAlert): Promise<void>;
+  stuckThresholdMs?: number;
   record?(threadId: string, text: string, data: Record<string, unknown>): void;
   read?(target: PrTarget, mode: PrEvidenceMode): Promise<EvidenceResult>;
   readFailureDetail?(target: PrTarget, head: string, mode: PrEvidenceMode): Promise<PrFailureSnapshot | null>;
@@ -154,9 +166,14 @@ function normalizeReviewDecision(raw: unknown): PrReviewDecision {
 export class PrWatchService {
   private running?: Promise<void>;
   private readonly deps: PrWatchDeps;
+  private stuckThresholdOverrideMs?: number;
   constructor(deps: PrWatchDeps) { this.deps = deps; }
   private get sql(): SqlExecutor { return this.deps.sql; }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
+  setStuckThresholdMsForTest(ms: number | undefined): void { this.stuckThresholdOverrideMs = ms; }
+  private stuckThresholdMs(): number {
+    return this.stuckThresholdOverrideMs ?? this.deps.stuckThresholdMs ?? PR_WATCH_STUCK_THRESHOLD_MS;
+  }
 
   get(id: string): PrWatchRow | null {
     return this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${id}`[0] ?? null;
@@ -644,6 +661,7 @@ export class PrWatchService {
         }
       }
 
+      let pendingStuckAlert: PrWatchStuckAlert | null = null;
       this.expire();
       this.deps.tx(() => {
         const current = this.sql<PrWatchRow>`SELECT * FROM sh_pr_watch WHERE id = ${claim.id}`[0];
@@ -671,9 +689,54 @@ export class PrWatchService {
             !mergeConflicted &&
             !blockedByCurrentReview);
 
+        const sameObservation = current.head === evidence.head && current.observedState === evidence.state;
+        const nextStateSince = sameObservation ? (current.stateSince ?? current.checkedAt ?? current.createdAt ?? tsNow) : tsNow;
+        const isStalledState =
+          !terminal &&
+          (evidence.state === "waiting" || mergeConflicted || blockedByCurrentReview);
+        const stalledMs = Math.max(0, tsNow - nextStateSince);
+        const crossedStuckThreshold =
+          isStalledState &&
+          stalledMs >= this.stuckThresholdMs() &&
+          current.stuckNotifiedHead !== evidence.head;
+        const nextStuckNotifiedHead = crossedStuckThreshold
+          ? evidence.head
+          : current.head === evidence.head
+            ? (current.stuckNotifiedHead ?? null)
+            : null;
+
         this.sql`UPDATE sh_pr_watch SET head = ${evidence.head}, observedState = ${evidence.state}, checkedAt = ${tsNow}, lastError = NULL,
           checks = ${evidence.checks}, failed = ${evidence.failed}, pending = ${evidence.pending},
+          stateSince = ${nextStateSince}, stuckNotifiedHead = ${nextStuckNotifiedHead},
           status = ${terminal ? 'completed' : 'active'}, nextCheckAt = ${tsNow + current.intervalMs} WHERE id = ${claim.id}`;
+
+        if (crossedStuckThreshold) {
+          const stuckReason = mergeConflicted
+            ? "PR 合并冲突长时间未解除"
+            : blockedByCurrentReview
+              ? "PR 审阅人要求修改长时间未响应"
+              : `CI 检查长时间处于等待状态（${evidence.pending} 项 pending）`;
+          const updatedWatch: PrWatchRow = {
+            ...current,
+            head: evidence.head,
+            observedState: evidence.state,
+            checkedAt: tsNow,
+            stateSince: nextStateSince,
+            stuckNotifiedHead: evidence.head,
+          };
+          pendingStuckAlert = {
+            watch: updatedWatch,
+            head: evidence.head,
+            stalledMs,
+            reason: stuckReason,
+          };
+          this.deps.record?.(current.threadId, `PR 跟进停滞超过阈值（${Math.round(stalledMs / 60_000)} 分钟）：${stuckReason}`, {
+            watchId: current.id,
+            head: evidence.head,
+            stalledMs,
+            stuck: true,
+          });
+        }
 
         if (persistNewDiag && diagSnapshot) {
           this.sql`
@@ -827,6 +890,13 @@ export class PrWatchService {
           );
         }
       });
+      if (pendingStuckAlert && this.deps.notifyStuck) {
+        try {
+          await this.deps.notifyStuck(pendingStuckAlert);
+        } catch {
+          // Stuck alert failure must not break read-only watch polling.
+        }
+      }
     }
     await this.deliver();
   }

@@ -765,3 +765,37 @@ export function sectionFromPayload(payload: { text?: string; card?: unknown; par
   }
   return null;
 }
+
+export interface PrWatchStuckCardInput {
+  watchId: string;
+  url: string;
+  head: string;
+  stalledMinutes: number;
+  reason: string;
+  threadTitle?: string;
+}
+
+/**
+ * Stage 4 PR Watch Stuck Consent Card: emitted at most once per `(watchId, head)` when a watched
+ * PR remains stalled in pending CI, merge conflict, or unresolved review beyond the stuck threshold
+ * (default 2 hours). Preserves Otto's explicit owner consent gate — never auto-merges or mutates GitHub.
+ */
+export function prWatchStuckCard(input: PrWatchStuckCardInput): LocalMessage {
+  const head = input.threadTitle ? `【${clip(input.threadTitle, 80)}】` : "";
+  return {
+    text: [
+      `${head}⚠️ PR 跟进停滞超过 ${Math.max(1, Math.round(input.stalledMinutes))} 分钟`,
+      "",
+      `- PR：${input.url}`,
+      `- 提交：${input.head}`,
+      `- 当前停滞原因：${clip(input.reason, 180)}`,
+      "",
+      "是否派发零检出只读探针／跨引擎盲审定位问题？未点击前不会消耗机器额度，也不会修改或合并远端 PR。",
+    ].join("\n"),
+    buttons: [
+      { label: "派发只读探针诊断", action: `prstuck:${input.watchId}:probe`, primary: true },
+      { label: "继续等待", action: `prstuck:${input.watchId}:wait` },
+      { label: "取消此 PR 跟进", action: `prstuck:${input.watchId}:cancel` },
+    ],
+  };
+}

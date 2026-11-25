@@ -177,12 +177,21 @@ export default {
       return json({ error: "invalid code" }, 400);
     }
 
+    if ((url.pathname === "/owner/in/github" || url.pathname === "/owner/in/gitlab") && request.method === "POST") {
+      const len = Number(request.headers.get("content-length"));
+      if (Number.isFinite(len) && len > 256 * 1024) return json({ error: "too_large" }, 413);
+      const stub = await getAgentByName(env.Steward, "owner");
+      return stub.fetch(request);
+    }
+
     if (url.pathname.startsWith("/api/")) {
       const allowed =
         (url.pathname === "/api/messages" && (request.method === "POST" || request.method === "GET")) ||
-        (url.pathname === "/api/actions" && request.method === "POST") ||
+        (url.pathname === "/api/actions" && (request.method === "POST")) ||
         (url.pathname === "/api/health-notice" && request.method === "POST") ||
         (url.pathname === "/api/pr-watches" && (request.method === "GET" || request.method === "POST")) ||
+        (url.pathname === "/api/inbound-sources" && (request.method === "GET" || request.method === "POST")) ||
+        (url.pathname === "/api/outbound-webhooks" && (request.method === "GET" || request.method === "POST")) ||
         (url.pathname === "/api/pairing" && request.method === "POST") ||
         (url.pathname === "/api/login-link" && request.method === "POST");
       if (!allowed) return new Response("not found", { status: 404 });

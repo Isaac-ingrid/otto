@@ -42,6 +42,7 @@ import { bearer, resolveKeySecrets } from "./auth.ts";
 import { PrWatchInputError, PrWatchService, type PrWatchDeps } from "./pr-watch.ts";
 import { PrWatchApprovals, approvalText, approvalThread, PR_WATCH_APPROVAL_FAILURE, type PrWatchRequest, type PrWatchDecision } from './pr-watch-approval.ts';
 import {
+  parsePrUrl,
   readPrEvidence,
   readPrFailureDetail,
   readPrReviewAndConflictDetail,
@@ -94,6 +95,7 @@ import {
 import {
   createLedger,
   ACTIVE_WORKER_STATES,
+  MAX_AUTO_HOPS,
   QUIET_MERGE_MS,
   wakeQuestionId,
   type Ledger,
@@ -135,6 +137,7 @@ import {
   prFailureNeedsYou,
   prCommandArgs,
   proposalApprovalCard,
+  prWatchStuckCard,
   type AskCardButton,
   type QuietSection,
 } from "./report-template.ts";
@@ -143,6 +146,23 @@ import { ModelConfigStore } from "./model-config.ts";
 import { AgentModelConfig } from './agent-model-config.ts';
 import { HistorySubscriptions, type ConnState } from "./history-subscriptions.ts";
 import { ConnectorProtocol } from "./connector-protocol.ts";
+import {
+  normalizeGitHubWebhook,
+  normalizeGitLabWebhook,
+  verifyGitHubSignature256,
+  verifyGitLabToken,
+  type InboundWebhookSource,
+} from "./inbound-sources.ts";
+import {
+  prepareZeroCheckoutBlindReview,
+  type PrepareBlindReviewOutcome,
+} from "./pr-blind-review.ts";
+import { CARD_LINK_TTL_MS } from "./channel/feishu-card-v2.ts";
+import {
+  fanOutOutboundWebhooks,
+  OutboundWebhookStore,
+  type OutboundWebhookKind,
+} from "./channel/webhooks.ts";
 import type { OutboxRow } from "./steward-types.ts";
 export type { OutboxRow };
 import { PushService } from "./push.ts";
@@ -304,7 +324,16 @@ const BACKGROUND_CONTEXT: Parameters<Harness["usage"]>[0] = Object.freeze({
 
 /** The pr notify intents' render inputs (issue #21): JSON written by the reducer, read here;
  *  malformed/absent payload degrades to empty strings, never a thrown render. */
-function parseNotifyPayload(payload: string | null): { url?: string; branch?: string; stage?: string; message?: string } {
+function parseNotifyPayload(payload: string | null): {
+  url?: string;
+  branch?: string;
+  stage?: string;
+  message?: string;
+  scopeLabel?: string;
+  resetIso?: string;
+  limitedUntil?: number;
+  alternatives?: unknown[];
+} {
   if (payload === null) return {};
   try {
     const parsed = JSON.parse(payload) as Record<string, unknown>;
@@ -313,6 +342,10 @@ function parseNotifyPayload(payload: string | null): { url?: string; branch?: st
       ...(typeof parsed.branch === "string" ? { branch: parsed.branch } : {}),
       ...(typeof parsed.stage === "string" ? { stage: parsed.stage } : {}),
       ...(typeof parsed.message === "string" ? { message: parsed.message } : {}),
+      ...(typeof parsed.scopeLabel === "string" ? { scopeLabel: parsed.scopeLabel } : {}),
+      ...(typeof parsed.resetIso === "string" ? { resetIso: parsed.resetIso } : {}),
+      ...(typeof parsed.limitedUntil === "number" ? { limitedUntil: parsed.limitedUntil } : {}),
+      ...(Array.isArray(parsed.alternatives) ? { alternatives: parsed.alternatives } : {}),
     };
   } catch {
     return {};
@@ -737,6 +770,7 @@ export class Steward extends Agent<Env> {
       cancelSchedule: (id) => this.cancelSchedule(id),
       enqueueOutbound: (input) => this.enqueueOutbound(input),
       ownerOpenId: () => this.ownerOpenIdSync(),
+      runProbe: (deviceId, args) => this.connectorProto.runMachineProbe(deviceId, args, AbortSignal.timeout(35_000)),
       onWakeQueued: () => {
         void this.drainWakes();
         void this.pollRuns();
@@ -991,15 +1025,24 @@ export class Steward extends Agent<Env> {
           if (run && run.routedThreadId === null) {
             this.sql`UPDATE sh_run SET routedThreadId = ${outcome.threadId} WHERE operationId = ${run.operationId} AND routedThreadId IS NULL`;
           }
-          // Issue #7: count the real dispatch for the settle-time verification — a reply
-          // claiming "dispatched" with dispatchCount 0 gets the corrective follow-up.
-          if (run) this.ledger.runs.countDispatch(run.operationId);
+          if (run) {
+            this.ledger.runs.countDispatch(run.operationId);
+            if (run.kind === "user") this.ledger.threads.resetAutoHops(outcome.threadId);
+            else this.ledger.threads.setAutoHops(outcome.threadId, Math.max(1, run.autoHops ?? 1));
+          }
         }
         return outcome;
       },
       sendToWorker: async (input) => {
+        const run = await this.currentRunBinding();
         const outcome = await this.dispatcher.sendToWorker(input);
-        if (outcome.kind === "sent") await this.backfillRunThread(outcome.threadId);
+        if (outcome.kind === "sent") {
+          await this.backfillRunThread(outcome.threadId);
+          if (run) {
+            if (run.kind === "user") this.ledger.threads.resetAutoHops(outcome.threadId);
+            else this.ledger.threads.setAutoHops(outcome.threadId, Math.max(1, run.autoHops ?? 1));
+          }
+        }
         return outcome;
       },
       interruptWorker: async (input) => {
@@ -1182,6 +1225,7 @@ export class Steward extends Agent<Env> {
     kind: string;
     provenance: string;
     routedThreadId: string | null;
+    autoHops: number;
   } | null> {
     const running = (await this.piHarness.pending()).find((p) => p.status === "running");
     if (running) {
@@ -1198,9 +1242,10 @@ export class Steward extends Agent<Env> {
     kind: string;
     provenance: string;
     routedThreadId: string | null;
+    autoHops: number;
   } {
     const provenance = row.kind === "verify" && row.replyTo !== null ? `user:${row.replyTo}` : row.operationId;
-    return { operationId: row.operationId, kind: row.kind, provenance, routedThreadId: row.routedThreadId };
+    return { operationId: row.operationId, kind: row.kind, provenance, routedThreadId: row.routedThreadId, autoHops: row.autoHops ?? 0 };
   }
 
   /** Records that the *executing* run already produced user-facing output (review #9). */
@@ -1310,6 +1355,10 @@ export class Steward extends Agent<Env> {
     // Cloudflare learns the public origin from requests; the Node host pins it to
     // OTTO_PUBLIC_ORIGIN so an anonymous caller cannot change login links with a forged Host.
     if (url.protocol === "https:" || url.protocol === "http:") this.web.recordOrigin(url.origin);
+    if ((url.pathname === "/owner/in/github" || url.pathname === "/owner/in/gitlab") && request.method === "POST") {
+      const source: InboundWebhookSource = url.pathname.endsWith("/github") ? "github" : "gitlab";
+      return this.handleInboundWebhook(source, request);
+    }
     if (url.pathname.startsWith("/api/")) {
       if (!ownerAuthorized(request, this.env)) return new Response("unauthorized", { status: 401 });
       if (url.pathname === "/api/messages" && (request.method === "POST" || request.method === "GET")) {
@@ -1318,6 +1367,8 @@ export class Steward extends Agent<Env> {
       if (url.pathname === "/api/actions" && request.method === "POST") return this.handleApiActions(request);
       if (url.pathname === "/api/health-notice" && request.method === "POST") return this.handleHealthNotice(request);
       if (url.pathname === "/api/pr-watches" && (request.method === "GET" || request.method === "POST")) return this.handlePrWatches(request);
+      if (url.pathname === "/api/inbound-sources" && (request.method === "GET" || request.method === "POST")) return this.handleApiInboundSources(request);
+      if (url.pathname === "/api/outbound-webhooks" && (request.method === "GET" || request.method === "POST")) return this.handleApiOutboundWebhooks(request);
       if (url.pathname === "/api/pairing" && request.method === "POST") return this.handleApiPairing();
       if (url.pathname === "/api/login-link" && request.method === "POST") return this.handleApiLoginLink();
       return new Response("not found", { status: 404 });
@@ -1621,6 +1672,12 @@ export class Steward extends Agent<Env> {
       case "worktree_cleanup_result":
         this.connectorProto.handleWorktreeCleanupResult(connection, message);
         return;
+      case "probe_result":
+        this.connectorProto.handleProbeResult(connection, message);
+        return;
+      case "git_pr_diff_result":
+        this.connectorProto.handleGitPrDiffResult(connection, message);
+        return;
       case "error":
         // A connector reply to something the DO itself sent. The only DO-originated requests
         // are history pulls (§6.6): relay a failure to the waiting browser and end its stream.
@@ -1690,10 +1747,11 @@ export class Steward extends Agent<Env> {
         // so it pushes on its own, buttons intact.
         const isProposalConfirm = intent.kind === "proposal_confirm" && intent.questionId !== null;
         const quiet =
-          intent.kind === "done_report" &&
-          !questionTied &&
-          thread?.state !== "waiting_you" &&
-          rendered.holdsConsentAsk !== true;
+          intent.kind === "quota_hold" ||
+          (intent.kind === "done_report" &&
+            !questionTied &&
+            thread?.state !== "waiting_you" &&
+            rendered.holdsConsentAsk !== true);
         await this.enqueueOutbound({
           kind: "card",
           to: OWNER_ID,
@@ -1902,6 +1960,25 @@ export class Steward extends Agent<Env> {
     if (intent.kind === "stall_notice") {
       const minutes = Math.max(1, Math.round((Date.now() - (worker.lastEventAt ?? worker.createdAt)) / 60_000));
       return { card: stallCard(minutes, worker, machineName, thread.title, footer, detailsUrl ?? undefined) };
+    }
+
+    if (intent.kind === "quota_hold") {
+      const payload = parseNotifyPayload(intent.payload);
+      const scopeLabel = typeof payload.scopeLabel === "string" && payload.scopeLabel ? payload.scopeLabel : worker.agent;
+      const resetIso = typeof payload.resetIso === "string" && payload.resetIso ? payload.resetIso : "稍后";
+      const alternatives = Array.isArray(payload.alternatives)
+        ? payload.alternatives.filter((x): x is string => typeof x === "string")
+        : [];
+      const altHint = alternatives.length > 0 ? `；也可直接回复切到同机未限流的 ${alternatives.join("、")} 继续` : "";
+      return {
+        card: failureCard(
+          `${scopeLabel} 额度冷却挂起`,
+          `当前窗口额度已用尽，原会话已保留，将于 ${resetIso} 到期后自动恢复${altHint}。`,
+          thread.title,
+          footer,
+          detailsUrl ?? undefined,
+        ),
+      };
     }
 
     // failure_push: either the start never happened or the run ended in a failure class that
@@ -2686,6 +2763,27 @@ export class Steward extends Agent<Env> {
         this.push.queue(notice.id, "done");
         void this.drainPush();
       },
+      notifyStuck: async (alert) => {
+        const owner = this.ownerOpenIdSync();
+        if (!owner) return;
+        const thread = this.ledger.threads.get(alert.watch.threadId);
+        const cardId = `prstuck:${alert.watch.id}:${alert.head}`;
+        await this.enqueueOutbound({
+          id: cardId,
+          kind: "card",
+          to: owner,
+          threadId: alert.watch.threadId,
+          urgency: "push",
+          card: prWatchStuckCard({
+            watchId: alert.watch.id,
+            url: alert.watch.url,
+            head: alert.head,
+            stalledMinutes: Math.max(1, Math.round(alert.stalledMs / 60_000)),
+            reason: alert.reason,
+            ...(thread?.title ? { threadTitle: thread.title } : {}),
+          }),
+        });
+      },
     };
     this.prWatches_ = new PrWatchService(deps);
     return this.prWatches_;
@@ -3020,10 +3118,14 @@ export class Steward extends Agent<Env> {
     // clearing unread on every Thread the card reported (§6.5: the reply means they were
     // all seen).
     const quotedThreadIds = input.parentId ? this.ledger.outbound.threadIdsForProviderMsg(input.parentId) : [];
-    for (const quotedThreadId of quotedThreadIds) this.ledger.threads.markRead(quotedThreadId);
+    for (const quotedThreadId of quotedThreadIds) {
+      this.ledger.threads.markRead(quotedThreadId);
+      this.ledger.threads.resetAutoHops(quotedThreadId);
+    }
     const routed = input.routedThreadId ?? (quotedThreadIds.length === 1 ? quotedThreadIds[0]! : null);
     const routedRow = input.parentId ? this.ledger.outbound.rowForProviderMsg(input.parentId) : null;
     const routedThread = routed ? this.ledger.threads.get(routed) : null;
+    if (routedThread) this.ledger.threads.resetAutoHops(routedThread.threadId);
     // What the owner said belongs to the conversation the workspace shows (ADR-0004): a
     // typed message, a card choice, or an answer to a worker, with the Thread it landed on.
     // Idempotent on (channel, msgId); the COALESCE keeps a row already inserted without text.
@@ -4316,9 +4418,36 @@ export class Steward extends Agent<Env> {
    * time and harness.submit deduplicates by it, so replays and crash-restarts never produce a
    * second steward input.
    */
+  private async sweepExpiredCooldowns(): Promise<void> {
+    const expired = this.ledger.cooldowns.sweepExpired(Date.now());
+    for (const entry of expired) {
+      for (const workerId of entry.resumableWorkerIds) {
+        const worker = this.ledger.workers.get(workerId);
+        if (!worker || worker.state !== "idle" || worker.lastOutcome !== "error:rate_limited" || !worker.sessionId) continue;
+        const thread = this.ledger.threads.get(worker.threadId);
+        if (!thread || thread.archived) continue;
+        const cmdId = `cooldown_resume:${entry.deviceId}:${entry.scopeKey}:${workerId}:${entry.provider ?? entry.agent}:${Date.now()}`;
+        await this.enqueue(worker.deviceId, "send", {
+          workerId,
+          text: "额度冷却窗口已恢复。请先检查当前代码与 git 状态，确认已完成的部分，继续完成原先中断的任务并在结束时调用 report 汇报。",
+          intent: "auto",
+        }, { workerId, cmdId });
+        this.ledger.workers.markResumePending(workerId, cmdId);
+        this.ledger.recomputeThreadState(worker.threadId);
+        this.ledger.timeline.add(
+          worker.threadId,
+          "dispatch",
+          `额度冷却已到期，自动接续原会话 ${workerId}`,
+          { workerId, cmdId, scopeKey: entry.scopeKey, cooldownResume: true },
+        );
+      }
+    }
+  }
+
   async drainWakes(_payload?: unknown, schedule?: { id: string }): Promise<void> {
     let submitted = false;
     try {
+      await this.sweepExpiredCooldowns();
       // The budget gate (issue #28, steward.md §12): today's spend has reached the cap →
       // event/routine/follow-up wakes are skipped, not submitted — while their deterministic
       // halves (done cards, fallback pushes, digest routines) already ran and never depended
@@ -4327,14 +4456,24 @@ export class Steward extends Agent<Env> {
       // boundary: wakes submitted in one drain may overshoot the cap by the batch's spend,
       // and the next drain stops — the soft cap bounds a runaway, it is not a prepaid meter.
       const due = this.ledger.wakes.due(Date.now());
-      if (due.length > 0) await this.syncUsageQuietly();
+      const llmDue = due.filter((w) => !w.operationId.startsWith("cooldown:"));
+      for (const cdWake of due) {
+        if (cdWake.operationId.startsWith("cooldown:")) {
+          this.ledger.wakes.markSubmitted(cdWake.id);
+        }
+      }
+      if (llmDue.length > 0) await this.syncUsageQuietly();
       const budget = this.budgetState();
-      for (const wake of due) {
+      for (const wake of llmDue) {
+        if ((wake.autoHops ?? 0) > MAX_AUTO_HOPS) {
+          await this.tripAutoHopsCircuitBreaker(wake);
+          continue;
+        }
         if (budget.over) {
           this.skipWake(wake, budget);
           continue;
         }
-        this.ledger.runs.open(wake.operationId, wake.kind, wake.text);
+        this.ledger.runs.open(wake.operationId, wake.kind, wake.text, { autoHops: wake.autoHops ?? 1 });
         try {
           await this.ensureRootModel();
           await this.piHarness.submit(wake.text, { operationId: wake.operationId, whenBusy: "followUp" });
@@ -4405,6 +4544,400 @@ export class Steward extends Agent<Env> {
         followupId: followup[1]!,
       });
     }
+  }
+
+  /** Stage 3 cross-turn autonomous loop circuit breaker (`autoHops > 8`): stops unattended
+   *  runaway ping-pong loops, marks the wake skipped, records an audit note, and alerts the owner. */
+  private async tripAutoHopsCircuitBreaker(wake: WakeRow): Promise<void> {
+    this.ledger.wakes.markSkipped(wake.id);
+    const hops = wake.autoHops ?? MAX_AUTO_HOPS + 1;
+    this.logChannel("auto_hops_circuit_breaker", `${wake.operationId} kind=${wake.kind} autoHops=${hops}`);
+    const threadMatch = /t_[0-9A-Za-z]+/.exec(wake.text);
+    const threadId = threadMatch ? (this.ledger.threads.get(threadMatch[0])?.threadId ?? null) : null;
+    const msg = `⚠️ 自动推进熔断：已连续自动执行超过 ${MAX_AUTO_HOPS} 跳（当前第 ${hops} 跳），为防止无人值守死循环已暂停本次自动唤醒。你在该事项下回复任意消息即可重置计数继续。`;
+    this.ledger.timeline.add(threadId, "note", msg, {
+      operationId: wake.operationId,
+      autoHops: hops,
+      circuitBreaker: true,
+    });
+    const owner = this.ownerOpenIdSync();
+    if (owner) {
+      await this.enqueueOutbound({
+        id: `autohops:${wake.operationId}`,
+        kind: "text",
+        to: owner,
+        threadId,
+        urgency: "push",
+        text: msg,
+      });
+    }
+  }
+
+  // ---- Stage 3 Inbound Webhook Sources & Skipped-Event Replay (`/owner/in/:source`) -------------
+
+  configureInboundSource(source: InboundWebhookSource, secret: string, pausedUntil?: number | null): void {
+    if (!secret || secret.trim().length < 8) throw new Error("webhook secret must be at least 8 characters");
+    this.ledger.inboundSources.upsert(source, secret.trim(), pausedUntil);
+    this.logChannel("inbound_source_configured", source);
+  }
+
+  pauseInboundSource(source: InboundWebhookSource, pausedUntil: number | null): boolean {
+    const ok = this.ledger.inboundSources.setPausedUntil(source, pausedUntil);
+    if (ok) this.logChannel("inbound_source_paused", `${source} until=${pausedUntil ?? "resumed"}`);
+    return ok;
+  }
+
+  async replaySkippedEvents(opts?: { source?: InboundWebhookSource; limit?: number }): Promise<{ replayed: number; eventKeys: string[] }> {
+    const pending = this.ledger.skippedEvents.listPending(opts?.source, opts?.limit ?? 50);
+    const eventKeys: string[] = [];
+    for (const row of pending) {
+      if (!this.ledger.skippedEvents.markReplayed(row.id)) continue;
+      eventKeys.push(row.eventKey);
+      const wakeText = `⟦event webhook_replay⟧\n来源：${escapeMarkers(row.source)}（暂停窗口结束后补放）\n事件键：${escapeMarkers(row.eventKey)}\n摘要：${escapeMarkers(row.summary)}\n结构化载荷：${escapeMarkers(row.payloadJson.slice(0, 4_000))}`;
+      this.ledger.wakes.queue("event", `webhook:${row.eventKey}`, wakeText, {
+        priority: "normal",
+        autoHops: 1,
+      });
+      this.ledger.timeline.add(null, "note", `已补放暂停期间的外部事件（${row.source}）：${row.summary}`, {
+        skippedEventId: row.id,
+        eventKey: row.eventKey,
+        replayed: true,
+      });
+    }
+    if (eventKeys.length > 0) {
+      await this.drainWakes();
+      void this.pollRuns();
+    }
+    return { replayed: eventKeys.length, eventKeys };
+  }
+
+  private async handleInboundWebhook(source: InboundWebhookSource, request: Request): Promise<Response> {
+    let rawBody = "";
+    try {
+      rawBody = await request.text();
+    } catch {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (rawBody.length > 256 * 1024) {
+      return Response.json({ error: "too_large" }, { status: 413 });
+    }
+    const cfg = this.ledger.inboundSources.get(source);
+    const secret = cfg?.secretEnc ?? "";
+    if (!secret) {
+      return Response.json({ error: "source_not_configured" }, { status: 401 });
+    }
+    const verified =
+      source === "github"
+        ? await verifyGitHubSignature256(secret, rawBody, request.headers.get("x-hub-signature-256"))
+        : verifyGitLabToken(secret, request.headers.get("x-gitlab-token"));
+    if (!verified) {
+      this.logChannel("inbound_webhook_rejected", source);
+      return Response.json({ error: "invalid_signature" }, { status: 401 });
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(rawBody) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return Response.json({ error: "invalid_json" }, { status: 400 });
+      }
+      payload = parsed as Record<string, unknown>;
+    } catch {
+      return Response.json({ error: "invalid_json" }, { status: 400 });
+    }
+
+    const normalized =
+      source === "github"
+        ? normalizeGitHubWebhook(
+            request.headers.get("x-github-event"),
+            request.headers.get("x-github-delivery"),
+            payload,
+          )
+        : normalizeGitLabWebhook(request.headers.get("x-gitlab-event"), payload);
+
+    if (!normalized.actionable) {
+      return Response.json({ ok: true, status: "ignored", eventKey: normalized.eventKey });
+    }
+
+    const nowMs = Date.now();
+    if (cfg && cfg.pausedUntil !== null) {
+      if (cfg.pausedUntil > nowMs) {
+        const saved = this.ledger.skippedEvents.record({
+          source,
+          eventKey: normalized.eventKey,
+          summary: normalized.summary,
+          payloadJson: JSON.stringify(normalized.payloadSummary),
+        });
+        return Response.json(
+          { ok: true, status: "paused_recorded", id: saved.id, duplicate: saved.duplicate, eventKey: normalized.eventKey },
+          { status: 202 },
+        );
+      }
+      this.ledger.inboundSources.setPausedUntil(source, null);
+    }
+
+    const wakeText = `⟦event webhook⟧\n来源：${source}\n仓库：${normalized.repoFullName}\n事件：${normalized.eventType}\n摘要：${normalized.summary}${normalized.url ? `\n链接：${normalized.url}` : ""}`;
+    this.ledger.wakes.queue("event", `webhook:${normalized.eventKey}`, wakeText, {
+      priority: "normal",
+      autoHops: 1,
+    });
+    this.ledger.timeline.add(null, "note", `收到已验签外部事件：${normalized.summary}`, {
+      source,
+      eventKey: normalized.eventKey,
+      eventType: normalized.eventType,
+    });
+    void this.drainWakes();
+    return Response.json({ ok: true, status: "queued", eventKey: normalized.eventKey }, { status: 202 });
+  }
+
+  private async handleApiInboundSources(request: Request): Promise<Response> {
+    if (request.method === "GET") {
+      return Response.json({
+        sources: this.ledger.inboundSources.list(),
+        skippedPending: this.ledger.skippedEvents.listPending(undefined, 50).map(({ id, source, eventKey, summary, receivedAt }) => ({
+          id,
+          source,
+          eventKey,
+          summary,
+          receivedAt,
+        })),
+      });
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request, 16 * 1024);
+    } catch {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+    const action = typeof body.action === "string" ? body.action : "";
+    const source = body.source === "github" || body.source === "gitlab" ? body.source : undefined;
+    if (action === "configure") {
+      if (!source || typeof body.secret !== "string" || body.secret.trim().length < 8) {
+        return Response.json({ error: "invalid_source_or_secret" }, { status: 400 });
+      }
+      const pausedUntil = typeof body.pausedUntil === "number" ? body.pausedUntil : undefined;
+      this.configureInboundSource(source, body.secret, pausedUntil);
+      return Response.json({ ok: true, source });
+    }
+    if (action === "pause") {
+      if (!source) return Response.json({ error: "invalid_source" }, { status: 400 });
+      const pausedUntil = body.pausedUntil === null ? null : typeof body.pausedUntil === "number" ? body.pausedUntil : NaN;
+      if (pausedUntil !== null && (!Number.isFinite(pausedUntil) || pausedUntil <= Date.now())) {
+        return Response.json({ error: "invalid_paused_until" }, { status: 400 });
+      }
+      const ok = this.pauseInboundSource(source, pausedUntil);
+      return Response.json({ ok, source, pausedUntil }, { status: ok ? 200 : 404 });
+    }
+    if (action === "replay") {
+      const limit = typeof body.limit === "number" ? body.limit : 50;
+      const res = await this.replaySkippedEvents({ ...(source ? { source } : {}), limit });
+      return Response.json({ ok: true, ...res });
+    }
+    return Response.json({ error: "unknown_action" }, { status: 400 });
+  }
+
+  // ---- Stage 4 PR Watch Stuck Action & Zero-Checkout Blind Review --------------------------------
+
+  setPrWatchStuckThresholdForTest(ms: number | undefined): void {
+    this.prWatches.setStuckThresholdMsForTest(ms);
+  }
+
+  async runBlindPrReviewForWatch(
+    watchId: string,
+    opts?: { dispatchReadonlyWorker?: boolean; provenanceMsgId?: string },
+  ): Promise<PrepareBlindReviewOutcome & { dispatchedWorkerId?: string }> {
+    const watch = this.prWatches.get(watchId);
+    if (!watch) {
+      return { ok: false, code: "git_failed", message: `未找到 PR 跟进记录 ${watchId}` };
+    }
+    const target = parsePrUrl(watch.url);
+    const latestWorker = this.ledger.workers.latestOnThread(watch.threadId);
+    const threadRepos = this.sql<{ repoId: string; deviceId: string }>`
+      SELECT tr.repoId, r.deviceId
+      FROM sh_thread_repo tr
+      JOIN sh_repo r ON r.repoId = tr.repoId
+      WHERE tr.threadId = ${watch.threadId}
+      LIMIT 1
+    `;
+    const deviceId = latestWorker?.deviceId ?? threadRepos[0]?.deviceId ?? null;
+    const repoId = latestWorker?.repoId ?? threadRepos[0]?.repoId ?? null;
+    if (!deviceId || !repoId) {
+      return { ok: false, code: "git_failed", message: "该 Thread 未关联本地机器仓库，无法执行零检出盲审。" };
+    }
+    const machine = this.ledger.machines.get(deviceId);
+    const availableAgents = machine?.agents ?? [];
+    const fb = this.prWatches.getFeedback(watchId);
+
+    const prepared = await prepareZeroCheckoutBlindReview({
+      sql: this.sql.bind(this),
+      watchId,
+      prUrl: watch.url,
+      ...(target ? { prNumber: target.number } : {}),
+      ...(watch.head ? { headSha: watch.head } : {}),
+      ...(fb?.baseRef ? { baseRef: fb.baseRef } : {}),
+      deviceId,
+      repoId,
+      authorAgent: latestWorker?.agent ?? null,
+      availableAgents,
+      readGitPrDiff: (dev, args) => this.connectorProto.readGitPrDiff(dev, args),
+    });
+    if (!prepared.ok) return prepared;
+
+    if (opts?.dispatchReadonlyWorker && opts.provenanceMsgId) {
+      const cmdId = `blindreview:${watchId}:${prepared.diff.headSha.slice(0, 12)}`;
+      const existingWorker = this.ledger.workers.byCommand(cmdId);
+      if (existingWorker) {
+        return { ...prepared, dispatchedWorkerId: existingWorker.workerId };
+      }
+      const spawnedWorkerId = `w_${ulid()}`;
+      this.ledger.workers.register({
+        workerId: spawnedWorkerId,
+        threadId: watch.threadId,
+        deviceId,
+        repoId,
+        agent: prepared.reviewer.agent,
+        mode: "readonly",
+        hasWorktree: false,
+        workerRelation: "sibling",
+        proposalDepth: 1,
+        parentWorker: latestWorker?.workerId,
+      });
+      this.ledger.workers.setCmdId(spawnedWorkerId, cmdId);
+      await this.enqueue(
+        deviceId,
+        "start_worker",
+        {
+          workerId: spawnedWorkerId,
+          threadId: watch.threadId,
+          repoId,
+          mode: "readonly",
+          prompt: prepared.prompt,
+          ...(prepared.reviewer.agent !== "pi" ? { agent: prepared.reviewer.agent } : {}),
+        },
+        {
+          workerId: spawnedWorkerId,
+          cmdId,
+        },
+      );
+      this.ledger.timeline.add(
+        watch.threadId,
+        "dispatch",
+        `已派发零检出 PR 盲审只读探针 ${spawnedWorkerId}（${prepared.reviewer.crossEngine ? `跨引擎 ${prepared.reviewer.agent}` : `净空会话 ${prepared.reviewer.agent}`}）`,
+        {
+          workerId: spawnedWorkerId,
+          cmdId,
+          watchId,
+          head: prepared.diff.headSha,
+          provenance: `user:${opts.provenanceMsgId}`,
+          blindReview: true,
+        },
+      );
+      this.sql`
+        UPDATE sh_pr_blind_review SET status = 'dispatched', updatedAt = ${Date.now()}
+        WHERE watchId = ${watchId} AND head = ${prepared.diff.headSha}
+      `;
+      this.sql`UPDATE sh_pr_watch SET blindReviewStatus = 'dispatched' WHERE id = ${watchId}`;
+      return { ...prepared, dispatchedWorkerId: spawnedWorkerId };
+    }
+    return prepared;
+  }
+
+  private async handlePrWatchStuckAction(msgId: string, action: string, cardMsgId: string): Promise<void> {
+    const match = /^prstuck:([A-Za-z0-9_-]+):(probe|wait|cancel)$/.exec(action);
+    const inbound = this.sql`SELECT 1 AS ok FROM sh_inbound WHERE channel = 'local' AND msgId = ${msgId} AND ownerAuthorized = 1 AND eventType = 'action'`;
+    if (!match || inbound.length !== 1) return;
+    const watchId = match[1]!;
+    const choice = match[2] as "probe" | "wait" | "cancel";
+    const row = this.ledger.outbound.rowForProviderMsg(cardMsgId);
+    if (!row || !row.id.startsWith(`prstuck:${watchId}:`)) return;
+    const watch = this.prWatches.get(watchId);
+    const threadId = watch?.threadId ?? row.threadId ?? null;
+
+    if (choice === "cancel") {
+      const ok = this.prWatches.cancel(watchId);
+      this.ledger.ownerInputs.record("local", msgId, "取消停滞的 PR 跟进", threadId);
+      await this.dispatcher.replyToCard(
+        cardMsgId,
+        ok ? `已取消 PR 跟进（${watchId}）；远端 PR 未做任何修改。` : `PR 跟进（${watchId}）已结束或不存在。`,
+        threadId,
+      );
+      return;
+    }
+    if (choice === "wait") {
+      this.ledger.ownerInputs.record("local", msgId, "继续等待 PR 状态变化", threadId);
+      await this.dispatcher.replyToCard(
+        cardMsgId,
+        `好的，继续保持只读跟进（同一提交不会重复发送停滞提醒）。`,
+        threadId,
+      );
+      return;
+    }
+    // `choice === "probe"`: explicit owner consent -> run zero-checkout blind review / readonly probe
+    this.ledger.ownerInputs.record("local", msgId, "派发零检出只读探针诊断 PR", threadId);
+    const res = await this.runBlindPrReviewForWatch(watchId, {
+      dispatchReadonlyWorker: true,
+      provenanceMsgId: msgId,
+    });
+    if (!res.ok) {
+      await this.dispatcher.replyToCard(cardMsgId, `未能启动零检出探针诊断：${res.message}`, threadId);
+      return;
+    }
+    const engineNote = res.reviewer.crossEngine ? `跨引擎 ${res.reviewer.agent}` : `净空会话 ${res.reviewer.agent}`;
+    await this.dispatcher.replyToCard(
+      cardMsgId,
+      res.dispatchedWorkerId
+        ? `已派发零检出只读探针（${engineNote}，worker ${res.dispatchedWorkerId}），完成后向你汇报；未改动本地工作树或远端 PR。`
+        : `已完成零检出 PR Diff 提取（${engineNote}，共 ${res.diff.filesChanged} 个文件），盲审提示词已就绪。`,
+      threadId,
+    );
+  }
+
+  // ---- Stage 5 Multi-Channel Signed Outbound Webhooks --------------------------------------------
+
+  private outboundWebhooks_?: OutboundWebhookStore;
+  get outboundWebhooks(): OutboundWebhookStore {
+    return (this.outboundWebhooks_ ??= new OutboundWebhookStore(this.sql.bind(this)));
+  }
+  private outboundWebhookFetchForTest?: typeof fetch;
+  setOutboundWebhookFetchForTest(fn: typeof fetch | undefined): void {
+    this.outboundWebhookFetchForTest = fn;
+  }
+
+  private async handleApiOutboundWebhooks(request: Request): Promise<Response> {
+    if (request.method === "GET") {
+      return Response.json({ webhooks: this.outboundWebhooks.list() });
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request, 16 * 1024);
+    } catch {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+    const action = typeof body.action === "string" ? body.action : "upsert";
+    if (action === "delete" || action === "remove") {
+      const id = typeof body.id === "string" ? body.id : "";
+      const removed = this.outboundWebhooks.remove(id);
+      return Response.json({ ok: removed, id }, { status: removed ? 200 : 404 });
+    }
+    const id = typeof body.id === "string" ? body.id : "";
+    const kind = typeof body.kind === "string" ? (body.kind as OutboundWebhookKind) : ("" as OutboundWebhookKind);
+    const url = typeof body.url === "string" ? body.url : "";
+    const secret = body.secret === null ? null : typeof body.secret === "string" ? body.secret : undefined;
+    const events = Array.isArray(body.events) ? body.events.filter((e): e is string => typeof e === "string") : undefined;
+    const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
+    const upserted = this.outboundWebhooks.upsert({
+      id,
+      kind,
+      url,
+      ...(secret !== undefined ? { secret } : {}),
+      ...(events !== undefined ? { events } : {}),
+      ...(enabled !== undefined ? { enabled } : {}),
+    });
+    if (!upserted.ok) {
+      return Response.json({ error: upserted.reason }, { status: 400 });
+    }
+    this.logChannel("outbound_webhook_upserted", `${id} (${kind})`);
+    return Response.json({ ok: true, webhook: upserted.view });
   }
 
   /**
@@ -4481,6 +5014,10 @@ export class Steward extends Agent<Env> {
     const action = input.action;
     if (action.startsWith('prwatch:')) {
       await this.handlePrWatchApprovalAction(input.msgId, action, input.cardMsgId);
+      return;
+    }
+    if (action.startsWith('prstuck:')) {
+      await this.handlePrWatchStuckAction(input.msgId, action, input.cardMsgId);
       return;
     }
     if (action.startsWith("proposal:")) {
@@ -5228,6 +5765,8 @@ export class Steward extends Agent<Env> {
     this.ctx.storage.sql.exec("DELETE FROM sh_routine");
     this.ctx.storage.sql.exec("DELETE FROM sh_followup");
     this.ctx.storage.sql.exec("DELETE FROM sh_routine_offer");
+    this.ctx.storage.sql.exec("DELETE FROM sh_inbound_source");
+    this.ctx.storage.sql.exec("DELETE FROM sh_skipped_event");
     this.routineService_ = undefined;
     this.ctx.storage.sql.exec('DELETE FROM sh_pr_watch_approval');
     this.prWatchApprovals_ = undefined;
@@ -5337,9 +5876,54 @@ export class Steward extends Agent<Env> {
   /** ADR-0003: "delivery" is local — the row IS the message (providerMsgId = row id), read
    *  back through GET /api/messages. Malformed payloads fail loudly instead of "sending". */
   private async deliverClaimed(row: OutboundDeliveryRow): Promise<void> {
-    JSON.parse(row.payload);
+    const parsed = JSON.parse(row.payload) as { text?: string; card?: LocalMessage };
     this.ledger.outbound.settleSent(row.id, row.claim, row.id, Date.now());
     await this.queuePushForOutbound(row);
+    await this.fanOutOutboundWebhookForRow(row, parsed);
+  }
+
+  private async fanOutOutboundWebhookForRow(
+    row: OutboundDeliveryRow,
+    parsed: { text?: string; card?: LocalMessage },
+  ): Promise<void> {
+    const eventType = row.id.startsWith("notify:report:")
+      ? "worker_report"
+      : row.id.startsWith("notify:quota_hold:")
+        ? "quota_hold"
+        : row.id.startsWith("prstuck:")
+          ? "pr_watch_stuck"
+          : row.id.startsWith("proposalapproval:")
+            ? "proposal_approval"
+            : row.id.startsWith("digest:")
+              ? "digest"
+              : row.kind === "card"
+                ? "card"
+                : "message";
+    const hooks = this.outboundWebhooks.listEnabledForEvent(eventType);
+    if (hooks.length === 0) return;
+    const localCard: LocalMessage =
+      row.kind === "card" && parsed.card && typeof parsed.card.text === "string"
+        ? parsed.card
+        : { text: typeof parsed.text === "string" ? parsed.text : "" };
+    if (!localCard.text.trim()) return;
+
+    await this.deploymentAuth.ready();
+    const target = row.threadId ? linkTargetForThread(row.threadId) : "home";
+    const workspaceUrl = await this.web.linkUrl(target, CARD_LINK_TTL_MS);
+    const threadTitle = row.threadId ? (this.ledger.threads.get(row.threadId)?.title ?? undefined) : undefined;
+    await fanOutOutboundWebhooks({
+      hooks,
+      event: {
+        id: row.id,
+        eventType,
+        threadId: row.threadId,
+        ...(threadTitle ? { threadTitle } : {}),
+        card: localCard,
+        workspaceUrl,
+      },
+      ...(this.outboundWebhookFetchForTest ? { fetchImpl: this.outboundWebhookFetchForTest } : {}),
+      onLog: (reason, detail) => this.logChannel(reason, detail),
+    });
   }
 
   private async queuePushForOutbound(row: OutboundDeliveryRow): Promise<void> {
