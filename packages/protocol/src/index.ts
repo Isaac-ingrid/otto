@@ -17,3 +17,5 @@ export * from "./proposal.ts";
 export * from "./checkpoint.ts";
 export * from "./repo-skills.ts";
 export * from "./worktree-audit.ts";
+export * from "./probes.ts";
+export * from "./pr-diff.ts";

@@ -15,6 +15,7 @@ const AgentCapabilitySchema = z.object({
   version: z.string(),
   capabilities: z.record(z.string(), z.boolean()),
   modelCatalog: AgentModelCatalogSchema.optional(),
+  authStatus: z.enum(["ready", "unauthenticated", "unknown"]).optional(),
 });
 
 const RepoCapabilitySchema = z.discriminatedUnion("kind", [
@@ -90,7 +91,10 @@ export const HelloMessageSchema = z.object({
     workerCheckpoint: z.boolean().optional(),
     repoSkills: z.boolean().optional(),
     worktreeAudit: z.boolean().optional(),
+    localProbes: z.boolean().optional(),
+    gitPrDiff: z.boolean().optional(),
   }).optional(),
+  approvedProbes: z.array(z.string().min(1).max(80)).max(64).optional(),
   machine: z.object({ name: z.string(), memTotalMB: z.number(), memFreeMB: z.number() }),
   agents: z.array(AgentCapabilitySchema),
   repos: z.array(RepoSchema),
