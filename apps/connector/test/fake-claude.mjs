@@ -19,6 +19,25 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writ
 import { exec } from "node:child_process";
 import { join } from "node:path";
 
+const rawArgs = process.argv.slice(2);
+if (rawArgs.includes("--version")) {
+  process.stdout.write("1.0.42 (Claude Code)\n");
+  process.exit(0);
+}
+if (rawArgs[0] === "auth" && rawArgs[1] === "status") {
+  const mode = process.env.FAKE_CLAUDE_AUTH_STATUS ?? "ready";
+  if (mode === "unauthenticated") {
+    process.stdout.write(JSON.stringify({ loggedIn: false }) + "\n");
+    process.exit(1);
+  }
+  if (mode === "unknown") {
+    process.stdout.write("status unavailable\n");
+    process.exit(0);
+  }
+  process.stdout.write(JSON.stringify({ loggedIn: true }) + "\n");
+  process.exit(0);
+}
+
 const scriptPath = process.env.FAKE_CLAUDE_SCRIPT;
 if (!scriptPath) {
   console.error("fake-claude: FAKE_CLAUDE_SCRIPT is required");

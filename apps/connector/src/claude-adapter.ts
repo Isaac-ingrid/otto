@@ -1,7 +1,7 @@
 // ClaudeAdapter: the second AgentAdapter implementation (issue #17, ADR-0001 decision 3;
 // connector-pi.md §15 item 8; spike-conclusions §2 "Claude Code headless"). Claude Code
 // becomes a worker the steward can dispatch to: headless `claude -p` with stream-json
-// output, a Otto MCP `report` tool, and the SAME outcome-adjudication path as pi.
+// output, an Otto MCP `report` tool, and the SAME outcome-adjudication path as pi.
 //
 // Where the agents differ, the capabilities say so honestly (§3) and the WorkerManager
 // degrades: headless print mode has no control channel after stdin hits EOF, so there is no
@@ -11,6 +11,7 @@
 // prompt relaunches with `--resume <session uuid>`.
 import type {
   AgentAdapter,
+  AgentAuthStatus,
   AgentCapabilities,
   Delivery,
   InterruptResult,
@@ -28,20 +29,11 @@ import {
   type HistoryPage,
 } from "@isaac2ingrid/protocol";
 import { AdapterError } from "./agent.ts";
-import { adjudicate, type RunWindow } from "./adjudication.ts";
+import { adjudicate, REWRITE_REPORT_PROMPT, type Adjudication, type RunWindow } from "./adjudication.ts";
 import { claudeSessionPath } from "./full-session-history.ts";
 import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, WORKER_SYSTEM_PROMPT } from "./install.ts";
 import { resolveExecutableLaunch, splitCommandLine, type LaunchResolution } from "./pi-launch.ts";
-
-export const CLAUDE_COMMAND_ENV = "OTTO_CLAUDE_COMMAND";
-
-export function claudeCommandFromEnv(env: Record<string, string | undefined> = process.env): string[] | undefined {
-  const raw = env[CLAUDE_COMMAND_ENV];
-  if (typeof raw !== "string" || raw.trim() === "") return undefined;
-  const argv = splitCommandLine(raw).filter((part) => part.length > 0);
-  return argv.length > 0 ? argv : undefined;
-}
 import {
   normalizeClaudeEntries,
   readClaudeSessionHistory,
@@ -55,6 +47,15 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { appendCapped } from "./logger.ts";
 import { redactText } from "./redact.ts";
+
+export const CLAUDE_COMMAND_ENV = "OTTO_CLAUDE_COMMAND";
+
+export function claudeCommandFromEnv(env: Record<string, string | undefined> = process.env): string[] | undefined {
+  const raw = env[CLAUDE_COMMAND_ENV];
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  const argv = splitCommandLine(raw).filter((part) => part.length > 0);
+  return argv.length > 0 ? argv : undefined;
+}
 
 /** Claude Code requires a UUID session id (§4.2's workerId shape does not qualify). */
 const OTTO_NAMESPACE = "e5f0a7c1-3b9d-4e8a-9f2b-6c4d1a7e8b3f";
@@ -77,6 +78,12 @@ export function claudeSessionId(workerId: string): string {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Read-only tool whitelist paired with `--permission-mode plan` for `mode: "readonly"`. */
+export const CLAUDE_READONLY_TOOLS = "Read,Grep,Glob,LS,mcp__otto__report,mcp__otto__propose";
+
+/** Report-only tool whitelist used on the single-pass unreported recovery resume. */
+export const CLAUDE_REPORT_ONLY_TOOLS = "mcp__otto__report";
 
 /** stop_reason mapping (spike-conclusions §2): end_turn→stop, tool_use→tool_use,
  *  max_tokens→length — pi's vocabulary, so §5.2 adjudication reads both agents alike. */
@@ -122,21 +129,22 @@ const CLAUDE_CAPABILITIES: AgentCapabilities = {
   // -p reads the prompt from stdin as text; there is no image channel.
   images: false,
   structuredReport: true,
-  // The MVP permission bypass (--dangerously-skip-permissions) cannot truly restrict the
-  // run to read-only; readonly tasks must not be dispatched to this agent.
-  readonly: false,
+  // Enforced via `--permission-mode plan` + read-only `--allowedTools` without permission bypass.
+  readonly: true,
 };
 
 export interface ClaudeAdapterOptions {
   stateDir: string;
   /** argv prefix for the claude binary; default ["claude"]. Tests point this at fake-claude. */
   command?: string[];
-  /** Extra env for the child (tests). OTTO_* is always stripped (issue #27). */
+  /** Extra env for the child (tests). OTTO_* & CLAUDE_CODE_* are always stripped. */
   env?: Record<string, string | undefined>;
   /** Per-worker stderr tails (§12); default <stateDir>/logs. Pass null to disable. */
   workerLogsDir?: string | null;
   /** hello.agents version string (the detected `claude --version` output). */
   version?: string;
+  /** Optional auth status detected at startup (`ready` | `unauthenticated` | `unknown`). */
+  authStatus?: AgentAuthStatus;
   /** system/init must arrive within this window after spawn (default 30 s — the CLI cold
    *  start is slower than pi's ~350 ms). */
   initTimeoutMs?: number;
@@ -144,19 +152,32 @@ export interface ClaudeAdapterOptions {
   stopGraceMs?: number;
   /** A pre-resolved launch (pi-launch.ts); see PiAdapterOptions.launch. */
   launch?: LaunchResolution;
+  /** Controls the single-pass `--resume` report-only rewrite when a run finishes without `report`. */
+  rewriteUnreported?: "on_work" | "always" | false;
 }
 
 interface WorkerRuntime {
   workerId: string;
+  spec: StartSpec;
   process: ClaudeProcess;
   cwd: string;
   sessionId: string;
+  configPath: string;
+  reportFile: string;
   proposalsFile: string;
   emittedProposalKeys: Set<string>;
   /** In-flight transcript fallback while running before/without disk flush. */
   liveEntries: ClaudeTranscriptRecord[];
   /** Set when the connector itself ends this process; makes exits "expected". */
   stopping: boolean;
+  /** Suppresses `process_exit` emission on pass 1 while a single-pass report-only rewrite spawns. */
+  suppressExitEvent: boolean;
+  /** True on the single-pass `--resume` report-only rewrite process. */
+  isRewritePass: boolean;
+  /** Guardrail flag when a rewrite pass tried to invoke a non-report tool and was killed. */
+  rewriteGuardAborted: boolean;
+  savedLastText?: string;
+  priorUsage?: SessionUsage;
   /** An interrupt killed this run before its `result`; the exit settles it as aborted. */
   interrupting: boolean;
   /** The `result` event arrived: the run settled, the exit that follows is expected. */
@@ -180,14 +201,58 @@ export const CLAUDE_SUGGESTED_MODELS = [
   { id: "opusplan", name: "opusplan" },
 ] as const;
 
+function extractClaudeRateLimitReset(record: Record<string, unknown>): number | string | undefined {
+  for (const key of ["resetsAt", "resets_at", "reset_at"]) {
+    const val = record[key];
+    if (typeof val === "number" || typeof val === "string") return val;
+  }
+  const info = record.rate_limit_info;
+  if (typeof info === "object" && info !== null) {
+    const infoObj = info as Record<string, unknown>;
+    for (const key of ["resetsAt", "resets_at", "reset_at"]) {
+      const val = infoObj[key];
+      if (typeof val === "number" || typeof val === "string") return val;
+    }
+  }
+  return undefined;
+}
+
+function mergeUsage(first: SessionUsage | undefined, second: SessionUsage | undefined): SessionUsage | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  const in1 = first.tokens?.input ?? 0;
+  const out1 = first.tokens?.output ?? 0;
+  const cache1 = first.tokens?.cachedInputTokens ?? 0;
+  const in2 = second.tokens?.input ?? 0;
+  const out2 = second.tokens?.output ?? 0;
+  const cache2 = second.tokens?.cachedInputTokens ?? 0;
+  const totalIn = in1 + in2;
+  const totalOut = out1 + out2;
+  const totalCached = cache1 + cache2;
+  const cost =
+    typeof first.cost === "number" || typeof second.cost === "number"
+      ? Math.round(((first.cost ?? 0) + (second.cost ?? 0)) * 1e8) / 1e8
+      : undefined;
+  return {
+    ...(totalIn > 0 || totalOut > 0
+      ? {
+          tokens: {
+            input: totalIn,
+            output: totalOut,
+            totalTokens: totalIn + totalOut,
+            ...(totalCached > 0 ? { cachedInputTokens: totalCached } : {}),
+          },
+        }
+      : {}),
+    ...(cost !== undefined ? { cost } : {}),
+    ...(second.contextUsage ?? first.contextUsage ? { contextUsage: second.contextUsage ?? first.contextUsage } : {}),
+  };
+}
+
 export class ClaudeAdapter implements AgentAdapter {
   readonly kind = "claude-code" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
   readonly modelCatalog = {
-    // ADR-0021 Decisions 2, 3, 8, 9: headless `claude -p --model <id>` selects at launch,
-    // accepts CLI aliases (`sonnet`, `opus`, `haiku`, `opusplan`, `sonnet[1m]`) as well as
-    // concrete Anthropic / Bedrock / Vertex / gateway model IDs, and reports the resolved
-    // concrete model in `system/init.model` separately from the requested value.
     capabilities: {
       selection: "launch",
       discovery: "suggested",
@@ -230,9 +295,6 @@ export class ClaudeAdapter implements AgentAdapter {
     this.workerLogsDir = options.workerLogsDir === null ? null : (options.workerLogsDir ?? join(options.stateDir, "logs"));
   }
 
-  /** The argv the connector will spawn for claude, resolved once (npm installs claude as a
-   *  `.cmd` shim on Windows, which Node cannot spawn without a shell). An explicit `command`
-   *  option (tests, embedders) is never rewritten. */
   get launchResolution(): LaunchResolution {
     this.launch =
       this.launch ??
@@ -243,6 +305,10 @@ export class ClaudeAdapter implements AgentAdapter {
 
   get version(): string | undefined {
     return this.options.version;
+  }
+
+  get authStatus(): AgentAuthStatus | undefined {
+    return this.options.authStatus;
   }
 
   on(event: "worker-event", fn: (e: RawAdapterEvent) => void): void {
@@ -268,9 +334,11 @@ export class ClaudeAdapter implements AgentAdapter {
     }
   }
 
-  /** Builds the headless invocation (spike-conclusions §2): permission bypass is the MVP
-   *  yolo product decision; `--session-id` on a first run, `--resume` on a continuation. */
-  buildArgs(spec: StartSpec, mcpConfigPath: string): string[] {
+  /** Builds the headless invocation:
+   *  - `mode === "write"` uses `--dangerously-skip-permissions`.
+   *  - `mode === "readonly"` uses `--permission-mode plan` + read-only `--allowedTools` (never skip-permissions).
+   *  - `rewriteReportOnly` uses `--permission-mode plan` + `--allowedTools mcp__otto__report` with `--resume`. */
+  buildArgs(spec: StartSpec, mcpConfigPath: string, options?: { rewriteReportOnly?: boolean }): string[] {
     const args = [
       "-p",
       "--output-format",
@@ -280,23 +348,33 @@ export class ClaudeAdapter implements AgentAdapter {
       mcpConfigPath,
       "--append-system-prompt",
       WORKER_SYSTEM_PROMPT,
-      "--dangerously-skip-permissions",
     ];
+    if (options?.rewriteReportOnly) {
+      args.push("--permission-mode", "plan", "--allowedTools", CLAUDE_REPORT_ONLY_TOOLS);
+    } else if (spec.mode === "readonly") {
+      args.push("--permission-mode", "plan", "--allowedTools", CLAUDE_READONLY_TOOLS);
+    } else {
+      args.push("--dangerously-skip-permissions");
+    }
     const sessionId = spec.resumeSessionId ?? claudeSessionId(spec.workerId);
-    args.push(spec.resumeSessionId ? "--resume" : "--session-id", sessionId);
+    const useResume = options?.rewriteReportOnly === true || Boolean(spec.resumeSessionId);
+    args.push(useResume ? "--resume" : "--session-id", sessionId);
     if (spec.model) args.push("--model", spec.model);
     return args;
   }
 
   /** The per-worker mcp-config: Claude Code spawns our report server as an MCP child. */
-  private writeMcpConfig(workerId: string, serverPath: string): { configPath: string; proposalsFile: string } {
+  private writeMcpConfig(workerId: string, serverPath: string): {
+    configPath: string;
+    reportFile: string;
+    proposalsFile: string;
+  } {
     const mcpDir = join(this.options.stateDir, "mcp");
     const configPath = join(mcpDir, `config-${workerId}.json`);
     const reportFile = join(mcpDir, "reports", `${workerId}.json`);
     const proposalsFile = join(mcpDir, "proposals", `proposals-${workerId}.jsonl`);
+    rmSync(reportFile, { force: true });
     rmSync(proposalsFile, { force: true });
-    // The path rides the config's argv — visible to the model in yolo mode, but it is a
-    // scratch channel, not a secret (§7.2: model-reported content is semantics, not fact).
     writeFileSync(
       configPath,
       JSON.stringify({
@@ -305,21 +383,20 @@ export class ClaudeAdapter implements AgentAdapter {
         },
       }),
     );
-    return { configPath, proposalsFile };
+    return { configPath, reportFile, proposalsFile };
   }
 
   async start(spec: StartSpec): Promise<WorkerHandle> {
     if (this.runtimes.has(spec.workerId)) {
       throw new AdapterError("lock_held", `a claude process for ${spec.workerId} is already running`);
     }
-    // Same refusal as PiAdapter.start: no spawnable argv means no spawn, with the reason.
     const launch = this.launchResolution;
     if (launch.error) throw new AdapterError("launch_unresolved", launch.error);
     const assets = installClaudeAssets(this.options.stateDir);
     const serverPath = assets.serverPath;
     if (this.workerLogsDir) mkdirSync(this.workerLogsDir, { recursive: true });
     const sessionId = spec.resumeSessionId ?? claudeSessionId(spec.workerId);
-    const { configPath, proposalsFile } = this.writeMcpConfig(spec.workerId, serverPath);
+    const { configPath, reportFile, proposalsFile } = this.writeMcpConfig(spec.workerId, serverPath);
 
     let runtime!: WorkerRuntime;
     const proc = new ClaudeProcess({
@@ -333,9 +410,12 @@ export class ClaudeAdapter implements AgentAdapter {
     });
     runtime = {
       workerId: spec.workerId,
+      spec,
       process: proc,
       cwd: spec.cwd,
       sessionId,
+      configPath,
+      reportFile,
       proposalsFile,
       emittedProposalKeys: new Set(),
       liveEntries: [
@@ -346,6 +426,9 @@ export class ClaudeAdapter implements AgentAdapter {
         },
       ],
       stopping: false,
+      suppressExitEvent: false,
+      isRewritePass: false,
+      rewriteGuardAborted: false,
       interrupting: false,
       resultSeen: false,
       turn: 0,
@@ -360,12 +443,9 @@ export class ClaudeAdapter implements AgentAdapter {
     this.runtimes.set(spec.workerId, runtime);
     this.lastSpecs.set(spec.workerId, spec);
     proc.spawn();
-    // The stdin prompt is only processed on EOF (spike): write it, then END stdin.
     proc.writePrompt(spec.prompt);
 
     try {
-      // §4.4 step 4 analog: system/init must arrive within the window, echo our session id,
-      // and show the otto MCP server connected (§15 item 1's startup self-check).
       const init = await proc.waitForInit(this.options.initTimeoutMs ?? 30_000);
       const seen = typeof init.session_id === "string" ? init.session_id : "";
       if (!UUID_RE.test(sessionId) || (seen !== "" && seen !== sessionId)) {
@@ -383,6 +463,11 @@ export class ClaudeAdapter implements AgentAdapter {
           `otto MCP server status '${mcp.status}': the report tool is not available; refusing to run unreported`,
         );
       }
+      try {
+        spec.onPromptAccepted?.();
+      } catch {
+        // bookkeeping must never fail launch
+      }
       if (typeof init.model === "string") {
         const observation = AgentModelObservationSchema.safeParse({
           id: init.model,
@@ -397,7 +482,7 @@ export class ClaudeAdapter implements AgentAdapter {
       setImmediate(() => this.flushBuffered(runtime));
       return handle;
     } catch (err) {
-      runtime.buffered = null; // nothing started, so nothing to replay
+      runtime.buffered = null;
       this.runtimes.delete(spec.workerId);
       runtime.stopping = true;
       proc.kill();
@@ -413,13 +498,10 @@ export class ClaudeAdapter implements AgentAdapter {
     how: Delivery,
   ): Promise<{ effect?: string }> {
     if (how !== "prompt") {
-      // steer/follow_up are impossible after stdin EOF; the manager defers instead of calling.
       throw new AdapterError("unsupported", `claude-code cannot ${how} mid-run (no control channel after stdin EOF)`);
     }
     const previous = this.runtimes.get(id);
     if (previous && !previous.process.hasExited) {
-      // The post-result exit window: the run settled, the process is on its way out —
-      // reclaim it before the relaunch (one live process per worker, §4.3).
       previous.stopping = true;
       this.runtimes.delete(id);
       await previous.process.close(2000);
@@ -436,15 +518,9 @@ export class ClaudeAdapter implements AgentAdapter {
     return {};
   }
 
-  /** No graceful abort exists in headless mode: SIGKILL the process, then synthesize the
-   *  `settled{aborted}` the interrupt flow waits for. The session survives (append-only
-   *  transcript), so `--resume` + the fixed prompt recovers, exactly like a crash. */
   async interrupt(id: string): Promise<InterruptResult> {
     const runtime = this.require(id);
     if (runtime.resultSeen) {
-      // PR #59 review finding 4: the run already settled and reported — nothing to abort.
-      // Reclaim the lingering (exiting) process so the interrupt still does something, and
-      // say so: aborted:false, or the steward tells the user "停了" next to a report card.
       runtime.stopping = true;
       this.runtimes.delete(id);
       await runtime.process.close(2000);
@@ -457,7 +533,6 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async resume(id: string, reason: string, _options: { commandId?: string } = {}): Promise<void> {
-    // (_options carries the pi commandId marker; claude has no session-file marker to write.)
     const runtime = this.runtimes.get(id);
     if (runtime && !runtime.process.hasExited) {
       throw new AdapterError(
@@ -497,8 +572,6 @@ export class ClaudeAdapter implements AgentAdapter {
     return out;
   }
 
-  /** §11.4 live path: reads Claude Code's on-disk `<sessionUuid>.jsonl` when already flushed,
-   *  or falls back to the in-flight streamed entries while the child process is still running. */
   async history(id: string, since: string | undefined, maxBytes: number): Promise<HistoryPage> {
     const runtime = this.runtimes.get(id);
     if (!runtime || runtime.process.hasExited) {
@@ -522,7 +595,6 @@ export class ClaudeAdapter implements AgentAdapter {
     return out;
   }
 
-  /** Test support: emulate a hard connector crash — children SIGKILLed, no cleanup. */
   simulateCrash(): void {
     for (const runtime of this.runtimes.values()) {
       runtime.stopping = true;
@@ -571,6 +643,11 @@ export class ClaudeAdapter implements AgentAdapter {
         }
         return;
       }
+      case "rate_limit_event": {
+        const resetAt = extractClaudeRateLimitReset(record);
+        if (resetAt !== undefined) runtime.window.rateLimitResetAt = resetAt;
+        return;
+      }
       case "assistant": {
         const message = record.message as Record<string, unknown> | undefined;
         if (!message) return;
@@ -611,14 +688,22 @@ export class ClaudeAdapter implements AgentAdapter {
           if (block.type === "tool_use") {
             const name = typeof block.name === "string" ? block.name : "unknown";
             const input = block.input;
+            if (runtime.isRewritePass && !isReportTool(name)) {
+              // Guardrail: rewrite pass must only call `__report`.
+              runtime.rewriteGuardAborted = true;
+              runtime.process.kill();
+              return;
+            }
             runtime.toolStartedAt = Date.now();
             if (isReportTool(name)) {
-              // Suffix match only: the namespace prefix is not ours to predict.
               const report = normalizeReport(input);
               if (report) runtime.window.report = report;
-            } else if (isProposalTool(name)) {
-              const proposal = normalizeProposal(input);
-              if (proposal) this.emitProposalOnce(runtime, proposal);
+            } else {
+              runtime.window.hadWork = true;
+              if (isProposalTool(name)) {
+                const proposal = normalizeProposal(input);
+                if (proposal) this.emitProposalOnce(runtime, proposal);
+              }
             }
             const telemetry = this.snapshotTelemetry(runtime);
             this.emit({
@@ -650,7 +735,6 @@ export class ClaudeAdapter implements AgentAdapter {
         return;
       }
       case "user": {
-        // Tool results — measure tool duration without emitting an extra WorkerEvent (§11.1 compression).
         if (runtime.toolStartedAt !== null) {
           runtime.lastToolMs = Math.max(0, Date.now() - runtime.toolStartedAt);
           runtime.toolStartedAt = null;
@@ -659,6 +743,10 @@ export class ClaudeAdapter implements AgentAdapter {
       }
       case "result": {
         if (!runtime.window.open) return;
+        const resetAt = extractClaudeRateLimitReset(record);
+        if (resetAt !== undefined && runtime.window.rateLimitResetAt === undefined) {
+          runtime.window.rateLimitResetAt = resetAt;
+        }
         const errored =
           record.is_error === true || (typeof record.subtype === "string" && record.subtype.startsWith("error"));
         if (errored) {
@@ -694,22 +782,24 @@ export class ClaudeAdapter implements AgentAdapter {
     });
   }
 
-  private async settle(runtime: WorkerRuntime, result: Record<string, unknown>): Promise<void> {
-    for (const proposal of readProposalsAuditFile(runtime.proposalsFile)) {
-      this.emitProposalOnce(runtime, proposal);
-    }
-    const facts = runtime.window;
-    const adjudicated = adjudicate(facts);
-    runtime.window = { open: false, aborted: false };
-    runtime.turn = 0;
-
-    // usage from the result envelope (the analog of pi's get_session_stats at settlement).
+  private extractResultUsage(runtime: WorkerRuntime, result: Record<string, unknown>): SessionUsage {
     const usage: SessionUsage = {};
     const rawUsage = result.usage as Record<string, unknown> | undefined;
     if (rawUsage && typeof rawUsage.input_tokens === "number") {
-      const input = rawUsage.input_tokens;
+      // Claude `input_tokens` excludes prompt-cache read & creation tokens; add both back so
+      // `input` reflects true context consumption and surface `cachedInputTokens` separately.
+      const cacheRead = typeof rawUsage.cache_read_input_tokens === "number" ? rawUsage.cache_read_input_tokens : 0;
+      const cacheCreate =
+        typeof rawUsage.cache_creation_input_tokens === "number" ? rawUsage.cache_creation_input_tokens : 0;
+      const cached = Math.max(0, cacheRead + cacheCreate);
+      const input = rawUsage.input_tokens + cached;
       const output = typeof rawUsage.output_tokens === "number" ? rawUsage.output_tokens : 0;
-      usage.tokens = { input, output, totalTokens: input + output };
+      usage.tokens = {
+        input,
+        output,
+        totalTokens: input + output,
+        ...(cached > 0 ? { cachedInputTokens: cached } : {}),
+      };
     }
     if (typeof result.total_cost_usd === "number") usage.cost = result.total_cost_usd;
 
@@ -737,20 +827,132 @@ export class ClaudeAdapter implements AgentAdapter {
             : null,
       };
     }
+    return usage;
+  }
+
+  private async settle(runtime: WorkerRuntime, result: Record<string, unknown>): Promise<void> {
+    if (!runtime.window.report && existsSync(runtime.reportFile)) {
+      try {
+        const report = normalizeReport(JSON.parse(readFileSync(runtime.reportFile, "utf8")));
+        if (report) runtime.window.report = report;
+      } catch {
+        // best-effort fallback
+      }
+    }
+    for (const proposal of readProposalsAuditFile(runtime.proposalsFile)) {
+      this.emitProposalOnce(runtime, proposal);
+    }
+    const facts = runtime.window;
+    let adjudicated: Adjudication = adjudicate(facts);
+    runtime.window = { open: false, aborted: false };
+    runtime.turn = 0;
+
+    const passUsage = this.extractResultUsage(runtime, result);
+    const combinedUsage = mergeUsage(runtime.priorUsage, passUsage);
+
+    if (runtime.isRewritePass) {
+      if (adjudicated.outcome === "unreported" || adjudicated.outcome === "aborted") {
+        adjudicated = {
+          outcome: "unreported",
+          lastText: runtime.savedLastText || adjudicated.lastText,
+        };
+      }
+    } else {
+      const rewriteMode = this.options.rewriteUnreported ?? "on_work";
+      const shouldRewrite =
+        rewriteMode !== false &&
+        adjudicated.outcome === "unreported" &&
+        (rewriteMode === "always" || facts.hadWork === true) &&
+        !runtime.stopping &&
+        !runtime.interrupting;
+      if (shouldRewrite) {
+        const launched = await this.launchRewritePass(runtime, adjudicated.lastText, combinedUsage);
+        if (launched) return;
+      }
+    }
+
     const telemetry = this.snapshotTelemetry(runtime);
     runtime.lastToolMs = null;
+    const hasUsage = Boolean(combinedUsage?.tokens || combinedUsage?.cost !== undefined || combinedUsage?.contextUsage);
 
     this.emit({
       type: "settled",
       workerId: runtime.workerId,
       outcome: adjudicated.outcome,
       errorClass: adjudicated.errorClass,
+      limitedUntil: adjudicated.limitedUntil,
       errorMessage: adjudicated.errorMessage,
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
-      ...(usage.tokens || usage.cost !== undefined || usage.contextUsage ? { usage } : {}),
+      ...(hasUsage && combinedUsage ? { usage: combinedUsage } : {}),
       ...(telemetry ? { telemetry } : {}),
     });
+  }
+
+  /** Spawns at most one `--resume` report-only pass (`--permission-mode plan`) in place so
+   *  `WorkerManager` keeps its lock and active worktree context until the final settle. */
+  private async launchRewritePass(
+    prevRuntime: WorkerRuntime,
+    savedLastText: string | undefined,
+    priorUsage: SessionUsage | undefined,
+  ): Promise<boolean> {
+    const launch = this.launchResolution;
+    if (launch.error) return false;
+    prevRuntime.suppressExitEvent = true;
+    await prevRuntime.process.close(1500).catch(() => undefined);
+    if (prevRuntime.stopping || prevRuntime.interrupting) return false;
+
+    rmSync(prevRuntime.reportFile, { force: true });
+    let rewriteRuntime!: WorkerRuntime;
+    const proc = new ClaudeProcess({
+      command: launch.argv,
+      args: this.buildArgs(prevRuntime.spec, prevRuntime.configPath, { rewriteReportOnly: true }),
+      cwd: prevRuntime.cwd,
+      env: childEnv(process.env, this.options.env),
+      stderrFile: this.workerLogsDir ? join(this.workerLogsDir, `claude-${prevRuntime.workerId}.log`) : undefined,
+      onEvent: (record) => this.onStreamEvent(rewriteRuntime, record),
+      onExit: (info) => this.onExit(rewriteRuntime, info),
+    });
+    rewriteRuntime = {
+      ...prevRuntime,
+      process: proc,
+      suppressExitEvent: false,
+      isRewritePass: true,
+      rewriteGuardAborted: false,
+      savedLastText,
+      priorUsage,
+      interrupting: false,
+      resultSeen: false,
+      turn: 0,
+      window: { open: false, aborted: false },
+      toolStartedAt: null,
+      lastToolMs: null,
+      pendingText: "",
+      buffered: null,
+    };
+    this.runtimes.set(prevRuntime.workerId, rewriteRuntime);
+    proc.spawn();
+    proc.writePrompt(REWRITE_REPORT_PROMPT);
+    try {
+      await proc.waitForInit(this.options.initTimeoutMs ?? 15_000);
+      return true;
+    } catch {
+      rewriteRuntime.suppressExitEvent = true;
+      rewriteRuntime.stopping = true;
+      this.runtimes.delete(prevRuntime.workerId);
+      proc.kill();
+      // Restore normal exit notification after fallback settle emits in caller.
+      queueMicrotask(() => {
+        this.emit({
+          type: "process_exit",
+          workerId: prevRuntime.workerId,
+          code: 0,
+          signal: null,
+          unexpected: false,
+        });
+      });
+      return false;
+    }
   }
 
   private snapshotTelemetry(runtime: WorkerRuntime): WorkerLiveTelemetry | undefined {
@@ -769,10 +971,19 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   private onExit(runtime: WorkerRuntime, info: { code: number | null; signal: NodeJS.Signals | null }): void {
+    if (runtime.suppressExitEvent) return;
     if (this.runtimes.get(runtime.workerId) === runtime) this.runtimes.delete(runtime.workerId);
-    // An interrupt kill before `result`: settle the run as aborted — the interrupt flow
-    // waits for exactly this. (A post-result exit needs no second settle.)
-    if (runtime.interrupting && !runtime.resultSeen && runtime.window.open) {
+    if (runtime.rewriteGuardAborted && !runtime.resultSeen) {
+      runtime.resultSeen = true;
+      runtime.window = { open: false, aborted: false };
+      this.emit({
+        type: "settled",
+        workerId: runtime.workerId,
+        outcome: "unreported",
+        lastText: runtime.savedLastText?.slice(0, 4000),
+        ...(runtime.priorUsage ? { usage: runtime.priorUsage } : {}),
+      });
+    } else if (runtime.interrupting && !runtime.resultSeen && runtime.window.open) {
       runtime.window.aborted = true;
       runtime.window = { open: false, aborted: false };
       this.emit({ type: "settled", workerId: runtime.workerId, outcome: "aborted" });
@@ -782,18 +993,11 @@ export class ClaudeAdapter implements AgentAdapter {
       workerId: runtime.workerId,
       code: info.code,
       signal: info.signal,
-      // Expected when we stopped/interrupted it or the run's `result` already settled it;
-      // anything else is a crash → the manager's lost/auto-resume path (§9.1/§9.2).
       unexpected: !runtime.stopping && !runtime.interrupting && !runtime.resultSeen,
     });
   }
 }
 
-/**
- * ClaudeProcess: spawn + strict LF framing over `claude -p` stdout, stderr tail, exit
- * detection. No RPC — headless Claude Code speaks one way (events out) with the prompt
- * going in over stdin, closed with end() to trigger processing (spike-conclusions §2).
- */
 export class ClaudeProcess {
   private readonly options: ClaudeProcessOptions;
   private child?: ChildProcess;
@@ -832,7 +1036,6 @@ export class ClaudeProcess {
     child.on("exit", (code, signal) => this.handleExit(code, signal));
   }
 
-  /** The prompt goes to stdin and stdin is ENDED: the spike hit a permanent hang without it. */
   writePrompt(prompt: string): void {
     const stdin = this.child?.stdin;
     if (!this.child || this.exited || !stdin) throw new Error("claude process is not running");
@@ -842,8 +1045,6 @@ export class ClaudeProcess {
     stdin.end();
   }
 
-  /** Resolves on the `system/init` event; rejects on exit or timeout (the message carries
-   *  the stderr tail, §9.4's startup-failure reporting). */
   waitForInit(timeoutMs: number): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       if (this.exited || !this.child) {
@@ -882,8 +1083,6 @@ export class ClaudeProcess {
     this.child.kill("SIGKILL");
   }
 
-  /** Stop sequence: stdin is already EOF'd in print mode, so wait the grace period and
-   *  SIGKILL. Resolves on exit. */
   async close(graceMs = 3000): Promise<void> {
     if (this.exited || !this.child) return;
     const exited = this.waitExit();
@@ -916,7 +1115,6 @@ export class ClaudeProcess {
       try {
         record = JSON.parse(line) as Record<string, unknown>;
       } catch {
-        // §9.4: an unparseable line is logged and dropped; do not terminate.
         this.stderrTail += `\n[otto] unparseable stdout line: ${line.slice(0, 200)}\n`;
         continue;
       }
@@ -972,7 +1170,6 @@ export class ClaudeProcess {
 }
 
 export interface ClaudeProcessOptions {
-  /** argv prefix for the claude binary, e.g. ["claude"] or [process.execPath, fakeClaudePath]. */
   command: string[];
   args: string[];
   cwd: string;
@@ -982,8 +1179,6 @@ export interface ClaudeProcessOptions {
   stderrFile?: string;
 }
 
-/** Whether a `claude` binary is on the machine (hello.agents advertises it only when it
- *  is, issue #17 AC): `claude --version` must exit 0. Sync on purpose — a boot-time check. */
 function readProposalsAuditFile(path: string): ProposalPayload[] {
   if (!existsSync(path)) return [];
   try {
@@ -1005,20 +1200,45 @@ function readProposalsAuditFile(path: string): ProposalPayload[] {
   }
 }
 
+export function probeClaudeAuthStatus(
+  resolvedArgv: string[],
+  timeoutMs = 3000,
+  execFn: typeof spawnSync = spawnSync,
+): AgentAuthStatus {
+  if (!resolvedArgv[0]) return "unknown";
+  try {
+    const [file, ...rest] = resolvedArgv;
+    const res = execFn(file, [...rest, "auth", "status"], { timeout: timeoutMs, encoding: "utf8" });
+    const combined = `${String(res.stdout ?? "")}\n${String(res.stderr ?? "")}`.toLowerCase();
+    if (/"loggedin"\s*:\s*true|\blogged in\b/.test(combined) && !/"loggedin"\s*:\s*false|\bnot logged in\b/.test(combined)) {
+      return "ready";
+    }
+    if (/"loggedin"\s*:\s*false|\bnot logged in\b|\bunauthenticated\b|\blogin required\b/.test(combined)) {
+      return "unauthenticated";
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export function detectClaude(
   command: string[] = claudeCommandFromEnv() ?? ["claude"],
   timeoutMs = 5000,
-): { installed: boolean; version?: string } {
+): { installed: boolean; version?: string; authStatus?: AgentAuthStatus } {
   try {
-    // Same Windows shim resolution as a real run: `spawnSync("claude")` cannot start the
-    // npm `.cmd` shim, which would report "not installed" on a machine that has it.
     const resolved = resolveExecutableLaunch(command);
     if (resolved.error || !resolved.argv[0]) return { installed: false };
     const [file, ...rest] = resolved.argv;
     const result = spawnSync(file, [...rest, "--version"], { timeout: timeoutMs, encoding: "utf8" });
     if (result.status !== 0 || result.error) return { installed: false };
     const version = String(result.stdout ?? "").trim().split("\n")[0] ?? "";
-    return { installed: true, version: version.length > 0 ? version : undefined };
+    const authStatus = probeClaudeAuthStatus(resolved.argv, Math.min(timeoutMs, 3000));
+    return {
+      installed: true,
+      version: version.length > 0 ? version : undefined,
+      ...(authStatus !== "unknown" ? { authStatus } : {}),
+    };
   } catch {
     return { installed: false };
   }

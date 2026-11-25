@@ -12,7 +12,18 @@ import type {
 
 export type { ProposalPayload };
 
-export type AgentKind = "pi" | "claude-code" | "codex" | "antigravity";
+export type AgentKind =
+  | "pi"
+  | "claude-code"
+  | "codex"
+  | "antigravity"
+  | "opencode"
+  | "agentica"
+  | "dsh"
+  | "zcode"
+  | "command";
+
+export type AgentAuthStatus = "ready" | "unauthenticated" | "unknown";
 
 export interface AgentCapabilities {
   /** Change direction immediately while running (takes effect after the current tool finishes). */
@@ -48,6 +59,10 @@ export interface StartSpec {
    *  prompt is sent — with the session file and its current tail entry id (null file when
    *  the agent reports none), so a crash anywhere past this point stays decidable. */
   onSession?: (sessionFile: string | null, lastKnownEntryId: string | null) => void;
+  /** Fires once the underlying CLI/RPC has accepted the prompt and initialized a real turn
+   *  (`pi` `/otto` handled, `claude` `system/init`, `codex` `turn.started`) so crash
+   *  reconciliation distinguishes pre-prompt startup crashes from mid-run crashes. */
+  onPromptAccepted?: () => void;
   /** approveProject (§13): the repo's local trust flag — pi runs with --approve. Never
    * taken from the command; set by the WorkerManager from the LocalStore's repo row. */
   approveProject?: boolean;
@@ -128,6 +143,7 @@ export interface TokenUsage {
   input?: number;
   output?: number;
   totalTokens?: number;
+  cachedInputTokens?: number;
   [key: string]: unknown;
 }
 
@@ -212,7 +228,7 @@ export function diffCumulativeSessionUsage(
   };
 }
 
-export type ErrorClass = "auth" | "transient" | "context" | "stall" | "unknown";
+export type ErrorClass = "auth" | "rate_limited" | "transient" | "context" | "stall" | "unknown";
 
 export type SettledOutcome = "reported" | "aborted" | "error" | "unreported";
 
@@ -238,6 +254,8 @@ export type RawAdapterEvent =
       workerId: string;
       outcome: SettledOutcome;
       errorClass?: ErrorClass;
+      /** Epoch ms when a temporary quota/rate-limit window resets (bounded to <= 8 days). */
+      limitedUntil?: number;
       /** The agent's own words for an `error` settle — the class alone is not diagnosable. */
       errorMessage?: string;
       /** Only set for `unreported`: fallback classification input for the steward. */
@@ -262,6 +280,8 @@ export interface AgentAdapter {
   readonly capabilities: AgentCapabilities;
   /** Reported in hello.agents (protocol §6.1); defaults to the connector's own version. */
   readonly version?: string;
+  /** Local login/auth preflight status reported in hello.agents when supported. */
+  readonly authStatus?: AgentAuthStatus;
   /** Bounded, credentials-free suggestions or an adapter-owned complete catalog. */
   readonly modelCatalog?: AgentModelCatalog;
   /** Metadata-only refresh; must not submit a prompt or probe model completions. */

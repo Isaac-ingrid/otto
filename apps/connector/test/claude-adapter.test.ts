@@ -132,7 +132,7 @@ describe("invocation contract (spike-conclusions §2)", () => {
     30_000,
   );
 
-  it("declares its capabilities honestly: history=true, no steer, no follow-up, no images, no readonly", () => {
+  it("declares its capabilities honestly: history=true, readonly=true, no steer, no follow-up, no images", () => {
     setup([]);
     expect(adapter.capabilities).toMatchObject({
       steer: false,
@@ -142,7 +142,7 @@ describe("invocation contract (spike-conclusions §2)", () => {
       history: true,
       images: false,
       structuredReport: true,
-      readonly: false,
+      readonly: true,
     });
     expect(adapter.kind).toBe("claude-code");
   });

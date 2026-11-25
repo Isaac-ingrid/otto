@@ -11,6 +11,20 @@ if (argv.includes("--version")) {
   process.exit(0);
 }
 
+if (argv[0] === "login" && argv[1] === "status") {
+  const mode = process.env.FAKE_CODEX_AUTH_STATUS ?? "ready";
+  if (mode === "unauthenticated") {
+    process.stdout.write("Not logged in\n");
+    process.exit(1);
+  }
+  if (mode === "unknown") {
+    process.stdout.write("codex status unavailable\n");
+    process.exit(0);
+  }
+  process.stdout.write("Logged in using ChatGPT\n");
+  process.exit(0);
+}
+
 const argvLog = process.env.FAKE_CODEX_ARGV_LOG;
 if (argvLog) {
   mkdirSync(dirname(argvLog), { recursive: true });
@@ -104,11 +118,12 @@ process.stdin.on("end", async () => {
   }
 
   const runs = Array.isArray(scenario.runs) ? scenario.runs : [[]];
-  const steps = runs[Math.min(runIndex, Math.max(0, runs.length - 1))] ?? [];
+  const steps = runs[runIndex] ?? [];
   let customEnd = false;
 
   for (const step of steps) {
     if (step.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
+    if (step.noTurnCompleted) customEnd = true;
     if (typeof step.exit === "number") {
       process.exit(step.exit);
     }
@@ -127,7 +142,7 @@ process.stdin.on("end", async () => {
             }) + "\n",
         );
       }
-      if (step.emit.type === "turn.completed" || step.emit.type === "turn.failed" || step.emit.type === "error") {
+      if (step.emit.type === "turn.completed" || step.emit.type === "turn.failed") {
         customEnd = true;
       }
     }

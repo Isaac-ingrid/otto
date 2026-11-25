@@ -337,7 +337,13 @@ export class WorkerManager {
   }
 
   get agents() {
-    return [...this.adapters.values()].map((a) => ({ kind: a.kind, version: a.version, capabilities: a.capabilities, modelCatalog: a.modelCatalog }));
+    return [...this.adapters.values()].map((a) => ({
+      kind: a.kind,
+      version: a.version,
+      capabilities: a.capabilities,
+      modelCatalog: a.modelCatalog,
+      ...(a.authStatus ? { authStatus: a.authStatus } : {}),
+    }));
   }
 
   async refreshAgentModels(kind: string) {
@@ -682,6 +688,7 @@ export class WorkerManager {
           if (sessionFile) this.store.setSessionObservation(args.workerId, sessionFile, lastKnownEntryId);
           this.expectCommandMarker(commandId, args.workerId, sessionFile, lastKnownEntryId);
         },
+        onPromptAccepted: () => this.store.setPromptAccepted(args.workerId, true),
         // §13: approveProject comes from the repo's local config, never from the command.
         approveProject: repo.approved === true ? true : undefined,
         images: args.images,
@@ -1426,6 +1433,7 @@ export class WorkerManager {
         if (sessionFile) this.store.setSessionObservation(workerId, sessionFile, lastKnownEntryId);
         this.expectCommandMarker(commandId, workerId, sessionFile, lastKnownEntryId);
       },
+      onPromptAccepted: () => this.store.setPromptAccepted(workerId, true),
       // §13: approveProject comes from the repo's local config on every spawn — the
       // send-relaunch path included (issue #16 merge stitch).
       approveProject: repo?.approved === true ? true : undefined,
@@ -1865,7 +1873,7 @@ export class WorkerManager {
     // the §9.2 resume path applies (--resume). Without one the start never completed, the
     // same verdict the empty-tail check gives pi.
     if (!worker.sessionFile) {
-      if (worker.sessionId) {
+      if (worker.sessionId && worker.promptAccepted === 1) {
         this.store.setWorkerState(worker.workerId, "lost", "restart");
         await this.emitEvent(worker.workerId, "lost", { reason: "connector_restart" });
         this.scheduleAutoResume(worker.workerId, "connector_restart");
@@ -2059,6 +2067,7 @@ export class WorkerManager {
         if (sessionFile) this.store.setSessionObservation(workerId, sessionFile, lastKnownEntryId);
         this.expectCommandMarker(options.commandId, workerId, sessionFile, lastKnownEntryId);
       },
+      onPromptAccepted: () => this.store.setPromptAccepted(workerId, true),
       // §13: the repo's local trust applies to resumes exactly like first starts.
       approveProject: repo?.approved === true ? true : undefined,
       // The session exists (this is a resume): Claude Code resumes its UUID session
@@ -2241,6 +2250,7 @@ export class WorkerManager {
       prompt: `${original}\n\n${stallContinueNote(why)}`,
       commandId: `stall-respawn-${this.now()}`,
       ...this.workerModelSpec(worker),
+      onPromptAccepted: () => this.store.setPromptAccepted(workerId, true),
       // §13: reproduce the original launch's trust mode — the respawn is the same run.
       approveProject: repo?.approved === true ? true : undefined,
       // Same session as the stalled run (issue #17: Claude Code resumes its UUID).
@@ -2413,6 +2423,7 @@ export class WorkerManager {
         await this.emitEvent(event.workerId, "settled", {
           outcome: event.outcome,
           errorClass: event.errorClass,
+          limitedUntil: event.limitedUntil,
           errorMessage: event.errorMessage,
           lastText: event.lastText,
           usage: event.usage,
@@ -2423,6 +2434,11 @@ export class WorkerManager {
           // §9.2: auth never auto-resumes — the user must fix credentials on the machine, so
           // the connector is done with this worker; the settled event routes it to them.
           this.store.setWorkerState(event.workerId, "broken", "error:auth");
+        } else if (event.outcome === "error" && event.errorClass === "rate_limited") {
+          // Quota / usage-window cooldown: keep the worker idle (never broken, never 30 s
+          // auto-resumed locally) so Steward can park it until limitedUntil and continue.
+          this.store.setWorkerState(event.workerId, "idle", "error:rate_limited");
+          this.armIdleReclaim(event.workerId);
         } else {
           this.store.setWorkerState(event.workerId, "idle", event.outcome);
           // §4.1: the process stays for the idle window (hot idle), then is reclaimed.

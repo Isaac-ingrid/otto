@@ -11,9 +11,11 @@ import {
   AgentModelCatalogSchema,
   type AgentModelCatalog,
   DirectoryListMessageSchema,
+  GitPrDiffMessageSchema,
   PROTOCOL_VERSION,
   reconnectOn,
   RepoSkillOpMessageSchema,
+  RunProbeMessageSchema,
   ulid,
   WorkerCheckpointMessageSchema,
   WorkerDiffMessageSchema,
@@ -21,9 +23,15 @@ import {
   WorktreeCleanupMessageSchema,
   type CmdMessage,
   type DirectoryListingMessage,
+  type GitPrDiffArgs,
+  type GitPrDiffResult,
+  type GitPrDiffResultMessage,
+  type ProbeResult,
+  type ProbeResultMessage,
   type RepoSkillOpArgs,
   type RepoSkillResult,
   type RepoSkillResultMessage,
+  type RunProbeArgs,
   type WelcomeMessage,
   type WorkerCheckpointArgs,
   type WorkerCheckpointResult,
@@ -70,8 +78,15 @@ export interface ClientOptions {
   repoSkillOp?: (op: RepoSkillOpArgs) => Promise<RepoSkillResult>;
   auditWorktrees?: (args: WorktreeAuditArgs) => Promise<WorktreeAuditResult>;
   cleanupWorktrees?: (op: WorktreeCleanupArgs) => Promise<WorktreeCleanupResult>;
+  runProbe?: (args: RunProbeArgs) => Promise<ProbeResult>;
+  gitPrDiff?: (args: GitPrDiffArgs) => Promise<GitPrDiffResult>;
   /** Honest hello snapshot for the non-worker sections (protocol §6.1): agents, repos, limits. */
-  snapshot?: () => { agents: unknown[]; repos: unknown[]; limits: { maxWorkers: number; running: number } };
+  snapshot?: () => {
+    agents: unknown[];
+    repos: unknown[];
+    limits: { maxWorkers: number; running: number };
+    approvedProbes?: string[];
+  };
   /** L3 raw-history loader (connector-pi.md §11.4): when set, `history_req` messages are
    *  answered with windowed `history_chunk` streams; without it they get `error{unsupported}`. */
   loadHistory?: (workerId: string, since: string | undefined, maxBytes: number, format?: "full") => Promise<HistoryPage>;
@@ -121,6 +136,8 @@ export class ConnectorClient {
   private checkpointReads = 0;
   private repoSkillOps = 0;
   private worktreeAuditOps = 0;
+  private probeRuns = 0;
+  private prDiffReads = 0;
   private discoveringModels = false;
   private maxMessageBytes = DEFAULT_MAX_MESSAGE_BYTES;
   /** §6.6 history streams for the current connection; reset whenever the socket dies. */
@@ -210,6 +227,8 @@ export class ConnectorClient {
             workerCheckpoint: Boolean(this.options.checkpointWorker),
             repoSkills: Boolean(this.options.repoSkillOp),
             worktreeAudit: Boolean(this.options.auditWorktrees && this.options.cleanupWorktrees),
+            localProbes: Boolean(this.options.runProbe),
+            gitPrDiff: Boolean(this.options.gitPrDiff),
           },
           machine: {
             name: this.options.machineName ?? os.hostname(),
@@ -219,6 +238,9 @@ export class ConnectorClient {
           agents: this.options.snapshot?.().agents ?? [],
           repos: this.options.snapshot?.().repos ?? [],
           limits: this.options.snapshot?.().limits ?? { maxWorkers: 1, running: 0 },
+          ...(this.options.snapshot?.().approvedProbes?.length
+            ? { approvedProbes: this.options.snapshot()!.approvedProbes }
+            : {}),
           workers: this.options.workersSnapshot?.() ?? [],
           pendingAcks: this.commands.pendingAcks(),
         }),
@@ -435,6 +457,47 @@ export class ConnectorClient {
         }).catch(() => {
           if (this.ws === ws) this.send(ws, { t: "worktree_cleanup_result", re: request.id, ok: false, code: "cleanup_failed" } satisfies WorktreeCleanupResultMessage);
         }).finally(() => { this.worktreeAuditOps--; });
+        return;
+      }
+      case "run_probe": {
+        const parsed = RunProbeMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.runProbe) {
+          this.send(ws, { t: "probe_result", re: request.id, ok: false, code: "unsupported" } satisfies ProbeResultMessage);
+          return;
+        }
+        if (this.probeRuns >= 4) {
+          this.send(ws, { t: "probe_result", re: request.id, ok: false, code: "busy" } satisfies ProbeResultMessage);
+          return;
+        }
+        this.probeRuns++;
+        void this.options.runProbe({ probeName: request.probeName, ...(request.repoId !== undefined ? { repoId: request.repoId } : {}) }).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "probe_result", re: request.id, ...result } satisfies ProbeResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "probe_result", re: request.id, ok: false, code: "probe_failed" } satisfies ProbeResultMessage);
+        }).finally(() => { this.probeRuns--; });
+        return;
+      }
+      case "git_pr_diff": {
+        const parsed = GitPrDiffMessageSchema.safeParse(message);
+        if (!parsed.success) return;
+        const request = parsed.data;
+        if (!this.options.gitPrDiff) {
+          this.send(ws, { t: "git_pr_diff_result", re: request.id, ok: false, code: "unsupported" } satisfies GitPrDiffResultMessage);
+          return;
+        }
+        if (this.prDiffReads >= 4) {
+          this.send(ws, { t: "git_pr_diff_result", re: request.id, ok: false, code: "busy" } satisfies GitPrDiffResultMessage);
+          return;
+        }
+        this.prDiffReads++;
+        const { t: _t, id: _id, ...args } = request;
+        void this.options.gitPrDiff(args).then((result) => {
+          if (this.ws === ws) this.send(ws, { t: "git_pr_diff_result", re: request.id, ...result } satisfies GitPrDiffResultMessage);
+        }).catch(() => {
+          if (this.ws === ws) this.send(ws, { t: "git_pr_diff_result", re: request.id, ok: false, code: "diff_failed" } satisfies GitPrDiffResultMessage);
+        }).finally(() => { this.prDiffReads--; });
         return;
       }
       case "history_req": {

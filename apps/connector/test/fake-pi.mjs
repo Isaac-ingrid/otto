@@ -220,7 +220,11 @@ async function handle(command) {
         appendSessionEntry({ type: "message", message: { role: "user", content: text, timestamp: Date.now() } });
       }
       logPrompt({ commandId, text, cwd: process.cwd(), sessionId, pid: process.pid, at: Date.now() });
-      const run = scenario.runs?.[nextRunIndex()] ?? [];
+      const rawRun = scenario.runs?.[nextRunIndex()];
+      const run = rawRun ?? [
+        { emit: { type: "agent_start" } },
+        { emit: { type: "agent_settled", aborted: false } },
+      ];
       const failure = run.find((step) => typeof step.fail === "string");
       if (failure) {
         // The prompt RPC fails at the pi boundary (a wedged/broken pi): no run plays.

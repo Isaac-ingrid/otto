@@ -16,7 +16,7 @@ import type {
   WorkerLiveTelemetry,
 } from "./agent.ts";
 import { AdapterError, diffCumulativeSessionUsage, PartialInterruptError } from "./agent.ts";
-import { adjudicate, type RunWindow } from "./adjudication.ts";
+import { adjudicate, REWRITE_REPORT_PROMPT, type Adjudication, type RunWindow } from "./adjudication.ts";
 import { normalizeSessionEntries } from "./session-history.ts";
 import { observeSession } from "./session-observation.ts";
 import { installAssets, type InstalledAssets } from "./install.ts";
@@ -59,19 +59,22 @@ export interface PiAdapterOptions {
   /** A pre-resolved launch (pi-launch.ts), for embedders and tests that cannot exercise the
    *  platform's PATH themselves. A resolution carrying `error` is refused rather than spawned. */
   launch?: LaunchResolution;
+  /** Controls the single-pass report-only rewrite when a run finishes cleanly without `report`:
+   *  default `"on_work"` (runs when at least one non-report tool executed), `"always"`, or `false`. */
+  rewriteUnreported?: "on_work" | "always" | false;
 }
 
 /** Env for the agent child (§4.2: "inherit the user's environment; the connector's own
  * credentials are not passed through", issue #27). The connector's state lives under
- * OTTO_* variables (the home setting locates the device-token store), so the whole
- * namespace is stripped; the device token itself never was an env var. */
+ * OTTO_* variables (the home setting locates the device-token store), and CLAUDE_CODE_* /
+ * CLAUDECODE parent harness markers are stripped so nested agent CLI launches never collide. */
 export function childEnv(
   source: Record<string, string | undefined> = process.env,
   extra?: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (key.startsWith("OTTO_")) continue;
+    if (key.startsWith("OTTO_") || key.startsWith("CLAUDE_CODE_") || key === "CLAUDECODE") continue;
     env[key] = value;
   }
   if (extra) Object.assign(env, extra);
@@ -103,6 +106,11 @@ interface WorkerRuntime {
   stopping: boolean;
   turn: number;
   window: RunWindow & { open: boolean };
+  /** At most one forced report-only rewrite is attempted per user turn. */
+  reReportAttempted: boolean;
+  /** True while the forced report-only rewrite pass is in flight; non-report tools abort immediately. */
+  rewritingReport: boolean;
+  savedLastText?: string;
   compactionCount: number;
   activeTools: Map<string, number>;
   lastToolMs: number | null;
@@ -222,6 +230,8 @@ export class PiAdapter implements AgentAdapter {
       stopping: false,
       turn: 0,
       window: { open: false, aborted: false },
+      reReportAttempted: false,
+      rewritingReport: false,
       compactionCount: 0,
       activeTools: new Map(),
       lastToolMs: null,
@@ -284,6 +294,11 @@ export class PiAdapter implements AgentAdapter {
             `is ~/.otto/ext loadable?`,
         );
       }
+      try {
+        spec.onPromptAccepted?.();
+      } catch {
+        // bookkeeping must never fail launch
+      }
       this.pendingResumeSpecs.set(spec.workerId, spec);
       setImmediate(() => this.flushBuffered(runtime));
       return handle;
@@ -310,6 +325,9 @@ export class PiAdapter implements AgentAdapter {
     const runtime = this.require(id);
     const images = input.images?.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType }));
     if (how === "prompt") {
+      runtime.reReportAttempted = false;
+      runtime.rewritingReport = false;
+      runtime.savedLastText = undefined;
       // A prompt-path send goes through the same `/otto` wrapper as the initial prompt,
       // so the commandId marker lands in the session (ADR-0001: ambiguous-command detection).
       const message = input.commandId ? wrapPrompt(input.commandId, input.text) : input.text;
@@ -333,6 +351,8 @@ export class PiAdapter implements AgentAdapter {
    *  PartialInterruptError so the manager can still surface them (R2-3: pi has no copy). */
   async interrupt(id: string): Promise<InterruptResult> {
     const runtime = this.require(id);
+    runtime.rewritingReport = false;
+    runtime.savedLastText = undefined;
     const queue = (await runtime.process.rpc({ type: "clear_queue" })) as {
       steering?: unknown;
       followUp?: unknown;
@@ -349,6 +369,9 @@ export class PiAdapter implements AgentAdapter {
   async resume(id: string, reason: string, options: { commandId?: string } = {}): Promise<void> {
     const runtime = this.runtimes.get(id);
     if (runtime && !runtime.process.hasExited) {
+      runtime.reReportAttempted = false;
+      runtime.rewritingReport = false;
+      runtime.savedLastText = undefined;
       // §6.3: the resume prompt on a live process carries the marker like any other prompt,
       // so a crash mid-`sending` is decidable from the session tail.
       const commandId = options.commandId ?? `resume-${Date.now()}`;
@@ -379,7 +402,7 @@ export class PiAdapter implements AgentAdapter {
 
   isStreaming(id: string): boolean {
     const runtime = this.runtimes.get(id);
-    return !!runtime && !runtime.process.hasExited && runtime.window.open;
+    return !!runtime && !runtime.process.hasExited && (runtime.window.open || runtime.rewritingReport);
   }
 
   /** Live worker pids for the descendant-snapshot loop (connector-pi.md §9.3). */
@@ -475,19 +498,27 @@ export class PiAdapter implements AgentAdapter {
       }
       case "tool_execution_start": {
         const tool = String(record.toolName ?? "unknown");
+        if (runtime.rewritingReport && tool !== "report") {
+          // Guardrail: a report-only rewrite pass must NEVER run file/shell tools.
+          void runtime.process.rpc({ type: "abort" }, 2000).catch(() => undefined);
+          return;
+        }
         const callKey = String(record.toolCallId ?? record.id ?? tool);
         runtime.activeTools.set(callKey, Date.now());
         if (tool === "report") {
           const report = normalizeReport(record.args);
           if (report) runtime.window.report = report;
-        } else if (tool === "propose") {
-          const proposal = normalizeProposal(record.args);
-          if (proposal) {
-            this.emit({
-              type: "proposal",
-              workerId: runtime.workerId,
-              proposal,
-            });
+        } else {
+          runtime.window.hadWork = true;
+          if (tool === "propose") {
+            const proposal = normalizeProposal(record.args);
+            if (proposal) {
+              this.emit({
+                type: "proposal",
+                workerId: runtime.workerId,
+                proposal,
+              });
+            }
           }
         }
         const telemetry = this.snapshotTelemetry(runtime);
@@ -614,10 +645,45 @@ export class PiAdapter implements AgentAdapter {
 
   private async settle(runtime: WorkerRuntime): Promise<void> {
     const facts = runtime.window;
-    const adjudicated = adjudicate(facts);
+    let adjudicated: Adjudication = adjudicate(facts);
     runtime.window = { open: false, aborted: false };
     runtime.turn = 0;
     runtime.activeTools.clear();
+
+    if (runtime.rewritingReport) {
+      const fallbackText = runtime.savedLastText;
+      runtime.rewritingReport = false;
+      runtime.savedLastText = undefined;
+      // If the rewrite pass tripped the non-report tool guardrail (aborted) or still omitted
+      // `report`, fall back cleanly to `unreported` with the original turn's assistant text.
+      if (adjudicated.outcome === "aborted" || adjudicated.outcome === "unreported") {
+        adjudicated = {
+          outcome: "unreported",
+          lastText: fallbackText || adjudicated.lastText,
+        };
+      }
+    } else {
+      const rewriteMode = this.options.rewriteUnreported ?? "on_work";
+      const shouldRewrite =
+        rewriteMode !== false &&
+        adjudicated.outcome === "unreported" &&
+        (rewriteMode === "always" || facts.hadWork === true) &&
+        !runtime.reReportAttempted &&
+        !runtime.stopping &&
+        !runtime.process.hasExited;
+      if (shouldRewrite) {
+        runtime.reReportAttempted = true;
+        runtime.rewritingReport = true;
+        runtime.savedLastText = adjudicated.lastText;
+        try {
+          await runtime.process.rpc({ type: "prompt", message: REWRITE_REPORT_PROMPT }, 5000);
+          return;
+        } catch {
+          runtime.rewritingReport = false;
+          runtime.savedLastText = undefined;
+        }
+      }
+    }
 
     // usage from get_session_stats at settlement (§11.2).
     let usage: SessionUsage | undefined;
@@ -635,6 +701,7 @@ export class PiAdapter implements AgentAdapter {
       workerId: runtime.workerId,
       outcome: adjudicated.outcome,
       errorClass: adjudicated.errorClass,
+      limitedUntil: adjudicated.limitedUntil,
       errorMessage: adjudicated.errorMessage,
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,

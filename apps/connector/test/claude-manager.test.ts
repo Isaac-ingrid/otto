@@ -214,16 +214,23 @@ describe("capability degradation at the manager (§3, issue #17 AC)", () => {
     expect(promptRecords[1]!.argv).toEqual(expect.arrayContaining(["--resume", expectedUuid, "--model", "sonnet[1m]"]));
     expect(promptRecords[2]!.argv).toEqual(expect.arrayContaining(["--resume", expectedUuid, "--model", "sonnet[1m]"]));
   });
-  it("refuses readonly tasks and images for an agent that honestly cannot do them", async () => {
-    setup([], []);
-    await expect(
-      manager.handleCommand("c3", "start_worker", { ...args(), mode: "readonly" }, undefined),
-    ).rejects.toMatchObject({ code: "unsupported_capability" });
+  it("runs readonly tasks in plan mode without permission bypass, and still refuses images", async () => {
+    setup([], [[...claudeReportRun({ status: "done", summary: "readonly plan ok" })]]);
+    await manager.handleCommand("c3", "start_worker", { ...args(), mode: "readonly" }, undefined);
+    await waitFor(() => eventsOf("w-claude-m1", "settled").length > 0, 15_000, "readonly claude settle");
+    const readonlyArgv = readFileSync(CLAUDE_PROMPT_LOG(), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { argv: string[] })[0]!.argv;
+    expect(readonlyArgv).toContain("--permission-mode");
+    expect(readonlyArgv).toContain("plan");
+    expect(readonlyArgv).not.toContain("--dangerously-skip-permissions");
+
     await expect(
       manager.handleCommand(
         "c4",
         "start_worker",
-        { ...args(), images: [{ data: "aGk=", mimeType: "image/png" }] },
+        { ...args({ workerId: "w-claude-m2" }), images: [{ data: "aGk=", mimeType: "image/png" }] },
         undefined,
       ),
     ).rejects.toMatchObject({ code: "unsupported_capability" });

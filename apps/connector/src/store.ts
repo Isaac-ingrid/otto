@@ -114,6 +114,7 @@ export class LocalStore {
     // Issue #15, §6.3/§10: crash-window evidence — the command's recovery context and the
     // session-entry watermark a pre-launch comparison starts from.
     this.addColumnIfMissing("worker", "lastKnownEntryId", "TEXT");
+    this.addColumnIfMissing("worker", "promptAccepted", "INTEGER NOT NULL DEFAULT 0");
     for (const column of ["workerId", "kind", "sessionFile", "afterEntryId"]) {
       this.addColumnIfMissing("command", column, "TEXT");
     }
@@ -282,6 +283,98 @@ export class LocalStore {
 
   clearAntigravityApiKeyConfig(): void {
     this.db.prepare("DELETE FROM config WHERE key = 'antigravity_api_key'").run();
+  }
+
+  /** Machine-local allowlist for `CommandAdapter` (`dsh`, `zcode`, `command`). Never mutable
+   *  via Steward wire commands (ADR-0022). */
+  getCommandAdaptersConfig(): Partial<Record<import("./command-adapter.ts").CommandAgentKind, import("./command-adapter.ts").StoredCommandAdapterConfig>> {
+    const row = this.db.prepare("SELECT value FROM config WHERE key = 'command_adapters'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) return {};
+    try {
+      const parsed = JSON.parse(row.value);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+      return parsed as Partial<Record<import("./command-adapter.ts").CommandAgentKind, import("./command-adapter.ts").StoredCommandAdapterConfig>>;
+    } catch {
+      return {};
+    }
+  }
+
+  setCommandAdapterConfig(
+    kind: import("./command-adapter.ts").CommandAgentKind,
+    config: import("./command-adapter.ts").StoredCommandAdapterConfig | null,
+  ): void {
+    const current = this.getCommandAdaptersConfig();
+    if (config === null) {
+      delete current[kind];
+    } else {
+      current[kind] = config;
+    }
+    if (Object.keys(current).length === 0) {
+      this.db.prepare("DELETE FROM config WHERE key = 'command_adapters'").run();
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO config (key, value) VALUES ('command_adapters', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(JSON.stringify(current));
+  }
+
+  /** Stage 3 local-only probes (`~/.otto/probes/<script>`), keyed by `probeName`. */
+  getProbesConfig(): Record<string, import("./probes.ts").StoredProbeConfig> {
+    const row = this.db.prepare("SELECT value FROM config WHERE key = 'local_probes'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) return {};
+    try {
+      const parsed = JSON.parse(row.value);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+      return parsed as Record<string, import("./probes.ts").StoredProbeConfig>;
+    } catch {
+      return {};
+    }
+  }
+
+  getProbeConfig(probeName: string): import("./probes.ts").StoredProbeConfig | null {
+    const all = this.getProbesConfig();
+    return Object.hasOwn(all, probeName) ? (all[probeName] ?? null) : null;
+  }
+
+  setProbeConfig(probeName: string, config: import("./probes.ts").StoredProbeConfig | null): void {
+    const all = this.getProbesConfig();
+    if (config === null) delete all[probeName];
+    else all[probeName] = config;
+    if (Object.keys(all).length === 0) {
+      this.db.prepare("DELETE FROM config WHERE key = 'local_probes'").run();
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO config (key, value) VALUES ('local_probes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(JSON.stringify(all));
+  }
+
+  /** Stage 5 machine-local desktop notifications toggle (CLI-only). */
+  getDesktopNotifyEnabled(): boolean {
+    const row = this.db.prepare("SELECT value FROM config WHERE key = 'desktop_notify'").get() as
+      | { value: string }
+      | undefined;
+    return row?.value === "1" || row?.value === "true";
+  }
+
+  setDesktopNotifyEnabled(enabled: boolean): void {
+    if (!enabled) {
+      this.db.prepare("DELETE FROM config WHERE key = 'desktop_notify'").run();
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO config (key, value) VALUES ('desktop_notify', '1') ON CONFLICT(key) DO UPDATE SET value = '1'",
+      )
+      .run();
   }
 
   close(): void {
@@ -458,11 +551,17 @@ export class LocalStore {
     return (
       (this.db
         .prepare(
-          `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource, launchObservedModel, lastObservedModel
+          `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, promptAccepted, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource, launchObservedModel, lastObservedModel
            FROM worker WHERE workerId = ?`,
         )
         .get(workerId) as WorkerRow | undefined) ?? null
     );
+  }
+
+  setPromptAccepted(workerId: string, accepted = true): void {
+    this.db
+      .prepare("UPDATE worker SET promptAccepted = ?, updatedAt = ? WHERE workerId = ?")
+      .run(accepted ? 1 : 0, Date.now(), workerId);
   }
 
   setModelObservation(workerId: string, observation: AgentModelObservation, initialLaunch = false): void {
@@ -487,7 +586,7 @@ export class LocalStore {
     // Creation order (workerId as tiebreak): the serial write queue drains FIFO on it.
     return this.db
       .prepare(
-        `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource, launchObservedModel, lastObservedModel
+        `SELECT workerId, threadId, repoId, mode, state, sessionId, sessionFile, lastKnownEntryId, promptAccepted, branch, worktree, base, worktreeCleanedAt, agent, lastOutcome, createdAt, updatedAt, requestedModel, modelSource, launchObservedModel, lastObservedModel
          FROM worker ORDER BY createdAt, workerId`,
       )
       .all() as unknown as WorkerRow[];
@@ -646,6 +745,8 @@ export interface WorkerRow {
   sessionFile?: string | null;
   /** §10: the last session entry id the connector saw (pre-launch external-change baseline). */
   lastKnownEntryId?: string | null;
+  /** 1 once at least one prompt was accepted by the underlying CLI/RPC for this workerId. */
+  promptAccepted?: number;
   branch?: string | null;
   worktree?: string | null;
   /** The commit-ish the worktree branch started from (§8.2); git-facts input after a restart. */

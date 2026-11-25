@@ -297,7 +297,8 @@ describe("CodexAdapter invocation and capabilities", () => {
     await adapter.start(spec());
     await waitFor(() => settledOf()[0], 10_000, "error settle");
     expect(settledOf()[0]!.outcome).toBe("error");
-    expect(settledOf()[0]!.errorClass).toBe("auth");
+    expect(settledOf()[0]!.errorClass).toBe("rate_limited");
+    expect(typeof (settledOf()[0] as unknown as { limitedUntil?: number }).limitedUntil).toBe("number");
     expect(settledOf()[0]!.errorMessage).toContain("usage limit");
   });
 

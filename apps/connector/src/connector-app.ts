@@ -21,6 +21,25 @@ import { PiAdapter } from "./pi-adapter.ts";
 import { ClaudeAdapter, claudeCommandFromEnv, detectClaude } from "./claude-adapter.ts";
 import { CodexAdapter, codexCommandFromEnv, detectCodex } from "./codex-adapter.ts";
 import { AntigravityAdapter, agyCommandFromEnv, detectAntigravity } from "./antigravity-adapter.ts";
+import {
+  AcpAdapter,
+  agenticaCommandFromEnv,
+  detectAgentica,
+  detectOpenCode,
+  opencodeCommandFromEnv,
+} from "./acp-adapter.ts";
+import {
+  CommandAdapter,
+  detectCommandBinary,
+  dshCommandFromEnv,
+  presetFromStoredConfig,
+  zcodeCommandFromEnv,
+  type CommandAgentKind,
+  type StoredCommandAdapterConfig,
+} from "./command-adapter.ts";
+import { runApprovedProbe, verifyProbeApproval } from "./probes.ts";
+import { collectZeroCheckoutPrDiff } from "./pr-diff.ts";
+import { sendDesktopNotification, type DesktopExecFn } from "./desktop-notify.ts";
 import { VERSION } from "./version.ts";
 import type { PrExec } from "./pr.ts";
 
@@ -51,6 +70,8 @@ export interface ConnectorAppOptions {
   watchdog?: StallWatchdogOptions;
   /** pr_worker knobs (issue #21): the exec seam scripts gh/git in tests. */
   pr?: { exec?: PrExec; timeoutMs?: number };
+  /** Stage 5 desktop notification override for tests. */
+  desktopNotifyExec?: DesktopExecFn;
   /** Coarse lifecycle logging (daemon): event names and ids only, never session content. */
   log?: (event: string, fields?: Record<string, unknown>) => void;
   /** Connection lifecycle hooks, forwarded to the client (the daemon logs these). */
@@ -63,23 +84,39 @@ export function maxWorkersFromMemory(): number {
   return Math.min(8, Math.max(1, Math.floor(0.5 * (os.totalmem() / 1_000_000) / 250)));
 }
 
-/** Issue #17: the connector's default agent set — pi always, plus Claude Code, Codex, and
- *  Antigravity CLI when their binaries are installed on the machine. */
+/** Issue #17 + Stage 2: the connector's default agent set — pi always, plus installed external
+ *  CLIs (`claude-code`, `codex`, `antigravity`, `opencode`, `agentica`) and locally allowlisted
+ *  `CommandAdapter` presets (`dsh`, `zcode`, `command`). */
 export function defaultAdapters(
   stateDir: string,
   claudeCommand: string[] = claudeCommandFromEnv() ?? ["claude"],
   agyCommand: string[] = agyCommandFromEnv() ?? ["agy"],
   agyApiKeyConfig?: AntigravityApiKeyConfig | null,
-  codexCommand: string[] = codexCommandFromEnv() ?? ["codex"],
+  codexCommand?: string[],
+  commandConfigs?: Partial<Record<CommandAgentKind, StoredCommandAdapterConfig>>,
 ): AgentAdapter[] {
   const adapters: AgentAdapter[] = [new PiAdapter({ stateDir })];
   const claude = detectClaude(claudeCommand);
   if (claude.installed) {
-    adapters.push(new ClaudeAdapter({ stateDir, command: claudeCommand, version: claude.version }));
+    adapters.push(
+      new ClaudeAdapter({
+        stateDir,
+        command: claudeCommand,
+        version: claude.version,
+        ...(claude.authStatus ? { authStatus: claude.authStatus } : {}),
+      }),
+    );
   }
   const codex = detectCodex(codexCommand);
   if (codex.installed) {
-    adapters.push(new CodexAdapter({ stateDir, command: codexCommand, version: codex.version }));
+    adapters.push(
+      new CodexAdapter({
+        stateDir,
+        ...(codexCommand ? { command: codexCommand } : {}),
+        version: codex.version,
+        ...(codex.authStatus ? { authStatus: codex.authStatus } : {}),
+      }),
+    );
   }
   const agy = detectAntigravity(agyCommand);
   if (agy.installed) {
@@ -89,6 +126,54 @@ export function defaultAdapters(
         command: agyCommand,
         version: agy.version,
         ...(agyApiKeyConfig ? { apiKeyConfig: agyApiKeyConfig } : {}),
+      }),
+    );
+  }
+  const opencodeCmd = opencodeCommandFromEnv() ?? ["opencode"];
+  const opencode = detectOpenCode(opencodeCmd);
+  if (opencode.installed) {
+    adapters.push(
+      new AcpAdapter({
+        kind: "opencode",
+        stateDir,
+        command: opencodeCmd,
+        version: opencode.version,
+        ...(opencode.authStatus ? { authStatus: opencode.authStatus } : {}),
+      }),
+    );
+  }
+  const agenticaCmd = agenticaCommandFromEnv() ?? ["agentica"];
+  const agentica = detectAgentica(agenticaCmd);
+  if (agentica.installed) {
+    adapters.push(
+      new AcpAdapter({
+        kind: "agentica",
+        stateDir,
+        command: agenticaCmd,
+        version: agentica.version,
+        ...(agentica.authStatus ? { authStatus: agentica.authStatus } : {}),
+      }),
+    );
+  }
+
+  const dshEnv = dshCommandFromEnv();
+  const zcodeEnv = zcodeCommandFromEnv();
+  const effectiveCommands: Partial<Record<CommandAgentKind, StoredCommandAdapterConfig>> = {
+    ...(dshEnv ? { dsh: { enabled: true, command: dshEnv } } : {}),
+    ...(zcodeEnv ? { zcode: { enabled: true, command: zcodeEnv } } : {}),
+    ...(commandConfigs ?? {}),
+  };
+  for (const kind of ["dsh", "zcode", "command"] as const) {
+    const entry = effectiveCommands[kind];
+    if (!entry || !entry.enabled || !Array.isArray(entry.command) || entry.command.length === 0) continue;
+    const detected = detectCommandBinary(entry.command);
+    if (!detected.installed) continue;
+    adapters.push(
+      new CommandAdapter({
+        stateDir,
+        preset: presetFromStoredConfig(kind, entry),
+        version: detected.version,
+        ...(detected.authStatus ? { authStatus: detected.authStatus } : {}),
       }),
     );
   }
@@ -120,6 +205,7 @@ export class ConnectorApp {
             options.agyCommand,
             options.agyApiKeyConfig ?? options.store.getAntigravityApiKeyConfig(),
             options.codexCommand,
+            options.store.getCommandAdaptersConfig(),
           ));
     this.manager = new WorkerManager({
       store: options.store,
@@ -141,6 +227,7 @@ export class ConnectorApp {
       emit: (workerId, fields) => {
         this.log?.("worker_event", { workerId, type: fields.type });
         this.client.emit(workerId, fields);
+        this.maybeNotifyDesktop(workerId, fields, options.desktopNotifyExec);
       },
       onExpectMarker: (cmdId, meta) => this.commandLog.expectMarker(cmdId, meta),
     });
@@ -173,6 +260,34 @@ export class ConnectorApp {
       cleanupWorktrees: (op) => {
         this.log?.("worktree_cleanup_requested", { targetCount: op.targets.length, pruneCount: op.pruneRepoIds?.length ?? 0 });
         return this.manager.cleanupWorktrees(op);
+      },
+      runProbe: async (args) => {
+        this.log?.("probe_requested", { probeName: args.probeName, repoId: args.repoId ?? null });
+        let cwd: string | undefined;
+        if (args.repoId) {
+          const repo = this.store.getRepo(args.repoId);
+          if (!repo) return { ok: false, code: "not_registered_repo", message: `repo ${args.repoId} is not registered` };
+          cwd = repo.path;
+        }
+        const cfg = this.store.getProbeConfig(args.probeName);
+        return runApprovedProbe({
+          stateDir: this.stateDir,
+          config: cfg,
+          cwd,
+          proxy: this.store.getProxyConfig(),
+        });
+      },
+      gitPrDiff: async (args) => {
+        this.log?.("git_pr_diff_requested", { repoId: args.repoId, prNumber: args.prNumber ?? null });
+        const repo = this.store.getRepo(args.repoId);
+        if (!repo) return { ok: false, code: "not_registered_repo", message: `repo ${args.repoId} is not registered` };
+        if (repo.capability.kind !== "git") return { ok: false, code: "not_git_repo", message: `repo ${repo.name} is not a git repository` };
+        return collectZeroCheckoutPrDiff({
+          repoPath: repo.path,
+          defaultBranch: repo.capability.defaultBranch,
+          args,
+          proxy: this.store.getProxyConfig(),
+        });
       },
       // L3 raw-history reads (§11.4): live get_entries while the process runs, the session
       // JSONL along the current branch otherwise. Logged at lifecycle level only — the
@@ -266,15 +381,42 @@ export class ConnectorApp {
     }));
   }
 
-  /** Honest hello snapshot (protocol §6.1): agents, repos, limits. */
+  private maybeNotifyDesktop(workerId: string, fields: Record<string, unknown>, execOverride?: DesktopExecFn): void {
+    if (!this.store.getDesktopNotifyEnabled()) return;
+    const type = String(fields.type ?? "");
+    if (type === "report") {
+      const status = String(fields.status ?? "done");
+      const summary = typeof fields.summary === "string" ? fields.summary : "Worker report";
+      const title =
+        status === "done" ? "Otto · 任务已完成" : status === "needs_decision" ? "Otto · 需要你拍板" : "Otto · 任务受阻";
+      void sendDesktopNotification({ title, body: summary, ...(execOverride ? { exec: execOverride } : {}) });
+    } else if (type === "settled" && fields.outcome === "error") {
+      const errClass = typeof fields.errorClass === "string" ? fields.errorClass : "error";
+      const msg = typeof fields.errorMessage === "string" ? fields.errorMessage : `Worker ${workerId} settled with ${errClass}`;
+      void sendDesktopNotification({
+        title: errClass === "rate_limited" ? "Otto · 额度冷却挂起" : "Otto · 运行出错",
+        body: msg,
+        ...(execOverride ? { exec: execOverride } : {}),
+      });
+    }
+  }
+
+  /** Honest hello snapshot (protocol §6.1): agents, repos, limits, and approved probe names. */
   private snapshot() {
     const workers = this.store.listWorkers();
+    const probesCfg = this.store.getProbesConfig();
+    const approvedProbes = Object.values(probesCfg)
+      .filter((cfg) => verifyProbeApproval(this.stateDir, cfg).approved)
+      .map((cfg) => cfg.probeName)
+      .sort()
+      .slice(0, 64);
     return {
       agents: this.manager.agents.map((a) => ({
         kind: a.kind,
         version: a.version ?? VERSION,
         capabilities: a.capabilities,
         ...(a.modelCatalog ? { modelCatalog: a.modelCatalog } : {}),
+        ...(a.authStatus ? { authStatus: a.authStatus } : {}),
       })),
       repos: this.store.listRepos().map((r) => {
         const hookSummary = repoHookCapabilitySummary(r, this.stateDir);
@@ -299,6 +441,7 @@ export class ConnectorApp {
         maxWorkers: maxWorkersFromMemory(),
         running: workers.filter((w) => w.state === "running" || w.state === "starting").length,
       },
+      ...(approvedProbes.length > 0 ? { approvedProbes } : {}),
     };
   }
 }

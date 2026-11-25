@@ -83,6 +83,14 @@ import {
   normalizeHookScriptInput,
   verifyRepoHooks,
 } from "./hooks.ts";
+import {
+  computeProbeApprovalDigest,
+  normalizeProbeScriptInput,
+  ProbeConfigError,
+  probesRootDir,
+  verifyProbeApproval,
+} from "./probes.ts";
+import { sendDesktopNotification } from "./desktop-notify.ts";
 import { launchCheck, PI_COMMAND_ENV, piCommandFromEnv, resolveExecutableLaunch } from "./pi-launch.ts";
 import { LocalStore, type Credentials } from "./store.ts";
 import { identifyWorkspace } from "./worktree.ts";
@@ -134,6 +142,10 @@ usage:
   otto repo-config <path> [options]           per-repo local settings (write isolation,
                                                   concurrency, project trust, worktree hooks);
                                                   never settable remotely
+  otto probe [list | approve <name> [--script <file>] | clear <name>]
+                                          manage local SHA-256-approved zero-token probes
+                                          under ~/.otto/probes/ (never settable remotely)
+  otto notify [on | off | test | status]      toggle or test local OS desktop notifications
   otto daemon [--supervise]                   internal: run the connector daemon; --supervise
                                                   keeps a crashed daemon coming back (backoff,
                                                   output appended to logs/supervisor.log)
@@ -240,6 +252,10 @@ async function main(argv: string[]): Promise<void> {
       return upgradeCommand(rest);
     case "repo-config":
       return repoConfig(rest);
+    case "probe":
+      return probeCommand(rest);
+    case "notify":
+      return notifyCommand(rest);
     case "daemon":
       return daemonCommand(rest);
     default:
@@ -1318,6 +1334,104 @@ async function repoConfig(argv: string[]): Promise<void> {
     store.close();
   }
   await noteServiceRestart();
+}
+
+// --- probe / notify (Agent Autoloop Stage 3 & Stage 5 local-only CLI controls) ---------------
+
+async function probeCommand(argv: string[]): Promise<void> {
+  const dir = stateDir();
+  const sub = argv[0] ?? "list";
+  const store = new LocalStore(join(dir, "connector.sqlite"));
+  try {
+    if (sub === "list") {
+      const all = store.getProbesConfig();
+      const names = Object.keys(all).sort();
+      if (names.length === 0) {
+        console.log(`probes: none configured (place executable scripts in ${probesRootDir(dir)} and run \`otto probe approve <name>\`)`);
+        return;
+      }
+      for (const name of names) {
+        const entry = all[name]!;
+        const check = verifyProbeApproval(dir, entry);
+        const status = check.approved ? `approved sha256:${check.sha256?.slice(0, 12)}` : `NOT approved (${check.reason ?? "modified"})`;
+        console.log(`${name}: script=${entry.script} (${status})`);
+      }
+      return;
+    }
+    if (sub === "approve") {
+      const { present: scriptPresent, value: scriptFlag, rest } = takeFlag(argv.slice(1), "--script");
+      const name = rest[0];
+      if (!name || !/^[A-Za-z0-9._-]{1,80}$/.test(name)) {
+        fail("usage: otto probe approve <probe-name> [--script <filename-in-probes-dir>]");
+      }
+      if (scriptPresent && !scriptFlag) fail("--script needs a filename under ~/.otto/probes/");
+      const scriptInput = scriptFlag ?? `${name}.mjs`;
+      try {
+        const normalized = normalizeProbeScriptInput(dir, scriptInput);
+        const digest = computeProbeApprovalDigest(dir, name, normalized.canonicalScript);
+        if (!digest.ok || !digest.sha256) fail(`cannot approve probe '${name}': ${!digest.ok ? digest.reason : "unreadable"}`);
+        store.setProbeConfig(name, {
+          probeName: name,
+          script: normalized.canonicalScript,
+          approvedSha256: digest.sha256,
+          approvedAt: Date.now(),
+        });
+        console.log(`probe '${name}' approved: script=${normalized.canonicalScript} sha256=${digest.sha256.slice(0, 12)}`);
+      } catch (err) {
+        if (err instanceof ProbeConfigError) fail(err.message);
+        throw err;
+      }
+      await noteServiceRestart();
+      return;
+    }
+    if (sub === "clear") {
+      const name = argv[1];
+      if (!name) fail("usage: otto probe clear <probe-name>");
+      store.setProbeConfig(name, null);
+      console.log(`probe '${name}' cleared`);
+      await noteServiceRestart();
+      return;
+    }
+    usage();
+  } finally {
+    store.close();
+  }
+}
+
+async function notifyCommand(argv: string[]): Promise<void> {
+  const dir = stateDir();
+  const sub = argv[0] ?? "status";
+  const store = new LocalStore(join(dir, "connector.sqlite"));
+  try {
+    if (sub === "status") {
+      const enabled = store.getDesktopNotifyEnabled();
+      console.log(`desktop_notify: ${enabled ? "enabled" : "disabled"}`);
+      return;
+    }
+    if (sub === "on" || sub === "enable") {
+      store.setDesktopNotifyEnabled(true);
+      console.log("desktop_notify: enabled");
+      await noteServiceRestart();
+      return;
+    }
+    if (sub === "off" || sub === "disable") {
+      store.setDesktopNotifyEnabled(false);
+      console.log("desktop_notify: disabled");
+      await noteServiceRestart();
+      return;
+    }
+    if (sub === "test") {
+      const res = await sendDesktopNotification({
+        title: "Otto 桌面通知测试",
+        body: "本地系统通知通道正常（零外部依赖）。",
+      });
+      console.log(`desktop_notify test: ${res.sent ? "sent" : `skipped (${res.reason ?? "unknown"})`}`);
+      return;
+    }
+    usage();
+  } finally {
+    store.close();
+  }
 }
 
 main(process.argv.slice(2)).catch((err) => {

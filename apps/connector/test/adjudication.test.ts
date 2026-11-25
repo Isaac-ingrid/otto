@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { adjudicate, classifyError } from "../src/adjudication.ts";
+import {
+  adjudicate,
+  classifyError,
+  DEFAULT_USAGE_LIMIT_COOLDOWN_MS,
+  extractRateLimitResetAt,
+  MAX_COOLDOWN_WINDOW_MS,
+  normalizeLimitedUntil,
+} from "../src/adjudication.ts";
 
 const report = { status: "done" as const, summary: "fixed" };
 
@@ -31,21 +38,66 @@ describe("adjudicate (connector-pi.md §5.2 order)", () => {
     expect(result).toEqual({ outcome: "error", errorClass: "transient", errorMessage: "529 overloaded" });
   });
 
-  it("2c. the agent's own error text rides the settled event (the class alone is undiagnosable)", () => {
-    const result = adjudicate({
-      aborted: false,
-      lastAssistant: {
-        stopReason: "error",
-        errorMessage: "Codex error: The usage limit has been reached",
-        text: "",
+  it("2c. usage-window exhaustion settles error:rate_limited with +1h fallback when no timestamp is given", () => {
+    const nowMs = Date.parse("2026-11-24T12:00:00Z");
+    const result = adjudicate(
+      {
+        aborted: false,
+        lastAssistant: {
+          stopReason: "error",
+          errorMessage: "Codex error: The usage limit has been reached",
+          text: "",
+        },
       },
+      nowMs,
+    );
+    expect(result).toEqual({
+      outcome: "error",
+      errorClass: "rate_limited",
+      limitedUntil: nowMs + DEFAULT_USAGE_LIMIT_COOLDOWN_MS,
+      errorMessage: "Codex error: The usage limit has been reached",
     });
-    expect(result.outcome).toBe("error");
-    expect(result.errorMessage).toBe("Codex error: The usage limit has been reached");
     // No message at all (a silent stop) must not invent one.
-    expect(adjudicate({ aborted: false, lastAssistant: { stopReason: "error", text: "" } })).toEqual({
+    expect(adjudicate({ aborted: false, lastAssistant: { stopReason: "error", text: "" } }, nowMs)).toEqual({
       outcome: "error",
       errorClass: "unknown",
+    });
+  });
+
+  it("2d. honors structured rateLimitResetAt within 8 days and falls back to ordinary error when > 8 days or past", () => {
+    const nowMs = Date.parse("2026-11-24T12:00:00Z");
+    const twoHoursSec = Math.floor((nowMs + 2 * 3_600_000) / 1000);
+    expect(
+      adjudicate(
+        {
+          aborted: false,
+          rateLimitResetAt: twoHoursSec,
+          lastAssistant: { stopReason: "error", errorMessage: "Claude usage limit reached", text: "" },
+        },
+        nowMs,
+      ),
+    ).toEqual({
+      outcome: "error",
+      errorClass: "rate_limited",
+      limitedUntil: twoHoursSec * 1000,
+      errorMessage: "Claude usage limit reached",
+    });
+
+    // > 8 days ahead: protocol guard rejects distant timestamp and falls back to ordinary error.
+    const tenDaysMs = nowMs + 10 * 86_400_000;
+    expect(
+      adjudicate(
+        {
+          aborted: false,
+          rateLimitResetAt: tenDaysMs,
+          lastAssistant: { stopReason: "error", errorMessage: "Claude usage limit reached", text: "" },
+        },
+        nowMs,
+      ),
+    ).toEqual({
+      outcome: "error",
+      errorClass: "unknown",
+      errorMessage: "Claude usage limit reached",
     });
   });
 
@@ -67,7 +119,9 @@ describe("adjudicate (connector-pi.md §5.2 order)", () => {
   });
 });
 
-describe("classifyError (§5.2 item 2)", () => {
+describe("classifyError & extractRateLimitResetAt (§5.2 + Stage 1 cooldown)", () => {
+  const nowMs = Date.parse("2026-11-24T12:00:00Z");
+
   it.each([
     ["401 Unauthorized", "auth"],
     ["403 forbidden", "auth"],
@@ -79,8 +133,12 @@ describe("classifyError (§5.2 item 2)", () => {
     ["request timed out", "transient"],
     ["context length exceeded", "context"],
     ["maximum context length is 128000 tokens", "context"],
-    // Quota is an auth-class stop: no retry can succeed, the fix is on that machine.
-    ["Codex error: The usage limit has been reached", "auth"],
+    // Subscription / Coding Plan rolling window exhaustion → rate_limited cooldown:
+    ["Codex error: The usage limit has been reached", "rate_limited"],
+    ["usage_limit_reached: Coding Plan 5-hour limit reached", "rate_limited"],
+    ["429 rate_limit_error: resets at 2026-11-24T15:30:00Z", "rate_limited"],
+    ["Rate limit reached, try again in 45m", "rate_limited"],
+    // Hard prepaid/billing stops stay auth:
     ["You exceeded your current quota, please check your plan and billing details", "auth"],
     ["Your credit balance is too low to access the API", "auth"],
     ["insufficient quota", "auth"],
@@ -88,6 +146,20 @@ describe("classifyError (§5.2 item 2)", () => {
     ['404: {"message":"模型不存在","code":"model_not_found"}', 'unknown'],
     ["something odd happened", "unknown"],
   ])("%s → %s", (message, expected) => {
-    expect(classifyError(message)).toBe(expected);
+    expect(classifyError(message, { nowMs })).toBe(expected);
+  });
+
+  it("extracts ISO, epoch-seconds, and relative reset timestamps within the 8-day ceiling", () => {
+    expect(extractRateLimitResetAt("resets at 2026-11-24T15:30:00Z", nowMs)).toBe(
+      Date.parse("2026-11-24T15:30:00Z"),
+    );
+    expect(extractRateLimitResetAt("try again in 2h 15m", nowMs)).toBe(
+      nowMs + (2 * 60 + 15) * 60_000,
+    );
+    expect(normalizeLimitedUntil(nowMs + MAX_COOLDOWN_WINDOW_MS, nowMs)).toBe(
+      nowMs + MAX_COOLDOWN_WINDOW_MS,
+    );
+    expect(normalizeLimitedUntil(nowMs + MAX_COOLDOWN_WINDOW_MS + 1, nowMs)).toBeUndefined();
+    expect(normalizeLimitedUntil(nowMs, nowMs)).toBeUndefined();
   });
 });
