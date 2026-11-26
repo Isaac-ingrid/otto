@@ -113,7 +113,9 @@ describe("ACP handshake, systemPrompt negotiation, and MCP report server", () =>
           { text: "All done." },
         ],
       ]);
-      const handle = await adapter.start(spec());
+      let promptAccepted = 0;
+      const handle = await adapter.start(spec({ onPromptAccepted: () => { promptAccepted += 1; } }));
+      expect(promptAccepted).toBe(1);
       await waitFor(() => settledOf()[0], 10_000, "settle");
 
       expect(handle.sessionId).toBe("agy-sess-1");

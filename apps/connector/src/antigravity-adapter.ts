@@ -523,6 +523,11 @@ export class AntigravityAdapter implements AgentAdapter {
       const includeFallbackSystemPrompt = !runtime.systemPromptSupported && !spec.resumeSessionId;
       const promptBlocks = buildPromptBlocks(spec.prompt, spec.images, includeFallbackSystemPrompt);
       this.beginPromptTurn(runtime, promptBlocks);
+      try {
+        spec.onPromptAccepted?.();
+      } catch {
+        // bookkeeping must never abort a launch
+      }
 
       const handle: WorkerHandle = { workerId: spec.workerId, sessionId, cwd: spec.cwd };
       setImmediate(() => this.flushBuffered(runtime));
@@ -1243,6 +1248,7 @@ export class AntigravityAdapter implements AgentAdapter {
       workerId: runtime.workerId,
       outcome: adjudicated.outcome,
       errorClass: adjudicated.errorClass,
+      limitedUntil: adjudicated.limitedUntil,
       errorMessage: adjudicated.errorMessage,
       lastText: adjudicated.lastText?.slice(0, 4000),
       report: adjudicated.report,
