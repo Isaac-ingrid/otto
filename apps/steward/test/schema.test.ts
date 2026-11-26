@@ -438,4 +438,26 @@ describe("migration 010 (routing, issue #7)", () => {
       expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
     });
   });
+
+  it("050–053_agent_autoloop: tolerates out-of-order 011 deferral and ensures probe columns exist once 011 lands", async () => {
+    const id = env.Steward.idFromName(`test-migrations-${crypto.randomUUID()}`);
+    const stub = env.Steward.get(id);
+    await runInDurableObject(stub, async (instance: Steward) => {
+      const sql = (instance as unknown as { sql: SqlExecutor }).sql.bind(instance);
+      const tx = <T>(fn: () => T): T =>
+        (instance as unknown as { ctx: DurableObjectState }).ctx.storage.transactionSync(fn);
+
+      expect(() => runMigrations(sql, MIGRATIONS.filter((m) => m.id !== "011_routines_followups"), tx)).not.toThrow();
+      expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
+
+      const routineCols = new Set(
+        sql<{ name: string }>`SELECT name FROM pragma_table_info('sh_routine')`.map((r) => r.name),
+      );
+      expect(routineCols.has("probeName")).toBe(true);
+      expect(routineCols.has("deviceId")).toBe(true);
+      expect(routineCols.has("pausedUntil")).toBe(true);
+      expect(() => runMigrations(sql, MIGRATIONS, tx)).not.toThrow();
+    });
+  });
 });
+
