@@ -31,7 +31,13 @@ curl -X POST https://otto.example.com/api/pairing     -H "$KEY"   # → run this
 curl -X POST https://otto.example.com/api/login-link  -H "$KEY"   # → one-time web login URL
 ```
 
-Follow-up work continues relay-style (spec §5.3): the same agent on the same machine **resumes the previous session**, while a machine/agent switch, a bloated context (≥ 80%), or your explicit ask for a fresh perspective starts a **new session on the previous worker's branch**, prefixed with a deterministic handoff brief. You can also reach a worker mid-run — 「改用 pnpm」 goes out as a steer, 「停下那个」 aborts, and stopping only ever follows your explicit instruction.
+Follow-up work continues relay-style (spec §5.3): the same agent on the same machine **resumes the previous session**, while a machine/agent switch, a bloated context (≥ 80%), or your explicit ask for a fresh perspective starts a **new session on the previous worker's branch**, prefixed with a deterministic handoff brief. You can also reach a worker mid-run — 「改用 pnpm」 goes out as a steer (where supported), 「停下那个」 aborts, and stopping only ever follows your explicit instruction. Across event-driven and follow-up wakes, `autoHops` caps unattended chains at 8 hops (`MAX_AUTO_HOPS = 8`) until you send a message or tap a card.
+
+Additional `SERVER_KEY`-authenticated Owner API endpoints:
+
+- `GET | POST /api/pr-watches` — list, create, or cancel read-only GitHub PR watches (see [pr-watches.md](pr-watches.md)).
+- `GET | POST /api/inbound-sources` — configure (`action: "configure"`), snooze (`action: "pause"`), or deduplicate-replay (`action: "replay"`) verified webhook events sent to `POST /owner/in/github` and `POST /owner/in/gitlab`.
+- `GET | POST /api/outbound-webhooks` — list, upsert, or remove SSRF-guarded signed outbound notification targets (`feishu` Schema 2.0 interactive cards with single-use 7-day workspace links, `generic` HMAC-SHA256 JSON, `dingtalk`, `wecom`, and `slack`).
 
 The owner API has no stop route: ending a reply is a workspace action ([ADR-0017](adr/0017-turns-are-serial-and-cancellable.md)), and a `POST /api/messages` sent while Otto is answering queues behind that reply instead of interrupting it.
 
@@ -39,11 +45,18 @@ Two exact phrases stay deterministic and never reach the model — they mint cre
 
 ## Local coding agents
 
-**pi** is the default worker agent. When the `claude` CLI (Claude Code) is on the machine, the connector picks it up automatically and advertises it in `hello.agents` — ask the steward 「用 Claude Code 跑这个」 and it dispatches to a Claude Code worker: headless `claude -p` with stream-json output, a Otto `report` MCP tool, and the same outcome adjudication and branch relay as pi. The differences are declared honestly and degrade instead of pretending: Claude Code cannot be steered mid-run and cannot run read-only tasks, so those stay on pi.
+**pi** is the default worker agent. When external coding CLIs are installed on a machine, the connector detects them automatically and advertises them in `hello.agents` alongside non-intrusive `authStatus` prechecks:
+
+- **Claude Code (`claude`)** — headless `claude -p` stream-json execution with Otto's `report` / `propose` MCP tools, strict read-only execution (`--permission-mode plan` + read-only tools), cached input token accounting, and `rate_limit_event` reset-time extraction.
+- **Codex CLI (`codex`)** — JSONL execution and resume (including macOS desktop app binary fallbacks and Windows sandbox read-only ACLs), transient stream error clearing on completed turns, and `readonly` support.
+- **Antigravity (`agy`)** & **ACP v1 (`opencode`, `agentica`)** — JSON-RPC 2.0 ACP session management with worktree realpath permission checks and optional isolated `GEMINI_API_KEY` profiles (`otto agy-key`). Gemini CLI is intentionally omitted.
+- **Local Command presets (`dsh`, `zcode`, `command`)** — locally allowlisted `CommandAdapter` templates spawned with `shell: false` and single-pass placeholder substitution.
+
+Across `pi`, `claude-code`, and `codex`, clean exits that omit a structured `report` run at most **one read-only salvage pass** to recover the report without re-executing file edits or shell commands. When a provider or subscription hits a quota or rate-limit window (`error:rate_limited`), Otto parks the worker in `idle` (under `pi:<provider>` or `agent:<kind>` cooldowns), preserves its worktree and session, and resumes automatically once the window resets.
 
 ## The web workspace
 
-`/app` is the owner's everyday entry ([ADR-0004](adr/0004-web-workspace.md)): one continuous conversation — the same local channel the owner API serves — with the Threads behind it, a "Needs you" view over open decisions (questions, PR consent, offline asks, routine and memory suggestions), machines and pairing, and the day's model spend against the budget cap. The page is plain HTML/CJS/ES modules with no frontend build and a CSP that forbids inline script and every other origin; it stays current over a browser WebSocket nudge and can show a reply as it is being written. The interface is English by default with an in-page EN/中文 switch, on one dark instrument-panel surface ([ADR-0016](adr/0016-dark-instrument-panel-theme.md)).
+`/app` is the owner's everyday entry ([ADR-0004](adr/0004-web-workspace.md)): one continuous conversation — the same local channel the owner API serves — with the Threads behind it, `Cmd/Ctrl+K` hybrid FTS5 search, a "Needs you" view over open decisions (questions, PR consent, PR stuck actions, cross-machine probe approvals, offline asks, routine and memory/skill suggestions), a 5-tab Control Plane (Memory, Schedules, Repo Skills, Budget & Telemetry, Machines & Worktree Audit), and the day's model spend against the budget cap. The page is plain HTML/ES modules with no frontend build and a CSP that forbids inline script and every other origin; it stays current over a browser WebSocket nudge and can show a reply as it is being written. The interface is English by default with an in-page EN/中文 switch, on one dark instrument-panel surface ([ADR-0016](adr/0016-dark-instrument-panel-theme.md)).
 
 One turn at a time, and you can end it ([ADR-0017](adr/0017-turns-are-serial-and-cancellable.md)). A message sent while Otto is answering is queued — it is written to the run ledger before it is handed to the agent, so it survives a restart, and it is answered after the current reply rather than interrupting it. The "Otto is working" row carries a **stop** control: it withdraws a queued turn, or aborts the one being written, and answers with one line saying so. A stopped turn is not a failure — nothing is dispatched a second time, no failure notice arrives, and dispatches already made keep running (stopping a worker is `interrupt_worker`'s job, and the notice says so). Typing "stop" into the conversation is not a command yet; it would queue behind the turn it wants to end.
 

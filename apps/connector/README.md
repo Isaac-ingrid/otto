@@ -6,7 +6,7 @@
 
 **English** · [简体中文](#otto-connector-简体中文)
 
-`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs primarily as a Node process on your own server, with Cloudflare Workers as an alternative. The connector runs on macOS, Linux, or Windows and connects that computer to Otto. It keeps a WebSocket connection to your deployment, starts local coding agents such as pi and Claude Code, and reports their progress back to your personal agent.
+`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs primarily as a Node process on your own server, with Cloudflare Workers as an alternative. The connector runs on macOS, Linux, or Windows and connects that computer to Otto. It keeps an outbound WebSocket connection to your deployment, starts local coding agents (`pi`, Claude Code, Codex CLI, Antigravity `agy`, ACP v1 `opencode` / `agentica`, or locally allowlisted `dsh` / `zcode` presets), runs local SHA-256-approved zero-token probes and zero-checkout PR diffs, and reports progress back to your personal agent.
 
 The connector makes only an outbound connection. You do not need to open an inbound port on your computer.
 
@@ -16,7 +16,7 @@ The connector makes only an outbound connection. You do not need to open an inbo
 - Node.js 22.18 or newer
 - npm 7 or newer
 - A deployed Otto workspace
-- A local coding agent, such as pi or Claude Code, installed and authenticated separately
+- At least one local coding agent (`pi`, Claude Code, Codex CLI, Antigravity `agy`, OpenCode, or Agentica) installed and authenticated separately
 
 ## Install
 
@@ -62,7 +62,8 @@ Keep repository paths explicit. Do not register an entire home directory.
 ## Manage the connector
 
 ```sh
-otto status                 # service, pairing, workers, and registered repositories
+otto status                 # service, pairing, workers, agents, and registered repositories
+otto doctor                 # pairing, service, local agent binaries, proxy, and reachability check
 otto logs -n 50             # recent connector logs
 otto stop                   # stop and disable start-at-login
 otto start                  # enable and start
@@ -70,10 +71,14 @@ otto restart                # restart the background service
 otto install                # install (or repair) the service for a machine that is already paired
 otto upgrade                # install the latest package and restart
 otto uninstall              # remove the service, preserve local state
+otto repo-config <path>     # inspect or update local-only write isolation, concurrency, trust & hooks
+otto probe list             # list or approve local SHA-256 zero-token scripts under ~/.otto/probes/
+otto notify [on|off|test]   # toggle or test zero-dependency OS desktop notifications
+otto agy-key [<key>|--test] # configure an isolated GEMINI_API_KEY profile for Antigravity
 otto daemon --supervise     # run the daemon in this terminal, restarting it on failure
 ```
 
-State remains in `~/.otto/`. You can revoke a machine from the Otto workspace at any time.
+State remains in `~/.otto/`. Per-repository write policies (`otto repo-config`) and local probe approvals (`otto probe approve <name>`) are strictly local to the machine and cannot be altered remotely. You can revoke a machine from the Otto workspace at any time.
 
 ## License
 
@@ -92,7 +97,7 @@ The deployment and connector runbooks live in the Otto repository checkout:
 
 # Otto connector 简体中文
 
-`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是自托管 personal agent，主要以 Node 进程运行在自己的服务器上，也可选择部署到 Cloudflare Workers；connector 运行在 macOS、Linux 或 Windows 电脑上，把这台电脑接入 Otto。它保持到你部署地址的 WebSocket 连接，启动本地的 pi、Claude Code 等 coding agent，并把进展回传给 personal agent。
+`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是自托管 personal agent，主要以 Node 进程运行在自己的服务器上，也可选择部署到 Cloudflare Workers；connector 运行在 macOS、Linux 或 Windows 电脑上，把这台电脑接入 Otto。它保持到你部署地址的出站 WebSocket 连接，启动本地的 `pi`、Claude Code、Codex CLI、Antigravity（`agy`）、OpenCode / Agentica（ACP v1）或本机白名单命令预设（`dsh` / `zcode`），执行经 SHA-256 审批的本地零 Token 探针与零检出 PR Diff，并把进展回传给服务端。
 
 Connector 只主动发起出站连接，不需要在电脑上开放入站端口。
 
@@ -102,7 +107,7 @@ Connector 只主动发起出站连接，不需要在电脑上开放入站端口�
 - Node.js 22.18 或更新版本
 - npm 7 或更新版本
 - 已部署的 Otto 工作台
-- 已单独安装并完成认证的本地 coding agent，例如 pi 或 Claude Code
+- 已单独安装并完成认证的本地 coding agent（如 `pi`、Claude Code、Codex CLI、Antigravity、OpenCode 或 Agentica）
 
 ## 安装
 
@@ -148,7 +153,8 @@ otto connect https://otto.example.com <pairing-code> --proxy http://127.0.0.1:78
 ## 管理 connector
 
 ```sh
-otto status                 # 查看服务、配对、worker 和已登记仓库
+otto status                 # 查看服务、配对、worker、本地 agent 和已登记仓库
+otto doctor                 # 检查配对、服务、本机 agent 可执行性、代理与连通性
 otto logs -n 50             # 查看最近日志
 otto stop                   # 停止并取消开机自启
 otto start                  # 启用并启动
@@ -156,10 +162,14 @@ otto restart                # 重启后台服务
 otto install                # 为已配对的机器安装（或修复）后台服务（不需要配对码）
 otto upgrade                # 安装最新包并重启
 otto uninstall              # 移除服务，保留本地状态
+otto repo-config <path>     # 查看或设置仅限本机修改的写入隔离、并发、信任与钩子策略
+otto probe list             # 查看或审批 ~/.otto/probes/ 下的 SHA-256 零 Token 本地探针脚本
+otto notify [on|off|test]   # 开关或测试零外部依赖的系统桌面通知
+otto agy-key [<key>|--test] # 为 Antigravity 配置隔离的 GEMINI_API_KEY（不改动 ~/.gemini）
 otto daemon --supervise     # 在当前终端运行守护进程，崩溃后自动重启
 ```
 
-状态保存在 `~/.otto/`。你可以随时在 Otto 工作台撤销一台电脑。
+状态保存在 `~/.otto/`。仓库写入策略（`otto repo-config`）与本地探针审批（`otto probe approve <name>`）均仅允许在本机 CLI 修改，无法通过远端指令覆写。你可以随时在 Otto 工作台撤销一台电脑。
 
 ## 发布（维护者）
 

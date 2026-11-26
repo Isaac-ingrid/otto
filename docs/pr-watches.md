@@ -152,14 +152,32 @@ before acknowledgement retries that id rather than creating another message. Fai
 leased; restart retries after the lease expires. Generation checks reject cancelled, expired or
 superseded reads. Startup re-arms the cron if active work or pending notices exist.
 
-Failure is summarized as failed/pending counts and the PR/commit reference. The first version does
-not fetch logs or ask a model to diagnose them. Waiting/repeated observations are silent; failure,
-success, closure, merge and expiry produce a Thread-linked message. Browser push is best-effort and
-respects existing quiet hours. Delivery and GitHub observation are different states.
+Failure is summarized as failed/pending counts and the PR/commit reference. Subsequent migrations
+(`044`, `045`, and `052`) added bounded out-of-band CI failure log diagnosis, merge-conflict and
+trusted-review triage (`watchGoal: "ci_pass" | "merged"`), stuck-watch detection, and owner-consented
+zero-checkout blind PR review while preserving the read-only GitHub boundary:
+
+- **CI failure & review/conflict triage (`044`–`045`)**: extracts bounded failing check excerpts,
+  mergeability (`mergeable` / `conflicted`), and cursor-deduplicated review threads via tool-less
+  completion callbacks (falling back to deterministic summaries when over budget or without a model).
+- **Stalled watch consent card (`052`)**: when an active PR head stays stalled in `waiting`,
+  `conflicted`, or `changes_requested` past 2 hours (`PR_WATCH_STUCK_THRESHOLD_MS`), Otto sends at
+  most one deduplicated owner card per head (`[派发只读探针诊断]` / `[继续等待]` / `[取消此 PR 跟进]`)
+  and never auto-merges or mutates the PR.
+- **Zero-checkout blind PR review (`052`)**: only when the owner taps `[派发只读探针诊断]`, the
+  connector extracts unified diff facts directly from git objects (`git_pr_diff` with
+  `-c core.hooksPath=/dev/null`, refusing octopus merges `parentCount > 2` and leaving local dirty
+  working trees untouched), strips the author worker's conversation/reasoning, and dispatches a
+  read-only review worker (preferring a distinct engine family from the author worker when available,
+  otherwise a fresh zero-history read-only session).
+
+Waiting/repeated observations remain silent; failure, conflict, new review feedback, success,
+closure, merge and expiry produce a Thread-linked message. Browser push is best-effort and respects
+existing quiet hours. Delivery and GitHub observation are different states.
 
 ## Acceptance evidence
 
-The [experiment record](research/experiments/0002-pr-watch.md) names checks and remaining limits.
-Tests use fake GitHub responses and both steward runtimes; no live GitHub token or paid model is
-needed. No production deployment, private-repository connectivity or independent review is implied
-by the test results.
+The [experiment record](research/experiments/0002-pr-watch.md) and
+[agent-autoloop adoption plan](plan/agent-autoloop-adoptions.md) document the checks and boundaries.
+Tests use fake GitHub responses, real dirty git worktrees for zero-checkout diff isolation, and both
+steward runtimes.

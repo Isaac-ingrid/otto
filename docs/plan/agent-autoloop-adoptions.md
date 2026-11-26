@@ -1,12 +1,12 @@
 # Otto 从 agent-autoloop 采纳的改进方案
 
-状态：阶段 1 实施中（2026-11-24）；共分 5 个独立可交付阶段推进。
+状态：阶段 1–5 已全部落地并通过生产环境验收（2026-11-25，`050`–`053` 迁移落表，`pnpm verify:prod` 0 失败）。
 
-范围与顺序决定（2026-11-24 已拍板）：
-1. **双轨兼顾**：既面向日常主力 `pi` + 多 API / Coding 套餐提供方（DeepSeek、`zai-coding-cn`、OpenAI 兼容网关）落地细粒度限流挂起与活进程补报，也保留并补齐**除 Gemini CLI 以外**的外围 CLI 生态补丁（`codex`、`claude-code`、基于 ACP 的 `opencode` / `agentica`，以及通用 `command` 接入 `dsh` / `zcode` / `cursor`）。
-2. **明确排除 Gemini CLI 与个人 Google OAuth 套壳**：2026 年 6 月 18 日起 Google 已停止 Gemini CLI 对免费及 AI Pro / Ultra 个人订阅的服务（[google-gemini/gemini-cli#27274](https://github.com/google-gemini/gemini-cli/discussions/27274)），并严禁第三方编排工具复用 Gemini CLI / Antigravity 个人 OAuth 登录态（[google-gemini/gemini-cli#20632](https://github.com/google-gemini/gemini-cli/discussions/20632)，违规触发 `403` 封禁）。因此本方案彻底排除 `gemini --acp` 接入及任何个人 OAuth 套壳引导。
-3. **离线契约测试桩（Contract Fixtures）门禁**：针对开发机未登录 Claude / Codex 实账号的情况，所有外围 CLI 改动必须将 [KKKKhazix/agent-autoloop](https://github.com/kkkkhazix/agent-autoloop) 实测验证过的协议事件流固化到 `fake-claude.mjs`、`fake-codex.mjs` 等本地测试桩中完成确定性回归验证，并在 `hello.agents` 增加无损登录态预检，避免把任务误派给未登录的外围 CLI。
-4. **实施顺序**：**阶段 1（限流冷却挂起、单次补报重写与 Codex / Claude 细节修补） → 阶段 2（OpenCode / Agentica ACP 桥与通用 Command 适配器） → 阶段 3（零 Token 本地探针 `probe`、`autoHops` 8 跳熔断与暂停 `replay`） → 阶段 4（PR Watch 卡死检测与零检出交叉盲审） → 阶段 5（飞书 `lark-cli` 免公网交互卡、Connector 桌面通知与单向 Webhook 签名审批）**。
+范围与顺序决定（2026-11-24 拍板，2026-11-25 验收收口）：
+1. **双轨兼顾**：既面向日常主力 `pi` + 多 API / Coding 套餐提供方（DeepSeek、`zai-coding-cn`、OpenAI 兼容网关）落地细粒度限流挂起与活进程补报，也补齐**除 Gemini CLI 以外**的外围 CLI 生态（`codex`、`claude-code`、基于 ACP v1 的 `opencode` / `agentica`，以及本机白名单 `CommandAdapter` 接入 `dsh` / `zcode` / `command`）。
+2. **彻底剔除 Gemini CLI**：2026 年 6 月 18 日起 Google 已停止 Gemini CLI 对免费及 AI Pro / Ultra 个人订阅的服务（[google-gemini/gemini-cli#27274](https://github.com/google-gemini/gemini-cli/discussions/27274)），并严禁第三方编排工具复用个人 OAuth 登录态（[google-gemini/gemini-cli#20632](https://github.com/google-gemini/gemini-cli/discussions/20632)）。代码与测试中不保留任何 `gemini --acp` 接入或冗余防御分支，仅保留实际支持的引擎（Antigravity 单独提供 `otto agy-key` 隔离 API Key 配置）。
+3. **离线契约测试桩（Contract Fixtures）门禁**：针对开发机未登录部分外围 CLI 实账号的情况，外围协议流统一固化在 `fake-pi.mjs`、`fake-claude.mjs`、`fake-codex.mjs`、`fake-acp.mjs`、`fake-command.mjs` 中完成确定性回归验证，并在 `hello.agents` 附带无损 `authStatus` 预检。
+4. **已交付阶段**：**阶段 1（`050` 双粒度限流冷却挂起、`promptAccepted` 对账判据、单次只读补报与 Codex / Claude 细节修补） → 阶段 2（通用 `AcpAdapter` 支持 `opencode` / `agentica` 与 `shell: false` 的 `CommandAdapter`） → 阶段 3（`051` 零 Token 本地 SHA-256 探针 `otto probe`、`autoHops <= 8` 熔断与 GitHub/GitLab 验签入站 Webhook 暂停补放） → 阶段 4（`052` PR Watch 2 小时停滞确认卡与零检出 `git_pr_diff` 跨引擎/净空盲审） → 阶段 5（`053` `otto notify` 零依赖桌面通知、飞书 Schema 2.0 卡片与 SSRF 防护签名出站 Webhook）**。
 
 ## 1. 来源与对照基线
 
@@ -88,30 +88,28 @@
 - **无损登录态预检（`authStatus`）**：
   - `packages/protocol/src/messages.ts` 的 `AgentCapabilitySchema` 增加可选 `authStatus?: "ready" | "unauthenticated" | "unknown"`。`detectCodex` 可选附带轻量 `codex login status` 非阻塞检查，使未登录的示例 CLI 在机器面板与自动选路中一目了然，不抢占主力 `pi` 的自动路由。
 
-## 4. 阶段 2–5 路线与设计摘要
+## 4. 阶段 2–5 最终落地摘要
 
 ### 阶段 2：OpenCode / Agentica ACP 适配器与通用 Command 适配器
-- 提炼现有 `antigravity-adapter.ts` 的 JSON-RPC 帧与 MCP 带外回执底座为通用 `AcpAdapter`，原生支持 `opencode acp` 与 `agentica acp`：区分 `session/load`（忽略历史重放）与 `session/resume`，识别 `-32000` / `thread_active_writer` 会话占用返回可重试的 `session_in_use`，按 worktree 真实路径校验 `allow_once` 权限。显式拒绝或告警个人 Google OAuth 下的 `gemini --acp`。
-- 新增受本机白名单配置约束的轻量 `CommandAdapter`：单遍回调替换 `{prompt|model|effort|cwd|context}`（防止 `$&` 二次展开），内置 `dsh`（DeepSeek Harness `0.2.2+` `step_end` 累加）与 `zcode` JSON 解析预设。
+- 通用 `AcpAdapter`（`apps/connector/src/acp-adapter.ts`）原生支持 `opencode` 与 `agentica`：区分 `session/load`（跳过历史重放）与 `session/resume`，识别 `-32000` / `thread_active_writer` 会话占用返回可重试的 `session_in_use`，按 worktree 真实路径校验 `allow_once` 权限；Gemini CLI 直接剔除，不留无效防御代码。
+- 轻量 `CommandAdapter`（`apps/connector/src/command-adapter.ts`）受本机存储白名单约束，强制 `shell: false`，单遍回调替换 `{prompt|model|effort|cwd|context}`（防止 `$&` 二次展开），内置 `dsh`（DeepSeek Harness `0.2.2+` JSONL `step_end` 累加）与 `zcode` 解析预设。
 
-### 阶段 3：零 Token 本地脚本探针（`probe`）、`autoHops` 8 跳熔断与暂停 `replay`
-- **本地探针（迁移 `051_probes_autohops_and_replay`）**：脚本限定于 `~/.otto/probes/` 并经本机 CLI 绑定 SHA-256；`RoutineService` 新增 `kind = "probe"`，探针返回 `{ triggered: false }` 时零 Token 结束，仅 `triggered: true` 时唤醒 Steward。
-- **跨轮跳数熔断**：`sh_wake` 与 `sh_run` 增加 `autoHops`；自治事件链（含 `followup` 与自动续跑）逐轮 `+1`，超过 8 跳停派并推 `Needs you` 卡片，仅真人消息或卡片点击重置为 `0`。
-- **暂停跳过与补跑**：`sh_routine` 支持 `pausedUntil`；新增 `/owner/in/:source` 纯同步验签 Webhook 转换器（内置 GitHub / GitLab），暂停期命中的事件写入 `sh_skipped_event` 不积压，恢复时支持按 `since` 一键去重 `replay`。
+### 阶段 3：零 Token 本地脚本探针（`probe`）、`autoHops` 8 跳熔断与入站 Webhook 暂停 `replay`
+- **本地探针（迁移 `051_probes_autohops_and_replay`）**：脚本限定于 `~/.otto/probes/` 并经本机 `otto probe approve <name>` 绑定 SHA-256；`RoutineService` 支持 `probe` 类型例行任务，返回 `{ triggered: false }` 时零 Token 结束，仅 `triggered: true` 时唤醒 Steward。
+- **跨轮跳数熔断**：`sh_wake`、`sh_run` 与 `sh_thread` 维护 `autoHops`；自治事件链（含 `followup` 与自动续跑）逐轮累加，超过 `MAX_AUTO_HOPS = 8` 立即停派并推送熔断提醒，仅真人发消息或点击卡片重置为 `0`。
+- **验签入站与暂停补跑**：新增 `POST /owner/in/github`（HMAC-SHA256）与 `POST /owner/in/gitlab`（常量时间 Token 校验）同步转换器及 `/api/inbound-sources` 管理接口；`pausedUntil` 暂停窗口内的事件落入 `sh_skipped_event` 去重暂存，支持一键 `replay`。
 
-### 阶段 4：PR Watch 卡死自救卡片与零检出交叉盲审
-- **CI 卡死识别（迁移 `052_pr_watch_stuck_and_review`）**：同一 `head` 处于 `waiting` 超 10 分钟且 `checks === 0` 时推送一键「转 Draft 再转 Ready」确认卡（遵守 ADR-0019，每 `head` 限一次）。
-- **零检出交叉盲审**：Connector 提供裸 Git 对象 `git_pr_diff`（拒绝章鱼合并，不 checkout PR 分支、不跑 hooks）；Steward 优先选同机另一只读 Agent，若仅 `pi` 就绪则开全新零历史只读 `pi` 会话（优先切另一已验证 Provider），按 `blocking / advisory` 两级输出，连续两轮 `blocking` 转交人工拍板。
+### 阶段 4：PR Watch 停滞提醒与零检出交叉盲审
+- **停滞确认卡（迁移 `052_pr_watch_stuck_and_review`）**：同一 `head` 在 `waiting`、`conflicted` 或 `changes_requested` 状态停滞超过 2 小时（`PR_WATCH_STUCK_THRESHOLD_MS`）时，每 `head` 最多推送一次去重确认卡 `prWatchStuckCard`（`[派发只读探针诊断]` / `[继续等待]` / `[取消此 PR 跟进]`），绝不自动合并或改写远端 PR。
+- **零检出交叉盲审（`pr-blind-review.ts` + `pr-diff.ts`）**：点击确认后，Connector 以 `-c core.hooksPath=/dev/null` 从裸 Git 对象直接计算 `git_pr_diff`（拒绝 `parentCount > 2` 的章鱼合并，不切换分支、不污染本地脏工作树）；Steward 剥离原作者全部对话与推理，优先调度同机另一家族只读引擎（如 `claude-code -> codex`），仅单引擎可用时退回全新零历史只读会话。
 
-### 阶段 5：飞书 `lark-cli` 免公网通道、桌面原生通知与单向 Webhook 审批
-- Connector 集成跨平台零依赖系统通知（macOS `osascript --`、Windows Base64 UTF-16LE PowerShell `NotifyIcon`、Linux `notify-send`，自动检测活跃图形会话，SSH 无头静默跳过）。
-- Steward 接入基于 `@larksuite/cli` 长连接的飞书 Schema 2.0 交互卡（全宽自动换行选项容器 + 底部多行文本表单 + 原位 `patch` 失败带版本号幂等补发）。
-- 新增钉钉、企微、Slack、Discord、Telegram 单向 Webhook 推送（全角转义防误触发 `@everyone`），复用 `009_web` 的 `sh_web_link` 附带 7 天有效免脚本审批链接。
+### 阶段 5：桌面原生通知、飞书 Schema 2.0 卡片与签名出站 Webhook
+- **本机桌面通知（`desktop-notify.ts`、`otto notify`）**：跨平台零外部依赖系统通知（macOS `osascript`、Windows Base64 UTF-16LE PowerShell `NotifyIcon`、Linux `notify-send`，SSH 无图形会话自动静默跳过）。
+- **飞书 Schema 2.0 渲染器（`channel/feishu-card-v2.ts`）**：将本地消息与操作按钮渲染为飞书 V2 交互卡片，附带 `sh_web_link` 生成的 7 天有效单次登录直达链接（首次访问 HTTP 303 种下 `otto_session`，二次访问 HTTP 410 防重放）。
+- **签名出站 Webhook（迁移 `053_outbound_webhooks`，`channel/webhooks.ts`、`/api/outbound-webhooks`）**：内置严格 SSRF 校验（生产强制 HTTPS 并拦截回环/私网/元数据地址），支持 `feishu`（HMAC-SHA256 签名）、`generic`（`X-Otto-Signature-256`）、`dingtalk`、`wecom` 与 `slack` 非阻塞并发推送。
 
-## 5. 验证门禁约定
+## 5. 验证与生产验收记录
 
-每阶段完成后均须通过：
-1. 新增/更新的确定性契约单测（含 `fake-pi`、`fake-claude`、`fake-codex` 离线故障与边界报文重放）；
-2. `corepack pnpm -r typecheck`（含 Steward `node-host` 类型检查）；
-3. 相关包 Vitest 回归套件与 Connector 自包含打包检查（`npm pack --dry-run` 保持零运行时外部依赖）；
-4. 凡触及事件归约骨架时运行 `node scripts/verification/run-tla.mjs`，凡触及前端 UI 时运行 `ui-modules.test.ts`。
+1. 全量确定性契约单测与集成测试（`autoloop-stage1.test.ts`、`autoloop-stage2.test.ts`、`autoloop-stage3-5-connector.test.ts`、`quota-cooldown.test.ts`、`autoloop-stage3.test.ts`、`autoloop-stage4-5.test.ts`）全部通过；
+2. `corepack pnpm -r typecheck`、`typecheck:node-host` 与 `apps/connector` `npm pack --dry-run`（零运行时外部依赖）全部通过；
+3. `pnpm deploy:vps` 与零密钥生产冒烟脚本 `pnpm verify:prod`（`scripts/verify-prod.mjs`）实测 `0 failures`，确认云端 `050`–`053` 全部落表、本机探针 SHA-256 篡改拦截、脏工作树零检出 PR Diff、系统桌面通知及飞书 V2 单次链接防重放均符合预期。

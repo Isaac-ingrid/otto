@@ -174,7 +174,11 @@ the UI is a plain directory copy and needs no restart. Re-copy `ui/` whenever th
 the bundle does not carry it.
 
 Schema changes ship inside the bundle and run at startup, so **back up before an upgrade** if the
-release notes mention migrations.
+release notes mention migrations. From a repository checkout configured with an untracked
+`deploy/aliyun.env`, `pnpm deploy:vps` automates online SQLite backup, gzipped atomic bundle upload
+(with SSH exit-255 retry and automatic rollback on failure), UI sync, ACME renewal checks, and
+`deploy/doctor.sh`; `pnpm verify:prod` runs read-only, zero-secret smoke verification across your
+paired local connector and the remote server.
 
 ## Optional web search
 
@@ -387,16 +391,17 @@ Logs are `journalctl -u otto -f`. The database browser is `sqlite3
 
 ## Optional read-only PR / CI follow-up
 
-[PR watches](pr-watches.md) bind a GitHub PR to an existing Thread through the explicit-SERVER_KEY
-Owner API. A persistent timer checks external status without waking a model or dispatching a worker.
-For private repositories, set `OTTO_GITHUB_READ_TOKEN` in the protected configuration to a
-selected-repository, read-only token (Pull requests and Commit statuses), then restart Otto and
-explicitly create a `statuses-only` watch. Fine-grained PATs in the current GitHub UI do not offer
-Checks. The default `checks-and-statuses` mode requires a credential that can read Checks as well;
-it does not automatically downgrade when access is denied.
-No token is needed for public repositories, subject to GitHub rate limits. Watches expire, can be
-cancelled independently of turns, and never modify code, re-run CI or merge a PR. No conversation
-tool or workspace management page is included in this first pilot.
+[PR watches](pr-watches.md) bind a GitHub PR to an existing Thread either from conversation (via a
+dedicated confirmation card, [ADR-0019](adr/0019-pr-watch-owner-confirmation.md)), the Control
+Plane's **Schedules** tab, or the explicit-SERVER_KEY Owner API (`/api/pr-watches`). A persistent
+timer checks external status, diagnoses failing logs, tracks merge conflicts/reviews, and offers
+zero-checkout blind review on stalled heads without keeping a coding agent running. For private
+repositories, set `OTTO_GITHUB_READ_TOKEN` in the protected configuration to a selected-repository,
+read-only token (Pull requests and Commit statuses), then restart Otto and explicitly create a
+`statuses-only` watch when Checks permissions are unavailable. The default `checks-and-statuses`
+mode requires a credential that can read Checks as well; it does not automatically downgrade when
+access is denied. No token is needed for public repositories, subject to GitHub rate limits. Watches
+expire, can be cancelled independently of turns, and never modify code, re-run CI or merge a PR.
 
 ## What this shape is not
 

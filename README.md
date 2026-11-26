@@ -10,28 +10,29 @@
 
 **Otto is an always-on coordinator for the coding agents on your computers.** You talk to one personal agent in a web workspace; it remembers ongoing work, routes tasks to local agents, and brings their progress and decisions back to the same conversation. The steward runs on your own server, while the agents work in repositories you choose on your own machines.
 
-- **An always-on coordinator.** The steward stays online on your VPS even when your computers are asleep; it keeps conversations, memory and scheduled follow-ups. Local coding work waits for an available connector.
-- **One conversation across machines.** Tasks, decisions, follow-ups, live context/tool telemetry and progress stay together, searchable via `Cmd/Ctrl+K` hybrid FTS5 search.
-- **Your code stays on your machines.** A connector runs **pi**, **Claude Code**, **Codex CLI**, or **Antigravity (`agy`)** locally with per-repo write isolation (`worktree`/`in-place`), concurrency (`parallel`/`serial`), and optional approved hooks; full coding-agent session records stay there.
+- **An always-on coordinator.** The steward stays online on your VPS even when your computers are asleep; it keeps conversations, memory, scheduled follow-ups, and SHA-256-approved local zero-token probes. Local coding work waits for an available connector.
+- **One conversation across machines.** Tasks, decisions, follow-ups, live context/tool telemetry and progress stay together, searchable via `Cmd/Ctrl+K` hybrid FTS5 search, with optional OS desktop notifications (`otto notify`), Web Push, and signed outbound webhooks (Feishu Schema 2.0 cards, DingTalk, WeCom, Slack, Generic HMAC).
+- **Your code stays on your machines.** A connector runs **pi**, **Claude Code**, **Codex CLI**, **Antigravity (`agy`)**, ACP v1 agents (**OpenCode**, **Agentica**), or locally allowlisted command presets (**`dsh`**, **`zcode`**) with per-repo write isolation (`worktree`/`in-place`), concurrency (`parallel`/`serial`), and optional approved hooks; full coding-agent session records stay on local disk.
+- **Resilient quota handling & report salvage.** Rate-limit or subscription-window exhaustion (`error:rate_limited`) parks the session in `idle` under a per-`(machine, provider/agent)` cooldown table and auto-resumes with zero LLM calls when the window resets; clean `unreported` runs execute at most one read-only salvage pass to recover structured reports.
 - **Memory, skills & control plane with boundaries.** Otto keeps preferences and project conventions separately from conversation history (tracking source and confirmation), mines cross-session repo patterns to propose new or updated `SKILL.md` skills only with sufficient evidence and owner approval, and provides deterministic worker checkpoints, dual-ledger budget/telemetry charts, and read-only worktree audits with guarded cleanup.
-- **Read-only PR follow-up & triage.** Bind a GitHub PR to an existing task Thread to monitor CI checks, diagnose failing logs, detect merge conflicts, and triage trusted reviews without keeping a coding agent running. Conversational create/cancel requests require your confirmation on a dedicated card.
-- **You stay in control.** Stopping a reply, stopping/interrupting a worker (with 5-state stop diagnostics and inline interrupt), and cancelling a PR watch are three separate operations.
+- **Read-only PR follow-up & zero-checkout blind review.** Bind a GitHub PR to an existing task Thread to monitor CI checks, diagnose failing logs, detect merge conflicts, triage trusted reviews, and alert on stalled PRs (`>2h`). With your confirmation, Otto extracts `git_pr_diff` directly from git objects without checking out branches or touching dirty worktrees, and runs an author-isolated cross-engine read-only review.
+- **You stay in control.** Stopping a reply, stopping/interrupting a worker (with 5-state stop diagnostics and inline interrupt), and cancelling a PR watch are three separate operations, backed by an 8-hop `autoHops` circuit breaker against unattended event loops.
 
 ## Architecture
 
 ```text
 Browser workspace (Cmd/Ctrl+K search · 5-tab Control Plane) / optional Owner API
-                │ HTTPS / WebSocket
+                │ HTTPS / WebSocket  (+ verified /owner/in/github|gitlab & signed outbound webhooks)
                 ▼
 Your VPS: Otto steward (Node.js + SQLite + FTS5)
-  ├─ deterministic core: events, deadlines, PR triage, notifications, durable queues
-  ├─ LLM steward: routing, judgment, summaries, tool calls, skill distillation
+  ├─ deterministic core: events, deadlines, quota cooldowns, PR triage, probe schedules, queues
+  ├─ LLM steward: routing, judgment, summaries, tool calls, skill distillation (autoHops <= 8)
   └─ ledger: Threads, decisions, notes, dual-ledger budget/telemetry, repo policies
                 ▲ outbound WebSocket connections
                 │
 Connectors on macOS / Linux / Windows
-  ├─ local adapters: pi, Claude Code, Codex CLI, Antigravity (agy)
-  └─ local relays: worktree diff/audit/cleanup, checkpoints, sandboxed repo skills
+  ├─ local adapters: pi, Claude Code, Codex CLI, Antigravity (agy), OpenCode / Agentica (ACP), dsh / zcode
+  └─ local relays: worktree diff/audit/cleanup, zero-checkout PR diff, SHA-256 probes, checkpoints, repo skills, desktop notify
 ```
 
 The steward uses a single persistent SQLite database; connectors initiate connections, so your computers need no inbound ports. Repository contents and complete coding-agent session records stay on those computers. The steward and local agents use separately configured models. The **same steward logic** can alternatively run on [Cloudflare Workers + a SQLite-backed Durable Object](docs/design/node-host.md); the VPS deployment uses a Node host adapter rather than a separate product.
@@ -39,17 +40,19 @@ The steward uses a single persistent SQLite database; connectors initiate connec
 ## What makes the design different
 
 - **A ledger, not an endless prompt, carries continuity.** Threads, worker reports and provenance-aware notes live outside the LLM transcript. Each turn sees a fresh, bounded situation brief; compaction does not have to serve as the project's memory.
-- **Code handles certainties; the model handles judgment.** State transitions, deadlines and routine completion notices do not need an LLM call. The model handles ambiguous routing, questions and summaries. If it is unavailable or over budget, deterministic fallbacks still surface pending decisions.
-- **Actions have durable boundaries.** Owner turns are recorded before execution, processed serially and cancellable; dispatched work continues independently. Idempotency keys and durable queues make retries and steward restarts recoverable, while tool checks require a verifiable source before event-triggered work can be dispatched.
+- **Code handles certainties; the model handles judgment.** State transitions, deadlines, local zero-token probes (`otto probe`), quota-cooldown timers, and routine completion notices do not need an LLM call. The model handles ambiguous routing, questions and summaries. If it is unavailable or over budget, deterministic fallbacks still surface pending decisions.
+- **Actions have durable boundaries.** Owner turns are recorded before execution, processed serially and cancellable; dispatched work continues independently. Idempotency keys, `promptAccepted` session-start markers, and durable queues make retries and restarts recoverable, while tool checks require a verifiable source before event-triggered work can be dispatched and `autoHops` caps unattended chains at 8 hops.
 - **Memory is inspectable.** Notes distinguish user-confirmed facts from worker reports and inferences, and distinguish replacing an outdated fact from archiving one for space. [Architecture details](docs/design/steward.md) · [Turn design](docs/adr/0017-turns-are-serial-and-cancellable.md).
 
-### Ideas adapted from the Super Agent comparison
+### Ideas adapted from Super Agent & agent-autoloop comparisons
 
-Rather than copying a product wholesale, Otto [tested three ideas](docs/plan/self-hosted.md#p4--product-follow-ups-from-the-super-agent-comparison) and kept their boundaries explicit:
+Rather than copying external orchestrators wholesale, Otto selectively adopted concrete mechanisms while keeping its ledger and approval boundaries explicit ([Super Agent follow-ups](docs/plan/self-hosted.md#p4--product-follow-ups-from-the-super-agent-comparison) · [agent-autoloop adoptions](docs/plan/agent-autoloop-adoptions.md)):
 
 - **Watchdog re-planning:** an optional model pass can reconsider a stalled worker and re-plan or ask you. It is **off by default** (`WATCHDOG_LLM`); the deterministic stall verdict still applies.
 - **Live Thread following:** the workspace subscribes to Thread events and state over WebSocket, with a timeline cursor for resuming, instead of relying solely on polling.
 - **No speculative parallel turns:** starting a second answer before the first settles risks missing conversation context or dispatching the same intent twice. Otto instead keeps turns serial, durable and stoppable.
+- **Dual-granularity quota cooldowns & one-shot report salvage:** rate-limited runs (`pi:<provider>` or `agent:<kind>`) park in `idle` rather than `broken` and resume automatically once the reset timestamp arrives; clean exits missing `report` run at most one read-only salvage turn.
+- **Zero-token local probes & zero-checkout blind PR review:** recurring checks run locally approved scripts under `~/.otto/probes/` without waking the LLM unless triggered, and PR blind reviews inspect bare git diffs (`core.hooksPath=/dev/null`) in a clean or cross-engine read-only session without checking out branches.
 
 ### Bounded web search (optional)
 
@@ -59,7 +62,10 @@ Search is limited to one request per owner turn, using a query drawn from the ow
 
 Basic search limits request cost, **not account billing**. Provider free quotas and pricing may change; keep pay-as-you-go/automatic recharge disabled and set account limits in the provider dashboard. See [search configuration](docs/self-hosted.md#optional-web-search).
 
-Optional **Web Push** works on supported desktop and mobile browsers. It stays off until the server has VAPID keys and each device opts in. Open **Account / Settings → Phone notifications → Enable on this device**, then allow browser notifications; the section also offers a test notification. Alerts contain generic prompts for decisions and completed work, never task text. Quiet hours default to 22:00–08:00 in that device's time zone. Delivery also depends on browser/OS permissions and its push service; a queued test is not proof of receipt. The in-app pending list remains the fallback. On iPhone, add Otto to the Home Screen and open it there first. See the [self-hosted guide](docs/self-hosted.md#web-push-optional).
+Optional **Web Push**, **local desktop notifications**, and **signed outbound webhooks** stay off until explicitly enabled:
+- **Web Push** works on supported desktop and mobile browsers once the server has VAPID keys and each device opts in under **Account / Settings → Phone notifications → Enable on this device** (quiet hours default to 22:00–08:00 in that device's time zone; on iPhone, add Otto to the Home Screen first). Alerts contain generic prompts, never task text. See the [self-hosted guide](docs/self-hosted.md#web-push-optional).
+- **Desktop notifications (`otto notify on`)** surface local worker completions, questions, and quota holds via native OS tools (`osascript`, PowerShell `NotifyIcon`, `notify-send`) with zero runtime dependencies, skipping headless SSH sessions automatically.
+- **Outbound webhooks (`/api/outbound-webhooks`)** deliver SSRF-guarded notifications to Feishu Schema 2.0 interactive cards (with 7-day single-use `sh_web_link` URLs), DingTalk, WeCom, Slack, or generic HMAC-SHA256 endpoints.
 
 ## Get started
 
@@ -101,7 +107,8 @@ otto status
 ```
 
 The code expires after 10 minutes and is single-use; keep it out of chat and logs. Pairing installs and starts a background service — launchd on macOS, a systemd user service on Linux, and a per-user logon entry (the `Run` key plus a generated `~/.otto/otto-daemon.vbs`) on Windows. When that is not possible on this machine (a session that cannot reach its service manager, or a Windows logon entry the machine's policy forbids), `connect` says so *before* redeeming the code, so a retry costs no new code — and `--foreground` runs the daemon in the current terminal instead; the machine that is already paired and only lacks that entry has `otto install`, which writes the service for the saved credential and needs no code. `otto status` reports which of the two is in play; on Windows the connector starts at the next logon and the launcher runs it under `otto daemon --supervise`, so a daemon that dies comes back on its own with backoff until `otto stop` says otherwise.
-The connector calls out to Otto, so the computer needs no inbound port. In **Machines**, add only the local directories you want Otto to work in, then try a small read-only pi task. By default Otto passes no model flag, so the local agent uses its **own** default provider. With a connector that advertises model selection, **Settings → Local coding-agent models** (also available in **Machines**) can set a separate task default for each machine/agent. Explicit selection is enabled for pi only; Claude Code continues to follow its own default pending real acceptance. With the local-discovery update, the picker shows models discovered by that machine’s installed pi, its discovery-time default and timestamp, with manual refresh and cached/offline labels; exact custom IDs live under Advanced. This list is not an upstream quota/availability test, and extension/project-only models may require manual input. It applies to new sessions; resumed sessions retain their original model request. Clear the value to follow the agent default again. No local-agent key is stored in Otto; make sure the agent's selected provider has usable quota (an exhausted default that falls back to another provider surfaces only as an agent-side error). `otto status` prints the agent Otto will actually run and says `NOT SPAWNABLE` if it resolves to a missing executable (a spaced path in `OTTO_PI_COMMAND` needs inner quotes; `node <launcher> …` avoids the question); `otto logs -n 50` shows why a machine did not come online. It must stay awake and connected while working. For a proxy, a host without a service manager, or a source installation, see the [connector runbook](docs/agent-connect.md).
+
+The connector calls out to Otto, so the computer needs no inbound port. In **Machines**, add only the local directories you want Otto to work in, then try a small read-only task. By default Otto passes no model flag, so the local agent uses its **own** default provider. With a connector that advertises model selection, **Settings → Local coding-agent models** (also available in **Machines**) can set a separate task default for each machine/agent. Explicit model selection in the picker is currently enabled for `pi` (showing models discovered locally by that machine's `pi`, discovery-time default and timestamp, manual refresh, and Advanced custom IDs); other installed CLIs (`claude`, `codex`, `agy`, `opencode`, `agentica`) follow their own configured defaults (and for Antigravity, `otto agy-key` can configure an isolated `GEMINI_API_KEY` profile inside `~/.otto` without touching `~/.gemini`). It applies to new sessions; resumed sessions retain their original model request. No local-agent key is stored in Steward; if a provider hits a rate-limit window, Otto parks the session in `idle` and resumes automatically after cooldown. `otto status` and `otto doctor` print the agents Otto will actually run and flag `NOT SPAWNABLE` executables; `otto probe` manages locally SHA-256-approved zero-token probe scripts under `~/.otto/probes/`; `otto notify` toggles local OS notifications; `otto logs -n 50` shows why a machine did not come online. For a proxy, a host without a service manager, or a source installation, see the [connector runbook](docs/agent-connect.md).
 
 **Done when:** the machine and its chosen directories appear online and the test task returns a result. Repeat for each computer.
 
@@ -125,7 +132,7 @@ After configuring a search key in the server's protected `.dev.vars` and restart
 
 The owner has exercised this path with Tavily on the self-hosted Node deployment. That validates the basic query/response flow, not the accuracy or freshness of every result. Check publication dates and official sources before relying on a security claim; the retrieval time is not a publication date. Search does not open the full pages. Any follow-up action needs a separate owner turn, not authorization inferred from a snippet. Keep search keys out of chat, Git and shell history; they are separate from the model key.
 
-### Follow a PR without starting a worker
+### Follow a PR & run zero-checkout blind reviews
 
 In an existing task Thread, ask:
 
@@ -133,9 +140,7 @@ In an existing task Thread, ask:
 
 Check the card's PR, Thread, evidence scope, interval and lifetime, then use its **dedicated confirm button**. The model only proposes the watch; typing “yes”, quoting agreement or answering an ordinary question cannot authorize it. A confirmation expires after ten minutes. Ask “Which PRs are being followed?” to inspect watches, or “Cancel PR watch `<watch-id>`” to get a cancellation card; cancelling also needs its dedicated confirmation.
 
-Polling, status-change notices and restart recovery run without an LLM turn or connector. The server must be able to read the target repository through GitHub's API; private repositories need suitable credentials kept on the server. **Commit statuses are not Checks/Actions:** `statuses-only` always discloses the missing coverage, and Otto does not silently downgrade full-scope requests when permissions fail. A green status is not requirements acceptance. Watches do not modify code, re-run CI or merge PRs. See [PR follow-up](docs/pr-watches.md) for scope, limits and the explicit authenticated Owner API.
-
-The pilot has exercised confirmation, active-watch cancellation, recovery and a synthetic status-to-background-notification path. That is not evidence of a real CI workflow or changed-head acceptance; those remain separate validation work.
+Polling, status-change notices and restart recovery run without an LLM turn or connector. When CI fails, reviews arrive, or a PR stalls past two hours, Otto surfaces structured diagnostics or a deduplicated stuck-watch card — where you can authorize a **zero-checkout blind PR review** (`git_pr_diff` with `core.hooksPath=/dev/null`, preferring a different engine family from the author worker and leaving local working trees untouched). **Commit statuses are not Checks/Actions:** `statuses-only` always discloses the missing coverage, and Otto does not silently downgrade full-scope requests when permissions fail. Watches never modify code, re-run CI or merge PRs. See [PR follow-up](docs/pr-watches.md) for scope, limits and the explicit authenticated Owner API.
 
 ## Local development & upgrades
 
@@ -154,24 +159,25 @@ pnpm local:reset
 
 `pnpm local:up` builds both packages, generates local `.dev.vars`, auto-pairs the connector on first boot, and prints a one-click sign-in URL.
 
-For source-linked connectors and self-hosted VPS upgrades (using an untracked `deploy/aliyun.env` for `deploy/remote.sh`):
+For source-linked connectors, self-hosted VPS upgrades, and read-only production verification (using an untracked `deploy/aliyun.env` for `deploy/remote.sh`):
 
 ```sh
 pnpm connector:restart
 pnpm deploy:vps
 pnpm deploy:vps -- --apply-env
+pnpm verify:prod
 ```
 
-`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired background service (run `otto install` once after service-unit updates without re-pairing; `PiAdapter` defaults to a 20s startup RPC timeout). `pnpm deploy:vps` backs up SQLite online, uploads the gzipped Steward bundle atomically with SSH drop retries and automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`.
+`pnpm connector:restart` rebuilds `apps/connector` and restarts your paired background service (run `otto install` once after service-unit updates without re-pairing; `PiAdapter` defaults to a 20s startup RPC timeout). `pnpm deploy:vps` backs up SQLite online, uploads the gzipped Steward bundle atomically with SSH drop retries and automatic rollback on failure, checks ACME renewal, and runs `deploy/doctor.sh`. `pnpm verify:prod` performs zero-secret smoke checks across local Connector state, local-vs-remote bundle SHA-256 alignment, remote `doctor.sh`, SQLite `050`–`053` tables, and loopback auth/HMAC gates.
 
 ## Documentation
 
 - [Cloud-server runbook](docs/self-hosted.md) — service, reverse proxy, TLS, upgrades and backups.
-- [Connector runbook](docs/agent-connect.md) — pairing, directories, proxies and diagnostics.
-- [Usage and API](docs/usage.md) — owner API, local agent behavior and session viewing.
-- [PR follow-up](docs/pr-watches.md) — confirmation cards, GitHub evidence scopes and persistent read-only watches.
+- [Connector runbook](docs/agent-connect.md) — pairing, directories, local probes, notifications, proxies and diagnostics.
+- [Usage and API](docs/usage.md) — owner API, webhook endpoints, local agent behavior and session viewing.
+- [PR follow-up](docs/pr-watches.md) — confirmation cards, stuck detection, zero-checkout blind review and GitHub evidence scopes.
 - [Supervised improvement](docs/design/otto-improvement.md) — retained experiments, evaluation gates and human acceptance; not autonomous production self-modification.
-- [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Routing eval](docs/routing-eval.md) · [Memory eval](docs/memory-eval.md) — for contributors.
+- [Architecture](docs/design/steward.md) · [Product spec](docs/spec.md) · [Agent-autoloop adoptions](docs/plan/agent-autoloop-adoptions.md) · [Routing eval](docs/routing-eval.md) · [Memory eval](docs/memory-eval.md) — for contributors.
 
 ## License
 
