@@ -20,20 +20,20 @@ const COPY = {
     '在一个网页里，调度你几台电脑上的 coding agent。',
   ],
   heroLead: [
-    'When working across a laptop, a desktop, and a phone, it is hard to track what each local agent is doing. Otto runs a persistent Steward process on your server to hold conversations, task state, and reminders, and dispatches code changes to pi, Claude Code, or Codex CLI on your own computers. Repositories and full session logs remain on local disk.',
-    '在笔记本、台式机和手机之间切换工作时，往往很难集中追踪各台机器上的任务进度。Otto 在你自己的服务器上运行一个常驻进程（Steward），统一维护对话、事项状态与待办提醒；涉及读写代码的任务则分发给各台电脑上的 pi、Claude Code 或 Codex CLI 执行，代码仓库与完整会话日志始终留在本地。',
+    'When working across a laptop, a desktop, and a phone, it is hard to track what each local agent is doing. Otto runs a persistent Steward process on your server to hold conversations, task state, quota-cooldown recovery, and reminders, while dispatching code work to pi, Claude Code, Codex CLI, Antigravity, or OpenCode on your own computers. Repositories and full session logs remain on local disk.',
+    '在笔记本、台式机和手机之间切换工作时，往往很难集中追踪各台机器上的任务进度。Otto 在你自己的服务器上运行一个常驻进程（Steward），统一维护对话、事项状态、限流冷却恢复与待办提醒；涉及读写代码的任务则分发给各台电脑上的 pi、Claude Code、Codex CLI、Antigravity 或 OpenCode 执行，代码仓库与完整会话日志始终留在本地。',
   ],
   heroCtaStart: ['Setup guide', '安装与运行'],
   heroCtaPreview: ['See workflows', '查看典型场景'],
   copyBtn: ['Copy', '复制'],
   copiedBtn: ['Copied', '已复制'],
   factAgents: [
-    'Local adapters: pi · Claude Code · Codex CLI · Antigravity',
-    '本地适配器：pi · Claude Code · Codex CLI · Antigravity',
+    'Local adapters: pi · Claude Code · Codex CLI · Antigravity · OpenCode / Agentica (ACP) · dsh / zcode',
+    '本地适配器：pi · Claude Code · Codex CLI · Antigravity · OpenCode / Agentica（ACP）· dsh / zcode',
   ],
   factOS: [
-    'Connectors: macOS · Linux · Windows (outbound connection, no port forwarding)',
-    '连接器运行环境：macOS · Linux · Windows（出站连接，无需端口映射）',
+    'Connectors: macOS · Linux · Windows (outbound WS, local SHA-256 probes & OS desktop notifications)',
+    '连接器运行环境：macOS · Linux · Windows（出站连接，免开入站端口，含桌面通知与本地探针）',
   ],
   factHost: [
     'Steward host: Linux VPS (Node.js + SQLite) or Cloudflare Workers',
@@ -41,15 +41,16 @@ const COPY = {
   ],
   previewKicker: ['WORKFLOWS', '界面示例'],
   previewTitle: [
-    'Four common workflows',
-    '日常使用的四个典型场景',
+    'Five everyday workflows',
+    '日常使用的五个典型场景',
   ],
   previewSub: [
     'Select a tab below (or press Left / Right arrow keys) to switch between workflows.',
     '点击下方标签（或按键盘 ← / → 方向键）切换不同工作流。',
   ],
   scTabDispatch: ['Run a local task', '派发本地任务'],
-  scTabPr: ['Follow a GitHub PR', '跟进 GitHub PR'],
+  scTabPr: ['PR watch & blind review', 'PR 跟进与盲审'],
+  scTabAutoloop: ['Quota hold & probes', '限流挂起与探针'],
   scTabMemory: ['Notes & repo skills', '项目记忆与技能'],
   scTabAudit: ['Spend & worktrees', '费用与目录清理'],
   mockThreadsLabel: ['Threads', '事项列表'],
@@ -61,23 +62,23 @@ const COPY = {
     '整体架构与职责划分',
   ],
   archSub: [
-    'The server persists state in a single SQLite file; your computers connect via outbound WebSockets with no public IP or port forwarding.',
-    '服务端使用单个 SQLite 文件持久化状态；本地电脑通过出站 WebSocket 连接服务端，无需公网 IP 或端口映射。',
+    'The server persists state in a single SQLite file and verifies inbound webhooks; your computers connect via outbound WebSockets with no public IP or port forwarding.',
+    '服务端使用单个 SQLite 文件持久化状态并接收验签 Webhook；本地电脑通过出站 WebSocket 连接服务端，无需公网 IP 或端口映射。',
   ],
-  svgT1Title: ['Desktop & Phone Browser', '电脑与手机浏览器'],
-  svgT1B1: ['• Chat history + pending cards', '• 对话记录与待处理卡片'],
-  svgT1B2: ['• Cmd/Ctrl+K full-text search', '• Cmd/Ctrl+K 全文检索'],
-  svgT1B3: ['• Passkey login & optional push', '• Passkey 登录与可选推送'],
+  svgT1Title: ['Browsers & Channels', '浏览器与外部通知'],
+  svgT1B1: ['• Chat history + decision cards', '• 对话记录与待处理卡片'],
+  svgT1B2: ['• Cmd/Ctrl+K hybrid search', '• Cmd/Ctrl+K 全文混合检索'],
+  svgT1B3: ['• Passkey, Push & Feishu cards', '• Passkey、Push 与飞书签名卡'],
   svgLink1: ['Live sync', '实时同步'],
   svgT2Title: ['Linux VPS (or Workers)', '云服务器（或 Workers）'],
-  svgT2B1: ['Code paths: queues / timers / PR checks', '常规逻辑：队列 / 定时 / PR 检查'],
-  svgT2B2: ['Model calls: routing / summaries', '模型调用：路由判断 / 进度整理'],
-  svgT2B3: ['Single-file SQLite + FTS5', '单文件 SQLite + FTS5 数据库'],
+  svgT2B1: ['Code paths: cooldown / probe / PR', '确定逻辑：冷却 / 探针 / PR 分诊'],
+  svgT2B2: ['Model calls: routing (8-hop cap)', '模型调用：路由 / 摘要（8 跳熔断）'],
+  svgT2B3: ['SQLite + FTS5 + Webhooks', '单文件 SQLite + FTS5 + Webhook'],
   svgLink2Top: ['Outbound WS', '出站连接'],
   svgLink2Bot: ['No inbound port', '免开入站端口'],
-  svgT3B1: ['• Spawns pi / Claude Code / Codex', '• 调用本机 pi / Claude Code / Codex'],
-  svgT3B2: ['• Worktree isolation, diff & cleanup', '• Worktree 隔离、Diff 查看与清理'],
-  svgT3B3: ['• Repos & logs stay on local disk', '• 仓库与完整日志留在本机磁盘'],
+  svgT3B1: ['• pi / Claude / Codex / ACP', '• pi / Claude / Codex / ACP 等'],
+  svgT3B2: ['• Worktrees, PR diff & probes', '• Worktree、零检出 Diff 与探针'],
+  svgT3B3: ['• Local repos + desktop notify', '• 仓库留本机磁盘 + 系统桌面通知'],
   pillarATag: ['Offline-Tolerant', '离线可用'],
   pillarATitle: ['Queue tasks and notes while local machines sleep', '本地设备休眠时仍可记录与排期'],
   pillarABody: [
@@ -102,8 +103,8 @@ const COPY = {
     '关键工程取舍',
   ],
   boundSub: [
-    'Concrete implementation rules aimed at preventing lost context, API stalls, and accidental side effects during long tasks.',
-    '针对长周期任务中常见的上下文遗忘、接口异常与误操作问题，系统在实现上做了以下约束。',
+    'Concrete implementation rules aimed at preventing lost context, quota failures, runaway loops, and accidental side effects during long tasks.',
+    '针对长周期任务中常见的上下文遗忘、配额限流、死循环与误操作问题，系统在实现上做了以下约束。',
   ],
   bound1Tag: ['State Storage', '状态存储'],
   bound1Title: ['Task progress and project notes stored in SQLite', '事项进度与项目备注独立存入 SQLite'],
@@ -112,22 +113,34 @@ const COPY = {
     '事项状态、worker 汇报和项目约定都保存在结构化表里，每轮对话仅向模型注入当前状态摘要，避免长对话压缩历史记录时丢失早期约定。',
   ],
   bound2Tag: ['Less Model Reliance', '减少模型依赖'],
-  bound2Title: ['Routine workflows driven directly by deterministic code', '固定流程直接由常规代码驱动'],
+  bound2Title: ['Routine workflows and local probes run directly in code', '固定流程与本地探针直接走常规代码'],
   bound2Body: [
-    'Timeout checks, retry queues, scheduled PR polling, and completion notices run directly in code without per-tick LLM calls. Pending decision cards still arrive even if a model API fails or hits its daily budget.',
-    '超时检测、队列重试、PR 定时轮询与完成通知均直接走确定性的代码逻辑，无需逐次调用大模型。即便模型接口异常或达到单日预算上限，待处理的确认卡片仍会正常送达。',
+    'Timeout checks, PR polling, and SHA-256-approved local scripts under ~/.otto/probes/ run in deterministic code (consuming 0 tokens when untriggered). Clean runs missing a report execute at most one read-only salvage pass.',
+    '超时检测、PR 轮询与 ~/.otto/probes/ 下经 SHA-256 审批的本地巡检脚本均由确定性代码驱动（未触发时消耗 0 Token）；worker 漏调 report 时也仅做最多一次只读补报。',
   ],
   bound3Tag: ['Explicit Approval', '权限确认'],
   bound3Title: ['Side-effecting actions require clicking a confirmation card', '涉及外部变更的操作必须点击确认卡'],
   bound3Body: [
-    'Starting or cancelling a PR watch, removing an unmerged worktree, or writing a repo skill file requires clicking its confirmation button — replying "ok" in chat does not execute it. Web search turns also isolate execution tools.',
-    '开启或取消 PR 跟进、清理含未合并提交的 worktree、写入仓库技能文件，均需点击对应的确认按钮，在聊天框回复“同意”不会触发执行；联网搜索轮次亦默认隔离执行工具。',
+    'Starting or cancelling a PR watch, dispatching a cross-machine probe, removing an unmerged worktree, or writing a SKILL.md file requires clicking its dedicated card button. Repo isolation and probe approvals can only be changed locally via CLI.',
+    '开启或取消 PR 跟进、派发跨机只读探针、清理含未合并提交的 worktree、写入仓库技能文件，均需点击专用确认按钮；仓库隔离与本地探针白名单仅允许在本机 CLI 修改。',
   ],
-  bound4Tag: ['Stop Controls', '中断控制'],
-  bound4Title: ['Stopping a reply is separate from interrupting a worker', '停止回复与中断本地任务相互独立'],
+  bound4Tag: ['Stop & Loop Guards', '中断与熔断'],
+  bound4Title: ['Three-way independent stop and 8-hop loop circuit breaker', '三路独立停止，8 跳自动推进熔断'],
   bound4Body: [
-    'Stopping the current chat reply, interrupting a running local agent, and cancelling a background PR watch are separate controls; cancelling a reply does not kill an active coding run.',
-    '终止当前文字回复、中断本地运行中的 coding agent、取消后台 PR 跟进是三个分离的控制项，打断单轮回复不会误停后台正在执行的编码任务。',
+    'Stopping the current reply, interrupting a local coding agent, and cancelling a PR watch are separate controls; autonomous event/follow-up chains automatically pause above 8 consecutive hops (autoHops) until you reply.',
+    '终止当前回复、中断本地运行中的 agent、取消后台 PR 跟进互不牵连；事件与定时回看构成的连续自动执行链超过 8 跳（autoHops）会强制暂停，防止无人值守死循环。',
+  ],
+  bound5Tag: ['Quota Cooldowns', '限流恢复'],
+  bound5Title: ['Dual-granularity quota hold with automatic resume', '双粒度限流冷却挂起，到期自动续跑'],
+  bound5Body: [
+    'Distinguishes quota/rate-limit windows from auth or billing errors: throttled sessions park in idle per (machine, provider/agent) with their worktree intact, release serial repo slots, and auto-resume when the window resets without an LLM call.',
+    '区分鉴权欠费与窗口配额限流：触发限流时按 (机器, provider/agent) 登记重置时刻并将会话挂起为 idle（保留 worktree 与原会话、释放串行槽位），窗口恢复后无需调用大模型即可自动接续。',
+  ],
+  bound6Tag: ['Blind Review & Alerts', '零检出盲审与通知'],
+  bound6Title: ['Zero-checkout git-object PR review and signed notifications', '裸 Git 对象盲审，多端通知不泄密'],
+  bound6Body: [
+    'PR blind review extracts diffs directly from git objects (hooks disabled, octopus merges refused, dirty local worktrees untouched) and runs an author-isolated cross-engine read-only pass; supports OS desktop alerts and SSRF-guarded Feishu V2 / DingTalk / WeCom / Slack webhooks.',
+    'PR 盲审直接从裸 Git 对象提取差异（禁用 hooks、拒绝章鱼合并、不触碰本地脏工作区），剥离原作者推理后交由异构只读引擎审查；支持本机桌面通知与 SSRF 防护下的飞书 V2 / 企微 / 钉钉签名推送。',
   ],
   qsKicker: ['SETUP', '上手步骤'],
   qsTitle: [
@@ -159,8 +172,8 @@ const SCENARIOS = {
     activeThread: 0,
     threads: [
       { title: ['Debug concurrent state refresh', '排查并发状态刷新失败'], meta: 'pi · mac-studio · running' },
-      { title: ['Follow PR #42 CI status', '跟进 PR #42 CI 状态'], meta: 'watch · github' },
-      { title: ['Clean old worktree folders', '清理历史分支目录'], meta: 'audit · 2 machines' },
+      { title: ['PR #42 watch & blind review', '跟进 PR #42 与盲审'], meta: 'watch · github' },
+      { title: ['Sync market cache worker', '重构行情缓存同步逻辑'], meta: 'pi · cooldown -> 14:00' },
     ],
     paneTitle: ['Debug concurrent state refresh', '排查并发状态刷新失败'],
     paneSub: 'Thread · otto/fix-state-race',
@@ -189,19 +202,19 @@ const SCENARIOS = {
     ],
     facts: [
       {
-        title: 'mac-studio · pi',
+        title: 'mac-studio · pi (deepseek-flash)',
         body: [
           'Edits happen inside an isolated Git worktree; uncommitted changes in your main checkout remain untouched.',
           '文件修改均在独立 Git worktree 内进行，主工作区未提交的改动不受影响。',
         ],
-        meter: 38,
-        sub: ['Context: 48.2k / 128k tokens', '上下文用量：48.2k / 128k tokens'],
+        meter: 18,
+        sub: ['Context: 182k / 1M tokens (18%)', '上下文用量：182k / 1M tokens（18%）'],
       },
       {
-        title: ['Session log', '原始会话视图'],
+        title: ['Session log & report salvage', '原始会话与补报兜底'],
         body: [
-          'Open the Session view to inspect full terminal output and diffs, or send follow-up instructions directly to that worker.',
-          '切换至 Session 视图可查看该机器上的原始终端输出与 diff，也可随时补充指令或中止运行。',
+          'Inspect raw terminal output and diffs live; if an agent finishes cleanly without calling report, Otto runs at most one read-only salvage pass.',
+          '可随时查看该机器上的原始会话与 diff；若 agent 正常结束但漏调 report，连接器最多执行一次只读补报回收结论。',
         ],
       },
     ],
@@ -211,57 +224,111 @@ const SCENARIOS = {
     ],
   },
   pr: {
-    stats: { machines: '2/3', running: '0', waiting: '1', spend: '$0.09' },
+    stats: { machines: '2/3', running: '1', waiting: '1', spend: '$0.11' },
     activeThread: 1,
     threads: [
       { title: ['Debug concurrent state refresh', '排查并发状态刷新失败'], meta: 'pi · mac-studio · idle' },
-      { title: ['Follow PR #42 CI status', '跟进 PR #42 CI 状态'], meta: 'watch · 1 failing check' },
+      { title: ['PR #42 watch & blind review', '跟进 PR #42 与盲审'], meta: 'codex · blind review' },
       { title: ['Clean old worktree folders', '清理历史分支目录'], meta: 'audit · 2 machines' },
     ],
-    paneTitle: ['Follow PR #42 CI status', '跟进 PR #42 CI 状态'],
-    paneSub: 'PR Watch · pull/42',
+    paneTitle: ['Follow PR #42 & Zero-Checkout Blind Review', '跟进 PR #42 与零检出交叉盲审'],
+    paneSub: 'PR Watch · pull/42 · claude-code -> codex',
     userMsg: [
-      'Poll PR #42 every 15 minutes on this thread and notify me if CI fails or new review comments arrive, without starting a worker yet.',
-      '在此事项下每 15 分钟检查一次 PR #42，若 CI 失败或有新评审意见再提醒我，暂不启动本地 worker。',
+      'Follow PR #42 on this thread. Run a zero-checkout blind review on the latest commit without touching my local dirty checkout.',
+      '在此事项下跟进 PR #42，并对最新提交跑一次零检出盲审，不要切换或改动我本地带未提交修改的工作区。',
     ],
-    agentMeta: ['PR CHECK · 2M AGO', 'PR 检查 · 2 分钟前'],
+    agentMeta: ['BLIND REVIEW · CODEX READONLY', '零检出盲审 · CODEX 只读会话'],
     agentMsg: [
-      'Job unit-linux failed on commit 9f3c21a (1 assertion failure in cookie-options.test.ts). No merge conflicts; 1 review comment summarized.',
-      '提交 9f3c21a 上的 unit-linux 任务失败（cookie-options.test.ts 存在 1 处断言未通过）；无合并冲突，已同步摘录 1 条评审意见。',
+      'Extracted unified diff from bare git objects (core.hooksPath=/dev/null, 6 files, dirty worktree untouched) and ran codex in an author-isolated read-only session.',
+      '已直接从裸 Git 对象提取 PR #42 差异（禁用 hooks，共 6 个文件，未触碰本地脏工作区），剥离原作者上下文后由异构引擎 codex 完成只读审查。',
     ],
     cardTone: 'warn',
-    cardKind: ['PR FAILURE SUMMARY', 'PR 检查异常摘要'],
+    cardKind: ['PR STUCK / REVIEW ACTION', 'PR 诊断与处理确认'],
     cardTitle: [
-      'Dispatch a worker on thinkpad-linux to fix cookie-options.test.ts?',
-      '是否在 thinkpad-linux 上启动 worker 修复该测试失败？',
+      '1 race condition found in session refresh; dispatch a worker to fix or keep watching?',
+      '盲审发现会话刷新存在 1 处并发竞态；是否派发 worker 修复或继续只读跟进？',
     ],
     cardBody: [
-      'Status polling and log extraction ran on the server without keeping a local coding agent running.',
-      '状态轮询与失败日志截取均由服务端直接调用接口完成，期间无需保持本地 agent 在线。',
+      'Author reasoning was stripped before review; octopus merges (parentCount > 2) are refused automatically.',
+      '审查提示词已剥离原作者对话说明以防思维定势；遇到多父节点章鱼合并时会自动拒绝失真对比。',
     ],
     actions: [
-      ['Start worker', '启动 worker 修复'],
-      ['View log excerpt', '查看报错片段'],
+      ['Dispatch fix worker', '派发 worker 修复'],
+      ['Keep watching only', '继续只读跟进'],
     ],
     facts: [
       {
-        title: ['Server-side polling', '服务端定时轮询'],
+        title: ['Zero-checkout git_pr_diff', '零检出裸对象提取'],
         body: [
-          'Timers run inside the Steward process, survive restarts, and consume zero model tokens while status is unchanged.',
-          '轮询定时器运行在服务端进程内，重启后自动恢复，状态无变化时不消耗模型 token。',
+          'Fetches PR refs and computes three-dot diffs without git checkout, merge, or hooks — local uncommitted edits stay intact.',
+          '直接拉取远端引用计算三点差异，不执行 checkout、merge 或仓库钩子，本地未提交代码毫发无损。',
         ],
       },
       {
-        title: ['Read-only boundary', '只读权限边界'],
+        title: ['Stalled-head alert (>2h)', '2 小时停滞去重提醒'],
         body: [
-          'PR watches only read status and logs; Otto never merges PRs, re-runs CI, or pushes commits automatically.',
-          'PR 跟进仅做状态与日志读取，不会自动合并代码、重跑 CI 或推送提交。',
+          'If checks, conflicts, or requested changes stall past 2 hours, Otto sends one consent card per head and never auto-merges.',
+          '同一提交卡在等待检查、冲突或待修改状态超过 2 小时时推送单次确认卡，绝不自动合并或改写远端 PR。',
         ],
       },
     ],
     caption: [
-      'The server polls CI status, extracts failing log excerpts, and checks mergeability without keeping a local agent running.',
-      '服务端负责定时轮询 CI 状态与合并冲突并截取关键报错日志，出现异常后再由你决定是否派发修复任务。',
+      'Monitor CI, conflicts, and stalled heads without a running worker, and trigger cross-engine blind reviews without touching local branches.',
+      '无需挂着本地 agent 即可持续监测 CI、冲突与停滞状态，并支持在不污染本地分支的前提下执行跨引擎零检出盲审。',
+    ],
+  },
+  autoloop: {
+    stats: { machines: '2/3', running: '0', waiting: '1', spend: '$0.12' },
+    activeThread: 0,
+    threads: [
+      { title: ['Sync market cache worker', '重构行情缓存同步逻辑'], meta: 'pi:zai-coding-cn · hold' },
+      { title: ['Probe: dist bundle check', '本地探针：产物完整性巡检'], meta: 'probe · sha256 · 0 tok' },
+      { title: ['GitHub webhook: main CI', '入站事件：main 构建通知'], meta: 'verified · autoHops 2/8' },
+    ],
+    paneTitle: ['Quota Cooldown Hold & Zero-Token Probes', '额度冷却挂起与零 Token 本地探针'],
+    paneSub: 'Cooldown · pi:zai-coding-cn -> resets 14:00',
+    userMsg: [
+      'Continue refactoring the cache sync module on thinkpad-linux and run the hourly local build probe.',
+      '继续在 thinkpad-linux 上完成缓存同步模块重构，并保持每小时一次的本地构建产物探针巡检。',
+    ],
+    agentMeta: ['QUOTA HOLD · AUTO-RESUME ARMED', '额度冷却挂起 · 已排期自动续跑'],
+    agentMsg: [
+      'zai-coding-cn hit its 5-hour quota window. Worker w_01m89 parked in idle (worktree & session preserved, serial repo slot released) and will auto-resume at 14:00.',
+      'zai-coding-cn 触发套餐窗口限流。会话 w_01m89 已挂起为 idle（独立 worktree 与原会话完整保留，仓库串行写槽位已释放），将于 14:00 窗口重置后自动续跑。',
+    ],
+    cardTone: 'warn',
+    cardKind: ['QUOTA COOLDOWN · THINKPAD-LINUX', '额度窗口冷却挂起'],
+    cardTitle: [
+      'Wait for 14:00 zero-LLM auto-resume, or switch to codex / deepseek on thinkpad-linux now?',
+      '等待 14:00 到期零开销自动续跑，还是立即切到同机未限流的 codex / deepseek 继续？',
+    ],
+    cardBody: [
+      'Feishu Schema 2.0 card (with single-use 7-day sign-in link) and local OS desktop notification delivered.',
+      '已同步推送本机系统桌面通知与飞书 Schema 2.0 签名卡片（附 7 天有效单次免密跳转链接，二次点击返回 HTTP 410 防重放）。',
+    ],
+    actions: [
+      ['Switch to codex now', '切到同机 codex 继续'],
+      ['Wait until 14:00', '等待 14:00 自动恢复'],
+    ],
+    facts: [
+      {
+        title: ['Dual-granularity cooldowns', '双粒度冷却与自动续跑'],
+        body: [
+          'Tracks pi:<provider> separately from agent:<kind>; rate limits never mark a healthy session broken.',
+          '按 pi:<provider> 与 agent:<kind> 分离记录冷却窗口，不把临时限流误判为鉴权损坏，到期由定时器直接唤醒原会话。',
+        ],
+      },
+      {
+        title: ['SHA-256 probes & 8-hop cap', '零 Token 探针与 8 跳熔断'],
+        body: [
+          'Scripts approved via otto probe approve consume 0 LLM tokens while triggered: false; autonomous chains pause past 8 hops.',
+          '经 otto probe approve 签名的本地脚本未触发时消耗 0 Token；外部事件与回看连续自动执行超过 8 跳即触发熔断。',
+        ],
+      },
+    ],
+    caption: [
+      'Temporary rate limits park the worker cleanly until reset instead of failing the task, while SHA-256 local probes keep routine checks at zero token cost.',
+      '遇到临时限流时自动保留现场并在窗口恢复后接续执行，配合本地 SHA-256 脚本探针实现零 Token 日常巡检。',
     ],
   },
   memory: {
@@ -270,7 +337,7 @@ const SCENARIOS = {
     threads: [
       { title: ['Control Plane · Memory & Skills', '控制面板 · 记忆与技能'], meta: 'notes + repo skills' },
       { title: ['Debug concurrent state refresh', '排查并发状态刷新失败'], meta: 'pi · mac-studio · done' },
-      { title: ['Follow PR #42 CI status', '跟进 PR #42 CI 状态'], meta: 'watch · green' },
+      { title: ['PR #42 watch & blind review', '跟进 PR #42 与盲审'], meta: 'watch · green' },
     ],
     paneTitle: ['Project Notes & Repo Skills', '项目记忆与仓库技能'],
     paneSub: 'Control Plane · Memory & Skills',
@@ -323,7 +390,7 @@ const SCENARIOS = {
     activeThread: 2,
     threads: [
       { title: ['Debug concurrent state refresh', '排查并发状态刷新失败'], meta: 'pi · mac-studio · done' },
-      { title: ['Follow PR #42 CI status', '跟进 PR #42 CI 状态'], meta: 'watch · green' },
+      { title: ['PR #42 watch & blind review', '跟进 PR #42 与盲审'], meta: 'watch · green' },
       { title: ['Control Plane · Worktree Audit', '控制面板 · 目录清理'], meta: '4 merged · 1.8 GB' },
     ],
     paneTitle: ['Spend & Git Worktree Cleanup', '用量统计与 Worktree 清理'],
@@ -391,10 +458,10 @@ const QUICKSTARTS = {
     ],
   },
   vps: {
-    label: 'Linux VPS bundle',
+    label: 'Linux VPS bundle & smoke check',
     desc: [
-      'Build the single-file Node.js bundle on your dev machine, copy dist/node/steward-node.mjs and dist/ui/ to your Linux server behind an HTTPS reverse proxy, and configure .dev.vars:',
-      '在开发机编译单文件产物，将 dist/node/steward-node.mjs 与 dist/ui/ 拷贝至 Linux 服务器，配置 .dev.vars 与 HTTPS 反向代理即可运行：',
+      'Build the single-file Node.js bundle on your dev machine, copy dist/node/steward-node.mjs and dist/ui/ to your Linux server behind an HTTPS reverse proxy, and verify health:',
+      '在开发机编译单文件产物，将 dist/node/steward-node.mjs 与 dist/ui/ 部署至 Linux 服务器，后续支持一键备份升级与零密钥生产体检：',
     ],
     lines: [
       'corepack pnpm install --frozen-lockfile',
@@ -402,8 +469,9 @@ const QUICKSTARTS = {
       'mkdir -p apps/steward/dist/ui',
       'cp -R apps/steward/ui/. apps/steward/dist/ui/',
       '',
-      '# Subsequent upgrades when deploy/aliyun.env is set:',
+      '# Subsequent upgrades & read-only smoke verification (with deploy/aliyun.env):',
       'pnpm deploy:vps',
+      'pnpm verify:prod',
     ],
   },
   connect: {
@@ -418,7 +486,8 @@ const QUICKSTARTS = {
       '',
       '# Run the single-use command generated in Workspace -> Machines:',
       'otto connect <your-otto-url> <pairing-code>',
-      'otto status',
+      'otto doctor',
+      'otto notify on   # optional: enable native OS desktop notifications',
     ],
   },
 };
@@ -428,53 +497,53 @@ const DOCS_ITEMS = [
     path: 'docs/self-hosted.md',
     title: ['Self-Hosted Server Guide', '服务器部署手册'],
     desc: [
-      'systemd unit setup, HTTPS reverse proxy with WebSocket support, online SQLite backups, Web Push, and optional web search.',
-      'systemd 配置、HTTPS 与 WebSocket 反向代理、SQLite 在线备份、手机通知与可选搜索配置。',
+      'systemd unit setup, HTTPS reverse proxy with WebSocket support, online SQLite backups, deploy:vps / verify:prod, and Web Push.',
+      'systemd 配置、HTTPS 与 WebSocket 反向代理、SQLite 在线备份、一键升级体检与 Web Push 配置。',
     ],
   },
   {
     path: 'docs/agent-connect.md',
-    title: ['Connector Setup & Troubleshooting', '连接器安装与排错'],
+    title: ['Connector Setup & Local Controls', '连接器安装与本地控制'],
     desc: [
-      'Background service setup on macOS, Linux, and Windows, directory allowlists, proxy variables, and log diagnostics.',
-      'macOS、Linux、Windows 后台服务自启说明、仓库目录授权、代理设置和常见连不上时的排查命令。',
+      'Service setup across macOS/Linux/Windows, multi-agent detection, repo write policies, SHA-256 probes (otto probe), and desktop alerts.',
+      'macOS、Linux、Windows 后台自启、多引擎检测、仓库隔离策略、本地 SHA-256 探针与系统桌面通知说明。',
     ],
   },
   {
     path: 'docs/usage.md',
-    title: ['Daily Usage & Owner API', '使用说明与接口'],
+    title: ['Daily Usage, Webhooks & API', '使用说明与接口'],
     desc: [
-      'How task routing works, choosing local agent models per machine, viewing raw worker sessions, and calling the Owner API.',
-      '日常怎么派任务、按机器选择本机 agent 模型、查看原始会话日志，以及 Owner API 的调用格式。',
+      'Task routing, quota cooldown auto-resume, inbound GitHub/GitLab webhooks, signed Feishu/DingTalk/WeCom/Slack webhooks, and Owner API.',
+      '日常派工、限流挂起恢复、GitHub/GitLab 验签入站、飞书 V2 等签名出站 Webhook 以及 Owner API 格式。',
     ],
   },
   {
     path: 'docs/pr-watches.md',
-    title: ['GitHub PR Watches', 'PR 跟进说明'],
+    title: ['PR Watches & Blind Review', 'PR 跟进与零检出盲审'],
     desc: [
-      'Confirmation cards, required GitHub permissions, commit statuses vs Actions checks, and known limitations.',
-      '确认卡机制、GitHub 令牌权限说明、statuses 与 Actions 检查的区别，以及目前没覆盖的边界。',
+      'Confirmation cards, CI failure & conflict triage, 2-hour stuck alerts, and zero-checkout cross-engine blind PR review.',
+      '确认卡机制、CI 失败与冲突分诊、2 小时停滞提醒，以及不污染本地脏工作区的跨引擎零检出盲审。',
+    ],
+  },
+  {
+    path: 'docs/plan/agent-autoloop-adoptions.md',
+    title: ['Autoloop Stages 1–5 Design', '阶段 1–5 可靠性与生态方案'],
+    desc: [
+      'Dual-granularity quota holds, report salvage, ACP/Command adapters, zero-token probes, 8-hop circuit breaker, and channel security.',
+      '双粒度限流冷却、单次补报抢救、ACP/Command 适配器、零 Token 探针、8 跳熔断与多通道安全边界记录。',
     ],
   },
   {
     path: 'docs/design/steward.md',
-    title: ['Steward Design Notes', 'Steward 架构说明'],
+    title: ['Steward Architecture & Spec', 'Steward 架构设计'],
     desc: [
-      'Why state lives in SQLite, how plain code and LLM turns divide work, serial turns, and crash recovery.',
-      '数据库表怎么设计、普通代码和模型怎么分工、串行轮次控制以及进程重启后的恢复方式。',
-    ],
-  },
-  {
-    path: 'docs/spec.md',
-    title: ['Protocol & Product Spec', '协议与规格文档'],
-    desc: [
-      'Wire messages between Steward and Connector, state transitions, evaluation scripts, and ADRs.',
-      '服务端与连接器之间的消息格式、状态流转定义、评测脚本说明以及历次架构决策记录（ADR）。',
+      'Why state lives in SQLite, how deterministic code and LLM turns divide work, serial turns, and crash recovery.',
+      '数据库账本表结构、确定性代码与大模型轮次的分工边界、串行可中止轮次以及崩溃重启恢复机制。',
     ],
   },
 ];
 
-const SCENARIO_ORDER = ['dispatch', 'pr', 'memory', 'audit'];
+const SCENARIO_ORDER = ['dispatch', 'pr', 'autoloop', 'memory', 'audit'];
 const QS_ORDER = ['local', 'vps', 'connect'];
 
 function detectInitialLang() {
