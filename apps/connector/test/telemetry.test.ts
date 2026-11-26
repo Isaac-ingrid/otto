@@ -1,5 +1,5 @@
 // Stage 2 Connector telemetry tests:
-// - `diffCumulativeSessionUsage`: prevents double-counting tokens/cost across multi-turn `pi`/`antigravity` continuations
+// - `diffCumulativeSessionUsage`: prevents double-counting tokens/cost across multi-turn `pi`/ACP continuations
 // - `inferClaudeContextWindow`: maps known Anthropic Claude models/1M suffixes and leaves custom/gateway IDs null
 // - `WorkerManager`: retains `telemetry` emitted inside a `ProgressThrottle` suppression window and flushes it on the next allowed frame or `settled`
 // - `CodexAdapter`: measures `lastToolMs`, increments `compactionCount`, and keeps `contextPercent` absent when `model_context_window` is unknown

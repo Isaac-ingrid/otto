@@ -20,8 +20,7 @@ import { findSessionHolders } from "./session-holders.ts";
 import { ProgressThrottle } from "./progress.ts";
 import { inspectSessionTail, type SessionTail } from "./session-tail.ts";
 import { readClaudeSessionHistory, readCodexSessionHistory, readSessionHistory } from "./session-history.ts";
-import { readFullSessionHistory, antigravitySessionPath, claudeSessionPath, codexSessionPath } from "./full-session-history.ts";
-import { isolatedAgyGeminiDir } from "./antigravity-adapter.ts";
+import { readFullSessionHistory, claudeSessionPath, codexSessionPath } from "./full-session-history.ts";
 import type { ClaudeAdapter } from "./claude-adapter.ts";
 import type { CodexAdapter } from "./codex-adapter.ts";
 import { acceptsAgentModel, AgentModelIdSchema, type HistoryPage, type RepoSkillOpArgs, type RepoSkillResult, type WorkerCheckpointArgs, type WorkerCheckpointResult, type WorkerDiffArgs, type WorkerDiffResult, type WorktreeAuditArgs, type WorktreeAuditResult, type WorktreeCleanupArgs, type WorktreeCleanupResult } from "@isaac2ingrid/protocol";
@@ -1793,11 +1792,6 @@ export class WorkerManager {
         path = this.resolveClaudeTranscriptPath(worker);
       } else if (worker.agent === "codex") {
         path = this.resolveCodexTranscriptPath(worker) ?? path;
-      } else if (worker.agent === "antigravity") {
-        const defaultDir = process.env.AGY_CONFIG_DIR ?? join(homedir(), ".gemini");
-        path = worker.sessionId
-          ? antigravitySessionPath(worker.sessionId, [isolatedAgyGeminiDir(this.stateDir), defaultDir])
-          : null;
       }
       if (!path) throw new CommandError("no_history", "This worker has not recorded a local session yet.");
       return readFullSessionHistory(path, since, maxBytes);
@@ -2583,8 +2577,6 @@ export class WorkerManager {
     const out: string[] = [];
     const creds = this.store.getCredentials();
     if (creds?.token) out.push(creds.token);
-    const agy = this.store.getAntigravityApiKeyConfig();
-    if (agy?.apiKey) out.push(agy.apiKey);
     return out;
   }
 

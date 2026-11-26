@@ -13,14 +13,13 @@ import { registerRepository } from "./repository.ts";
 import { EventLog } from "./events.ts";
 import { repoHookCapabilitySummary } from "./hooks.ts";
 import { scanRepoSkillBriefsSync } from "./repo-skills.ts";
-import type { LocalStore, AntigravityApiKeyConfig } from "./store.ts";
+import type { LocalStore } from "./store.ts";
 import type { StallWatchdogOptions } from "./watchdog.ts";
 import { CommandError, WorkerManager, type RecoveryOptions } from "./worker-manager.ts";
 import type { AgentAdapter } from "./agent.ts";
 import { PiAdapter } from "./pi-adapter.ts";
 import { ClaudeAdapter, claudeCommandFromEnv, detectClaude } from "./claude-adapter.ts";
 import { CodexAdapter, codexCommandFromEnv, detectCodex } from "./codex-adapter.ts";
-import { AntigravityAdapter, agyCommandFromEnv, detectAntigravity } from "./antigravity-adapter.ts";
 import {
   AcpAdapter,
   agenticaCommandFromEnv,
@@ -60,10 +59,6 @@ export interface ConnectorAppOptions {
   claudeCommand?: string[];
   /** The codex argv prefix for the default adapter set; tests point it at fake-codex. */
   codexCommand?: string[];
-  /** The agy argv prefix for the default adapter set; tests point it at fake-agy. */
-  agyCommand?: string[];
-  /** Optional isolated Antigravity Gemini API key profile (`otto agy-key`). */
-  agyApiKeyConfig?: AntigravityApiKeyConfig | null;
   /** §9 recovery knobs (tests shrink timers and inject process I/O). */
   recovery?: RecoveryOptions;
   /** Stall-watchdog knobs (tests shrink timers and inject CPU samples). */
@@ -85,14 +80,12 @@ export function maxWorkersFromMemory(): number {
 }
 
 /** Issue #17 + Stage 2: the connector's default agent set — pi always, plus installed external
- *  CLIs (`claude-code`, `codex`, `antigravity`, `opencode`, `agentica`) and locally allowlisted
+ *  CLIs (`claude-code`, `codex`, `opencode`, `agentica`) and locally allowlisted
  *  `CommandAdapter` presets (`dsh`, `zcode`, `command`). */
 export function defaultAdapters(
   stateDir: string,
   claudeCommand: string[] = claudeCommandFromEnv() ?? ["claude"],
-  agyCommand: string[] = agyCommandFromEnv() ?? ["agy"],
-  agyApiKeyConfig?: AntigravityApiKeyConfig | null,
-  codexCommand?: string[],
+  codexCommand: string[] = codexCommandFromEnv() ?? ["codex"],
   commandConfigs?: Partial<Record<CommandAgentKind, StoredCommandAdapterConfig>>,
 ): AgentAdapter[] {
   const adapters: AgentAdapter[] = [new PiAdapter({ stateDir })];
@@ -112,20 +105,9 @@ export function defaultAdapters(
     adapters.push(
       new CodexAdapter({
         stateDir,
-        ...(codexCommand ? { command: codexCommand } : {}),
+        command: codexCommand,
         version: codex.version,
         ...(codex.authStatus ? { authStatus: codex.authStatus } : {}),
-      }),
-    );
-  }
-  const agy = detectAntigravity(agyCommand);
-  if (agy.installed) {
-    adapters.push(
-      new AntigravityAdapter({
-        stateDir,
-        command: agyCommand,
-        version: agy.version,
-        ...(agyApiKeyConfig ? { apiKeyConfig: agyApiKeyConfig } : {}),
       }),
     );
   }
@@ -202,8 +184,6 @@ export class ConnectorApp {
         : defaultAdapters(
             options.stateDir,
             options.claudeCommand,
-            options.agyCommand,
-            options.agyApiKeyConfig ?? options.store.getAntigravityApiKeyConfig(),
             options.codexCommand,
             options.store.getCommandAdaptersConfig(),
           ));

@@ -42,7 +42,6 @@ const PREFERRED_REVIEWER_ORDER: readonly string[] = [
   "claude-code",
   "pi",
   "opencode",
-  "antigravity",
   "agentica",
   "dsh",
   "zcode",
@@ -52,7 +51,6 @@ const PREFERRED_REVIEWER_ORDER: readonly string[] = [
 function agentFamily(agent: string): string {
   if (agent === "claude-code") return "anthropic";
   if (agent === "codex") return "openai";
-  if (agent === "antigravity") return "google";
   return agent;
 }
 

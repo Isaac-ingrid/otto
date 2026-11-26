@@ -309,7 +309,6 @@ describe("B2/B3/B4: WorkerManager hook execution, security boundaries, and rollb
       deviceId: "dev_secret_test",
       token: "st1.dev_secret_test.99.supersecretdevicetokenvalue",
     });
-    store.setAntigravityApiKeyConfig({ apiKey: "AIzaSySecretAntigravityKey1234567890", model: "Gemini 4 Hydrogen (High)" });
     store.setProxyConfig({ url: "http://127.0.0.1:7890/", noProxy: ".internal.example" });
 
     // `cat` proves stdin is non-interactive (EOF immediately); env dump proves OTTO_* is stripped

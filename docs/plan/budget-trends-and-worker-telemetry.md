@@ -7,7 +7,7 @@
 
 ## 1. 背景与真实痛点
 
-随着 Otto 同时承载主对话编排、后台事件唤醒、定时 Routine、PR 盯盘自动诊断、断点记忆/技能提炼，以及多台机器上长周期运行的编码 Agent（`pi` / `claude-code` / `codex` / `antigravity`），当前在「成本归因」与「运行期上下文健康度」两个维度存在明显盲区：
+随着 Otto 同时承载主对话编排、后台事件唤醒、定时 Routine、PR 盯盘自动诊断、断点记忆/技能提炼，以及多台机器上长周期运行的编码 Agent（`pi` / `claude-code` / `codex` / ACP v1），当前在「成本归因」与「运行期上下文健康度」两个维度存在明显盲区：
 
 1. **预算仅有单日总额且缺少用途/事项归因**：
    - [`schema.ts`](../../apps/steward/src/schema.ts)（`015_budget`）中的 `sh_usage_day` 仅按 UTC 日期记录单一总额 `(day, costUsd, tokens, skippedWakes, overNotedAt, updatedAt)`，而 `sh_run`（`008_steward_llm`）本身**并未存储 `costUsd` 或 `tokens` 列**。
@@ -28,7 +28,7 @@
 | 旁路模型调用入口 | [`apps/steward/src/steward.ts`](../../apps/steward/src/steward.ts) `completeBackgroundText` | 统一收口了 PR CI 诊断、PR 评审提炼、断点蒸馏、技能候选分诊 4 类无工具调用，已计算单次 `costUsd` 与 `tokens` | 为 `completeBackgroundText` 增加结构化归因标签（`category`, `threadId`, `repoId`, `workerId`, `watchId`）落盘 `sh_usage_event` |
 | Worker 接力阈值规则 | [`apps/steward/src/handoff.ts`](../../apps/steward/src/handoff.ts) | 定义 `HIGH_CONTEXT_USAGE = 0.8`（`contextPercent >= 80` 自动切新会话交接而非 `resume`） | 前端黄灯预警阈值严格对齐 `80%`，红灯高危阈值设为 `90%`，前后端语义一致 |
 | Connector 进度节流器 | [`apps/connector/src/progress.ts`](../../apps/connector/src/progress.ts) | `ProgressThrottle` 强制保证同工具 ≥15s、任意事件 ≥5s 最小间隔，且 [`packages/protocol/src/events.ts`](../../packages/protocol/src/events.ts) `WorkerEventSchema` 支持扩展字段透传 | 遥测字段直接捎带在既有节流后的 `progress` 与 `settled` 事件上，**不新增高频独立心跳帧** |
-| 四大编码 Agent 适配器 | [`pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts) / [`claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts) / [`codex-adapter.ts`](../../apps/connector/src/codex-adapter.ts) / [`antigravity-adapter.ts`](../../apps/connector/src/antigravity-adapter.ts) | `antigravity` 已有实时 `usage_update`；`pi` 仅在 `settle` 调 `get_session_stats`；`claude` / `codex` 仅在结算汇总 `usage` | 按后端真实能力分级采集实时 `contextUsage`、`compactionCount` 与 `lastToolMs`，未知窗口上限时诚实留空百分比 |
+| 编码 Agent 适配器 | [`pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts) / [`claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts) / [`codex-adapter.ts`](../../apps/connector/src/codex-adapter.ts) / [`acp-adapter.ts`](../../apps/connector/src/acp-adapter.ts) | ACP v1 已有实时 `usage_update`；`pi` 在 `settle` 调 `get_session_stats`；`claude` / `codex` 在结算汇总 `usage` | 按后端真实能力分级采集实时 `contextUsage`、`compactionCount` 与 `lastToolMs`，未知窗口上限时诚实留空百分比 |
 | Web 控制面与 DOM 构建器 | [`apps/steward/ui/dom.js`](../../apps/steward/ui/dom.js) / [`control-plane.js`](../../apps/steward/ui/control-plane.js) | 全量基于 `createElement` / `createElementNS` 构建节点，[`ui-modules.test.ts`](../../apps/steward/test/ui-modules.test.ts) 严禁 `innerHTML` 与内联 `style=` | 在 `dom.js` 导出命名空间安全的 `svg()` 辅助器，用纯声明式 SVG 绘制堆叠柱状图与水位条，零第三方图表库、零内联样式 |
 
 ## 3. 核心设计不变量与安全边界
@@ -139,11 +139,11 @@ export interface WorkerLiveTelemetry {
 | Agent 后端 | 运行期 `contextTokens / contextWindow` 来源 | `compactionCount` 来源 | `lastToolMs` 来源 | 结算 `sh_worker_usage` 来源 |
 | --- | --- | --- | --- | --- |
 | **`pi`** | `turn_start`（距上次采样 ≥15s 时）及压缩完成后非阻塞调用 `rpc({ type: "get_session_stats" }, 1500)` 读取 `contextUsage` | 监听 `auto_compaction_start` / `auto_compaction_end`（或 `compaction` 记录）累加会话内计数 | 记录 `tool_execution_start` 时间戳，在 `tool_execution_end` 计算差值附带于下一帧 `progress` | `settle` 时 `get_session_stats` 返回的**会话累计值与上次结算游标做差**（防止 `resume` 续跑把前几轮累计 Token/花费重复计入 `sh_worker_usage`） |
-| **`antigravity`** | 原生监听实时 `usage_update` 事件中的 `used` 与 `size` 实时计算百分比 | 监听会话压缩通知事件（未提供时保持 `0`） | 工具调用起止时间差 | `promptResult` / `latestUsage` 单轮差值落盘 |
+| **`opencode` / `agentica`（ACP v1）** | 原生监听实时 `usage_update` 事件中的 `used` 与 `size` 实时计算百分比 | 监听会话压缩通知事件（未提供时保持 `0`） | 工具调用起止时间差 | `promptResult` / `latestUsage` 单轮差值落盘 |
 | **`claude-code`** | 解析流式 `assistant` 事件中的 `message.usage`（`input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`）作为当前上下文估算；从已知模型目录或 `modelUsage` 读取窗口上限（未知则留空窗口） | 监听 `system` 事件 `subtype === "compact_boundary"` 递增计数 | 相邻 `tool_use` 至对应 `user`（`tool_result`）到达耗时 | `result` 信封中的单轮 `usage` 与 `total_cost_usd` |
 | **`codex`** | 解析 `turn.completed` / `token_count` 事件中的当前上下文 Token；若 CLI 未汇报 `model_context_window` 则仅上报 `contextTokens`，`contextPercent` 置 `null` | 监听 rollout / compact 事件（若无则保持 `0`） | `item.started` 至 `item.completed`（`command_execution` / `mcp_tool_call`）时间差 | `turn.completed` / 结算汇总单轮 `input_tokens` + `output_tokens` |
 
-> **关键防双计细节（`pi` / `antigravity` 续跑差值）**：`pi` 的 `get_session_stats` 返回整个进程生命周期的**累积** `tokens` 与 `cost`。当同一 `workerId` 经 `send` 多轮续跑时，`PiAdapter` 必须在 `WorkerRuntime` 内存维护 `lastSettledTokens` / `lastSettledCost` 游标，使每次 `settled` 事件额外携带 `turnUsage`（本轮净增量）或净增 `usage`，保证 `sh_worker_usage` 按 `(workerId, seq)` 求和时精确等于真实总消耗，绝不因 5 次 `send` 续跑把首轮开销重复累加 5 次。
+> **关键防双计细节（`pi` / ACP v1 续跑差值）**：`pi` 的 `get_session_stats` 返回整个进程生命周期的**累积** `tokens` 与 `cost`。当同一 `workerId` 经 `send` 多轮续跑时，`PiAdapter` 必须在 `WorkerRuntime` 内存维护 `lastSettledTokens` / `lastSettledCost` 游标，使每次 `settled` 事件额外携带 `turnUsage`（本轮净增量）或净增 `usage`，保证 `sh_worker_usage` 按 `(workerId, seq)` 求和时精确等于真实总消耗，绝不因 5 次 `send` 续跑把首轮开销重复累加 5 次。
 
 ### 5.2 Steward 事件归约与实时投影（[`ledger.ts`](../../apps/steward/src/ledger.ts) & [`workspace.ts`](../../apps/steward/src/workspace.ts)）
 
@@ -287,8 +287,8 @@ export interface WorkerLiveTelemetry {
     3. 验证同一 `(workerId, seq)` 的 `settled` 事件重放不会在 `sh_worker_usage` 重复累加 Token 或花费，且完全不影响 `DAILY_BUDGET_USD` 的 `over` 熔断判定；
     4. 验证 `$0` 定价模型与订阅制 Worker（`costUsd: null`）在纯 Token 模式下正常聚合排序。
 
-### Stage 2：Connector 四后端运行期遥测扩展与 `GET /app/api/telemetry`
-- **改动范围**：[`apps/connector/src/agent.ts`](../../apps/connector/src/agent.ts)、[`pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts)、[`antigravity-adapter.ts`](../../apps/connector/src/antigravity-adapter.ts)、[`claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts)、[`codex-adapter.ts`](../../apps/connector/src/codex-adapter.ts)、[`worker-manager.ts`](../../apps/connector/src/worker-manager.ts)、[`apps/steward/src/workspace.ts`](../../apps/steward/src/workspace.ts)、[`apps/steward/src/workspace-api.ts`](../../apps/steward/src/workspace-api.ts)、[`apps/steward/src/web.ts`](../../apps/steward/src/web.ts)。
+### Stage 2：Connector 多后端运行期遥测扩展与 `GET /app/api/telemetry`
+- **改动范围**：[`apps/connector/src/agent.ts`](../../apps/connector/src/agent.ts)、[`pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts)、[`acp-adapter.ts`](../../apps/connector/src/acp-adapter.ts)、[`claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts)、[`codex-adapter.ts`](../../apps/connector/src/codex-adapter.ts)、[`worker-manager.ts`](../../apps/connector/src/worker-manager.ts)、[`apps/steward/src/workspace.ts`](../../apps/steward/src/workspace.ts)、[`apps/steward/src/workspace-api.ts`](../../apps/steward/src/workspace-api.ts)、[`apps/steward/src/web.ts`](../../apps/steward/src/web.ts)。
 - **验收门禁**：
   - Connector 侧单测验证：`pi` 多轮 `send` 续跑时 `settled` 增量游标不重复累计历史轮次 Token；`progress` 携带 `telemetry` 受 `ProgressThrottle` 节流约束；`codex` 无窗口上限时诚实保持 `contextPercent: null`。
   - Steward 侧单测与 [`routes-audit.test.ts`](../../apps/steward/test/routes-audit.test.ts) 验证：`GET /app/api/telemetry?days=7|14|30` 未授权访问被会话门禁拦截，合法请求返回连续 UTC 日期序列、Top 事项与 Top 仓库列表。

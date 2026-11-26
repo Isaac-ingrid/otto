@@ -33,7 +33,7 @@ An ongoing matter with a goal and history, potentially carried by several worker
 _Avoid_: A separate chat, completed task.
 
 **Worker session**:
-One coding agent’s execution session (`pi`, Claude Code, Codex CLI, Antigravity, ACP v1 `opencode` / `agentica`, or locally allowlisted `dsh` / `zcode` / `command` presets) started by Otto on a machine, attached to a Thread. The interface calls it an **Agent session**. Workers record `promptAccepted` before recovery can `--resume` headless sessions, run at most one read-only report-salvage pass on clean `unreported` exits, and may emit live context/compaction/tool telemetry, deterministic checkpoints, and bounded `readonly_probe` proposals.
+One coding agent’s execution session (`pi`, Claude Code, Codex CLI, ACP v1 `opencode` / `agentica`, or locally allowlisted `dsh` / `zcode` / `command` presets) started by Otto on a machine, attached to a Thread. The interface calls it an **Agent session**. Workers record `promptAccepted` before recovery can `--resume` headless sessions, run at most one read-only report-salvage pass on clean `unreported` exits, and may emit live context/compaction/tool telemetry, deterministic checkpoints, and bounded `readonly_probe` proposals.
 _Avoid_: Another steward.
 
 **Session record**:
@@ -44,7 +44,7 @@ _Avoid_: Transcript, raw process, log.
 One of the owner’s computers, with available agents (and non-intrusive `authStatus` prechecks), locally approved probe names, the directories the owner added, per-repo local write policies, and execution capacity.
 
 **Connector**:
-Otto’s program on one of the owner’s machines: it holds one outbound connection, receives commands, runs local agent adapters (`pi`, `claude`, `codex`, `antigravity`, ACP `opencode`/`agentica`, and allowlisted `CommandAdapter` presets), and handles controlled local relays (worktree diff/audit/cleanup, zero-checkout `git_pr_diff`, SHA-256-approved local `probe` scripts, worker checkpoints, sandboxed repo skills, and optional OS desktop notifications). The complete coding-agent session records stay on that machine.
+Otto’s program on one of the owner’s machines: it holds one outbound connection, receives commands, runs local agent adapters (`pi`, `claude`, `codex`, ACP `opencode`/`agentica`, and allowlisted `CommandAdapter` presets), and handles controlled local relays (worktree diff/audit/cleanup, zero-checkout `git_pr_diff`, SHA-256-approved local `probe` scripts, worker checkpoints, sandboxed repo skills, and optional OS desktop notifications). The complete coding-agent session records stay on that machine.
 _Avoid_: calling the connector an agent, or a worker session.
 
 **Quota cooldown (额度冷却挂起)**:

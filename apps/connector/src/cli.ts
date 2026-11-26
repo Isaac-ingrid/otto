@@ -29,11 +29,11 @@
 //                          lock is held by this process and the daemon runs as its child, so a
 //                          crash is restarted with backoff (decision 12) — what the Windows
 //                          logon launcher starts, since a Run value cannot restart anything.
-import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, statSync, writeSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFile, spawn, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { runDaemon } from "./daemon.ts";
@@ -65,15 +65,6 @@ import {
   type ProxyConfig,
 } from "./proxy.ts";
 import { getServiceInstaller, installService, OTTO_LABEL, type ServiceInstaller, type ServiceSpec } from "./service.ts";
-import {
-  AGY_COMMAND_ENV,
-  agyCommandFromEnv,
-  DEFAULT_AGY_API_KEY_MODEL,
-  detectAntigravity,
-  isolatedAgyGeminiDir,
-  normalizeAgySettingsModel,
-  writeIsolatedAgySettings,
-} from "./antigravity-adapter.ts";
 import { CLAUDE_COMMAND_ENV, claudeCommandFromEnv, detectClaude } from "./claude-adapter.ts";
 import { CODEX_COMMAND_ENV, codexCommandFromEnv, detectCodex } from "./codex-adapter.ts";
 import {
@@ -128,9 +119,6 @@ usage:
   otto proxy [<url> | --clear] [--no-proxy <list>]
                                           show / set / clear the stored proxy (no_proxy
                                           bypasses hosts; loopback always bypassed)
-  otto agy-key [<key> | --stdin | --test | --clear] [--model <model>]
-                                          show / set / test / clear an isolated GEMINI_API_KEY
-                                          profile for Antigravity without touching ~/.gemini
   otto doctor                                 pairing, service, proxy, and reachability check
   otto logs [-n <lines>] [name]               tail ~/.otto/logs (default connector.log)
   otto start | stop | restart                 control the background service
@@ -155,7 +143,6 @@ Register repositories in the web workspace under Machines > Add directory.
 environment:
   OTTO_HOME         state directory (default ~/.otto)
   OTTO_MACHINE_NAME machine name reported to the steward
-  OTTO_AGY_COMMAND  command prefix to launch Antigravity CLI (default agy)
   HTTPS_PROXY      captured into the stored proxy by 'otto connect' when no --proxy is given`;
 
 function usage(code = 2): never {
@@ -234,8 +221,6 @@ async function main(argv: string[]): Promise<void> {
       return statusCommand();
     case "proxy":
       return proxyCommand(rest);
-    case "agy-key":
-      return agyKeyCommand(rest);
     case "doctor":
       return doctorCommand();
     case "logs":
@@ -403,116 +388,6 @@ async function proxyCommand(argv: string[]): Promise<void> {
   await noteServiceRestart();
 }
 
-function maskSecretKey(key: string): string {
-  if (key.length <= 10) return "[set]";
-  return `${key.slice(0, 6)}…${key.slice(-4)}`;
-}
-
-function toAgyCliModelSlug(labelOrSlug: string): string {
-  const cleaned = labelOrSlug
-    .trim()
-    .toLowerCase()
-    .replace(/\s*\((?:low|medium|high|extra|xhigh|max)\)\s*$/, "")
-    .trim();
-  return cleaned.replace(/\s+/g, "-");
-}
-
-/** `otto agy-key [<key> | --stdin | --test | --clear] [--model <model>]`: manage an isolated
- *  `GEMINI_API_KEY` profile inside `~/.otto` so Antigravity background workers can run via
- *  Gemini Developer API without overwriting `~/.gemini/antigravity-cli/settings.json` or
- *  disturbing the user's normal Google Account OAuth login. */
-async function agyKeyCommand(argv: string[]): Promise<void> {
-  const { present: modelPresent, value: modelFlag, rest: afterModel } = takeFlag(argv, "--model");
-  if (modelPresent && (!modelFlag || modelFlag.startsWith("--"))) {
-    fail(`--model needs a value, e.g. --model "${DEFAULT_AGY_API_KEY_MODEL}"`);
-  }
-  const clear = afterModel.includes("--clear");
-  const fromStdin = afterModel.includes("--stdin");
-  const runTest = afterModel.includes("--test");
-  const positional = afterModel.filter((a) => !a.startsWith("--"));
-  const unknownFlags = afterModel.filter(
-    (a) => a.startsWith("--") && a !== "--clear" && a !== "--stdin" && a !== "--test",
-  );
-  if (unknownFlags.length > 0) usage();
-  if (clear && (fromStdin || runTest || positional.length > 0 || modelPresent)) usage();
-  if (fromStdin && positional.length > 0) usage();
-  if (positional.length > 1) usage();
-
-  const dir = stateDir();
-  const dbPath = join(dir, "connector.sqlite");
-  if (!existsSync(dbPath)) {
-    if (!clear && !fromStdin && !runTest && positional.length === 0 && !modelPresent) {
-      console.log("agy-key: none (not paired yet)");
-      return;
-    }
-    fail("not paired yet — pair with `otto connect <url> <code>` first");
-  }
-
-  let testTarget: { apiKey: string; model: string } | null = null;
-  let mutated = false;
-  const store = new LocalStore(dbPath);
-  try {
-    if (clear) {
-      store.clearAntigravityApiKeyConfig();
-      rmSync(join(dir, "agy-apikey"), { recursive: true, force: true });
-      console.log("agy-key: cleared — restored default Antigravity Google Account login (~/.gemini untouched)");
-      mutated = true;
-    } else if (fromStdin || positional[0] || modelPresent) {
-      let apiKey = positional[0]?.trim();
-      if (fromStdin) {
-        apiKey = readFileSync(0, "utf8").trim();
-        if (!apiKey) fail("--stdin received an empty API key");
-      }
-      if (!apiKey) {
-        // `--model` alone updates the model of an already-stored key.
-        const existing = store.getAntigravityApiKeyConfig();
-        if (!existing) fail("no API key stored yet — pass `otto agy-key '<key>'` first");
-        apiKey = existing.apiKey;
-      }
-      const model = normalizeAgySettingsModel(modelFlag ?? store.getAntigravityApiKeyConfig()?.model);
-      store.setAntigravityApiKeyConfig({ apiKey, model });
-      const isolatedDir = writeIsolatedAgySettings(dir, model);
-      console.log(
-        `agy-key: stored (${maskSecretKey(apiKey)}, model: ${model}, isolated dir: ${isolatedDir}; ~/.gemini untouched)`,
-      );
-      mutated = true;
-      if (runTest) testTarget = { apiKey, model };
-    } else if (runTest) {
-      const current = store.getAntigravityApiKeyConfig();
-      if (!current) fail("no API key stored yet — run `otto agy-key '<your-api-key>'` first");
-      testTarget = current;
-    } else {
-      const current = store.getAntigravityApiKeyConfig();
-      if (current) {
-        console.log(
-          `agy-key: enabled (${maskSecretKey(current.apiKey)}, model: ${current.model}, isolated dir: ${isolatedAgyGeminiDir(dir)})`,
-        );
-      } else {
-        console.log("agy-key: none (using default Antigravity Google Account login)");
-      }
-      return;
-    }
-  } finally {
-    store.close();
-  }
-  if (mutated) await noteServiceRestart();
-  if (testTarget) {
-    const agyLaunch = resolveExecutableLaunch(agyCommandFromEnv() ?? ["agy"]);
-    if (agyLaunch.error || !agyLaunch.argv[0]) fail(agyLaunch.error ?? "cannot locate `agy` binary");
-    const [file, ...prefix] = agyLaunch.argv;
-    const cliModel = toAgyCliModelSlug(testTarget.model);
-    const env: Record<string, string | undefined> = { ...process.env, GEMINI_API_KEY: testTarget.apiKey };
-    delete env.GOOGLE_API_KEY;
-    console.log(`testing agy (${maskSecretKey(testTarget.apiKey)}, --model ${cliModel})…`);
-    const res = spawnSync(
-      file,
-      [...prefix, "--settings", '{"modelProvider":"gemini"}', "--model", cliModel, "-p", "reply with OK only"],
-      { env, stdio: "inherit" },
-    );
-    if (res.status !== 0) process.exit(res.status ?? 1);
-  }
-}
-
 /** One-line reminder when the background service is up: it re-reads the proxy on start. */
 async function noteServiceRestart(): Promise<void> {
   try {
@@ -522,18 +397,6 @@ async function noteServiceRestart(): Promise<void> {
     if (status.installed && status.running) console.log("note: run `otto restart` for the running service to pick this up");
   } catch {
     // Service state is a nicety here, never a failure of the command itself.
-  }
-}
-
-function readStoredAgyAuthNote(dir: string): string {
-  const dbPath = join(dir, "connector.sqlite");
-  if (!existsSync(dbPath)) return "";
-  const store = new LocalStore(dbPath);
-  try {
-    const cfg = store.getAntigravityApiKeyConfig();
-    return cfg ? `, auth: isolated api-key [${cfg.model}]` : "";
-  } finally {
-    store.close();
   }
 }
 
@@ -648,22 +511,7 @@ async function doctorCommand(): Promise<void> {
     console.log("codex:              not installed (optional)");
   }
 
-  const agyOverride = agyCommandFromEnv();
-  const agy = detectAntigravity(agyOverride ?? ["agy"]);
-  if (agy.installed) {
-    const agyLaunch = resolveExecutableLaunch(agyOverride ?? ["agy"]);
-    const authNote = readStoredAgyAuthNote(dir);
-    console.log(
-      `agy:                ok — ${agy.version ?? "installed"} (${agyLaunch.source}${agyLaunch.detail ? ` — ${agyLaunch.detail}` : ""}${authNote})`,
-    );
-  } else if (agyOverride) {
-    healthy = false;
-    console.log(
-      `agy:                FAIL — ${AGY_COMMAND_ENV} is set (${agyOverride.join(" ")}) but \`agy acp --help\` failed`,
-    );
-  } else {
-    console.log("agy:                not installed (optional)");
-  }
+
 
   const dbPath = join(stateDir(), "connector.sqlite");
   let serverUrl: string | null = null;
@@ -797,9 +645,6 @@ async function statusCommand(): Promise<void> {
 
   console.log(`claude:   ${describeOptionalAgentLaunch("claude", claudeCommandFromEnv(), CLAUDE_COMMAND_ENV)}`);
   console.log(`codex:    ${describeOptionalAgentLaunch("codex", codexCommandFromEnv(), CODEX_COMMAND_ENV)}`);
-  console.log(
-    `agy:      ${describeOptionalAgentLaunch("agy", agyCommandFromEnv(), AGY_COMMAND_ENV, readStoredAgyAuthNote(dir))}`,
-  );
 
   const dbPath = join(dir, "connector.sqlite");
   if (!existsSync(dbPath)) {

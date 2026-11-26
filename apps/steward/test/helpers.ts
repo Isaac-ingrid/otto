@@ -64,10 +64,10 @@ export async function resetLedgerState(): Promise<void> {
       storage.sql.exec(`DELETE FROM ${table}`);
     }
     await instance.setAmbientSkillRepliesForTest(null);
-  await instance.setPrDiagnosisRepliesForTest(null);
-  await instance.setPrFeedbackRepliesForTest(null);
-  instance.setOutboundWebhookFetchForTest(undefined);
-  instance.setPrWatchStuckThresholdForTest(undefined);
+    await instance.setPrDiagnosisRepliesForTest(null);
+    await instance.setPrFeedbackRepliesForTest(null);
+    await instance.setOutboundWebhookCaptureForTest(false);
+    await instance.setPrWatchStuckThresholdForTest(undefined);
   });
 }
 
@@ -489,14 +489,14 @@ export class FakeConnector {
 
   helloOverrides(): Record<string, unknown> {
     const caps = (kind: string) =>
-      kind === "claude-code" || kind === "antigravity"
+      kind === "claude-code"
         ? {
             steer: false,
             followUp: false,
             interrupt: true,
             resume: true,
-            history: kind === "claude-code",
-            images: kind === "antigravity",
+            history: true,
+            images: false,
             structuredReport: true,
             readonly: false,
           }

@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { SELF, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { PrWatchService, type PrWatchDeps, type PrWatchStuckAlert } from "../src/pr-watch.ts";
 import type { EvidenceResult } from "../src/pr-evidence.ts";
@@ -318,22 +318,8 @@ describe("053_outbound_webhooks — Stage 5 Feishu Schema 2.0 Cards & Signed Out
     expect(validateWebhookTargetUrl(rfc1918Url).ok).toBe(false);
     expect(validateWebhookTargetUrl(publicFeishuUrl).ok).toBe(true);
 
-    const capturedDeliveries: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
     await runInDurableObject(ownerStub(), async (instance: Steward) => {
-      instance.setOutboundWebhookFetchForTest((async (input: RequestInfo | URL, init?: RequestInit) => {
-        const headersObj: Record<string, string> = {};
-        if (init?.headers && typeof init.headers === "object") {
-          for (const [k, v] of Object.entries(init.headers as Record<string, string>)) {
-            headersObj[k.toLowerCase()] = String(v);
-          }
-        }
-        capturedDeliveries.push({
-          url: String(input),
-          headers: headersObj,
-          body: String(init?.body ?? ""),
-        });
-        return new Response("ok", { status: 200 });
-      }) as typeof fetch);
+      await instance.setOutboundWebhookCaptureForTest(true);
 
       const r1 = instance.outboundWebhooks.upsert({
         id: "wh_feishu",
@@ -367,9 +353,11 @@ describe("053_outbound_webhooks — Stage 5 Feishu Schema 2.0 Cards & Signed Out
           buttons: [{ label: "同意创建 PR", action: "pr_approve", primary: true }],
         },
       });
+      await instance.deliverOutbound();
     });
 
     await waitWhileOutboundPending();
+    const capturedDeliveries = await ownerStub().recordedOutboundWebhooksForTest();
 
     expect(capturedDeliveries).toHaveLength(2);
     const feishuReq = capturedDeliveries.find((d) => d.url === publicFeishuUrl)!;
@@ -392,27 +380,18 @@ describe("053_outbound_webhooks — Stage 5 Feishu Schema 2.0 Cards & Signed Out
     expect(genericPayload.workspaceUrl).toContain("/link/wl1.");
 
     // Verify the minted link token in `workspaceUrl` has ~7-day expiry (`expiresAt - now > 6.9 days`)
-    // AND opening it exchanges for a live session redirecting straight to the Thread (`303`), while a 2nd tap is rejected (`410`)!
+    // AND opening it via Worker `/link/*` exchanges for a live session redirecting straight to the Thread (`303`),
+    // while a 2nd tap is rejected (`410`)!
     const tokenPart = genericPayload.workspaceUrl.split("/link/")[1]!;
     const expiresAtMs = Number(tokenPart.split(".")[2]);
     expect(expiresAtMs - Date.now()).toBeGreaterThan(6.9 * 86_400_000);
 
-    const open1 = await runInDurableObject(ownerStub(), async (instance: Steward) => {
-      const res = await instance.fetch(new Request(genericPayload.workspaceUrl, { redirect: "manual" }));
-      return {
-        status: res.status,
-        location: res.headers.get("location"),
-        hasCookie: Boolean(res.headers.get("set-cookie")?.includes("otto_session=")),
-      };
-    });
+    const open1 = await SELF.fetch(genericPayload.workspaceUrl, { redirect: "manual" });
     expect(open1.status).toBe(303);
-    expect(open1.location?.startsWith("/app/threads/t_")).toBe(true);
-    expect(open1.hasCookie).toBe(true);
+    expect(open1.headers.get("location")?.startsWith("/app/threads/t_")).toBe(true);
+    expect(open1.headers.get("set-cookie")?.includes("otto_session=")).toBe(true);
 
-    const open2Status = await runInDurableObject(ownerStub(), async (instance: Steward) => {
-      const res = await instance.fetch(new Request(genericPayload.workspaceUrl, { redirect: "manual" }));
-      return res.status;
-    });
-    expect(open2Status).toBe(410);
+    const open2 = await SELF.fetch(genericPayload.workspaceUrl, { redirect: "manual" });
+    expect(open2.status).toBe(410);
   });
 });

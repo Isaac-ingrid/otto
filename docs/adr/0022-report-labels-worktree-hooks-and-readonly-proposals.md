@@ -8,7 +8,7 @@ Staged rollout (`C -> B -> A`) and codebase verification targets are tracked in
 
 Reviewing Conductor 0.95.0 ("Local agents orchestration") against Otto's existing architecture
 showed that most headline capabilities — isolated Git worktrees per write task, local-only write
-policies, multi-adapter process supervision (`pi`, `claude-code`, `antigravity`), CPU-delta stall
+policies, multi-adapter process supervision (`pi`, `claude-code`, `codex`, ACP v1), CPU-delta stall
 detection, branch-carrying Thread relays, and head-keyed PR-watch notifications — already exist in
 Otto. Adopting repository-committed hook configs (`conductor.json`), long-lived dev-server `run`
 scripts, worker-initiated Thread archiving, or worker-spawned write branches would weaken Otto's
@@ -32,7 +32,7 @@ Three narrow gaps remain worth addressing in ROI order:
    are rejected. Existing PR-watch changed-head notification behavior (`pr-watch:<watchId>:<head>:<kind>`)
    remains unchanged.
 2. **Bounded report labels (Stage 1 / Plan C).** The `report` tool across `otto-pi.ts` and
-   `mcp/report-server.mjs` (`claude-code` and `antigravity`) accepts an optional `labels: string[]`
+   `mcp/report-server.mjs` (`claude-code`, `codex`, and ACP v1) accepts an optional `labels: string[]`
    field, normalized in `normalizeReport` and stored in `sh_report.labels` (JSON text; omitted
    maps to `NULL`, explicit `[]` maps to `"[]"`). At most 3 deduplicated labels matching
    `^[a-z0-9-]{1,32}$` from the fixed vocabulary (`blocked-by-env`, `needs-human-verify`,
@@ -72,8 +72,8 @@ Three narrow gaps remain worth addressing in ROI order:
    auto-approved in-flight globally, and `proposalDepth < 1`). Cross-machine read-only probes
    never auto-approve by default; they open a 10-minute bound confirmation in **Needs you**
    modeled on [ADR-0019](0019-pr-watch-owner-confirmation.md).
-6. **Read-only capability routing across adapters.** Because `claude-code` and `antigravity`
-   declare `capabilities.readonly = false`, Steward's proposal adjudicator must never blindly copy
+6. **Read-only capability routing across adapters.** When a proposing worker's adapter
+   declares `capabilities.readonly = false`, Steward's proposal adjudicator must never blindly copy
    the proposing worker's `agent` kind. It must select an installed agent on the target Machine
    that advertises `capabilities.readonly === true` (such as `pi`), or deterministically reject the
    proposal with `no_readonly_agent`.
@@ -86,7 +86,7 @@ Three narrow gaps remain worth addressing in ROI order:
    overwrites `sh_thread.lastMachine`. Tool responses return `queued_for_steward_decision`
    synchronously; parent workers never block awaiting `sibling` completion.
 8. **Out-of-band MCP file separation for ACP adapters.** `pi` exposes `propose` in `otto-pi.ts`;
-   `claude-code` and `antigravity` share `mcp/report-server.mjs`. Because `agy acp` notifications
+   `claude-code`, `codex`, and ACP v1 adapters share `mcp/report-server.mjs`. Because ACP notifications
    may omit MCP `rawInput` in `session/update`, `report-server.mjs` must write validated proposals
    to a separate append-only JSONL path (`argv[3]`, `proposals-<workerId>.jsonl`) rather than the
    single-overwrite `report` audit file (`argv[2]`), preserving multiple proposals alongside the
@@ -96,7 +96,7 @@ Three narrow gaps remain worth addressing in ROI order:
 
 Each stage requires focused unit and integration regressions before advancing:
 
-- **Stage 1 (Plan C)**: `normalizeReport` bounds across `pi`, `claude-code`, and `antigravity`
+- **Stage 1 (Plan C)**: `normalizeReport` bounds across `pi`, `claude-code`, `codex`, and ACP v1
   (`report-server.mjs` schema visibility, unknown/duplicate/excess label stripping, `undefined` vs
   `[]`), Steward migration and `(workerId, seq)` replay idempotency, and deterministic Message /
   timeline rendering.

@@ -399,7 +399,7 @@ function renderFeed(stick) {
 
 // ---- the main pane: the conversation, or one worker's recorded session --------------------------------------
 
-const agentName = (agent) => ({ pi: 'pi', 'claude-code': 'Claude Code', codex: 'Codex', antigravity: 'Antigravity' }[agent] ?? agent);
+const agentName = (agent) => ({ pi: 'pi', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', agentica: 'Agentica' }[agent] ?? agent);
 
 function urlFor(threadId, workerId) {
   return threadId ? `/app/threads/${threadId}${workerId ? `/workers/${workerId}` : ''}` : '/app';
@@ -1099,7 +1099,7 @@ function workerNode(thread, worker) {
   const hasCheckpoint = Boolean(worker.sessionId || worker.outcome || worker.progress);
   return h('div', { class: 'worker-card', dataset: { workerCard: worker.id } },
     h('div', { class: 'worker-title' },
-      h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent === 'codex' ? '⌘' : worker.agent === 'antigravity' ? '✦' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
+      h('span', null, h('span', { class: 'agent-icon' }, worker.agent === 'pi' ? 'π' : worker.agent.startsWith('claude') ? '✳' : worker.agent === 'codex' ? '⌘' : worker.agent.slice(0, 1).toUpperCase()), agentName(worker.agent)),
       h('span', { class: 'worker-state' }, h('span', { class: `status-dot ${active ? 'green' : 'gray'}` }), tOr(`worker${cap(worker.state)}`, worker.state))),
     h('div', { class: 'worker-meta' }, [worker.machine, worker.unreachable ? t('unreachable') : null].filter(Boolean).join(' · ')),
     h('div', { class: 'worker-facts' }, t('agentModelRequested', { model: worker.requestedModel ?? t('agentModelFollow') })),

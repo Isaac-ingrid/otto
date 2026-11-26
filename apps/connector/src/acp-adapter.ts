@@ -1,6 +1,6 @@
 // AcpAdapter: Generic Agent Client Protocol (ACP v1, JSON-RPC 2.0 over stdio) adapter for
-// external ACP agents (`opencode acp`, `agentica acp`), sharing Otto's `AcpProcess`
-// transport and stdio MCP `report` / `propose` server with `antigravity-adapter.ts`.
+// external ACP agents (`opencode acp`, `agentica acp`), driving Otto's `AcpProcess` JSON-RPC
+// transport and stdio MCP `report` / `propose` server.
 //
 // Key invariants adapted from `KKKKhazix/agent-autoloop` (`plugins/acp/agent.ts`):
 // 1. Session continuation: prefers `session/resume` when advertised; falls back to
@@ -29,20 +29,16 @@ import type {
 } from "./agent.ts";
 import { AdapterError, diffCumulativeSessionUsage } from "./agent.ts";
 import { adjudicate, type RunWindow } from "./adjudication.ts";
-import {
-  AcpProcess,
-  isAcpProposalTool,
-  isAcpReportTool,
-  JsonRpcError,
-  mapAcpStopReason,
-} from "./antigravity-adapter.ts";
 import { childEnv, extractTarget, normalizeProposal, normalizeReport, RESUME_PROMPT } from "./pi-adapter.ts";
 import { installClaudeAssets, OTTO_VERSION, WORKER_SYSTEM_PROMPT } from "./install.ts";
+import { appendCapped } from "./logger.ts";
 import { resolveExecutableLaunch, splitCommandLine, type LaunchResolution } from "./pi-launch.ts";
+import { redactText } from "./redact.ts";
 import { AgentModelObservationSchema, type AgentModelCatalog } from "@isaac2ingrid/protocol";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type AcpAgentKind = "opencode" | "agentica";
@@ -65,6 +61,286 @@ export function agenticaCommandFromEnv(env: Record<string, string | undefined> =
   if (typeof raw !== "string" || raw.trim() === "") return undefined;
   const argv = splitCommandLine(raw).filter((p) => p.length > 0);
   return argv.length > 0 ? argv : undefined;
+}
+
+/** Matches Otto's MCP `report` tool across ACP naming conventions (`mcp__otto__report`,
+ *  `otto__report`, `otto/report`, `otto:report`), never a bare unrelated `report` tool unless
+ *  its ACP title explicitly identifies the `otto` MCP server. */
+export function isAcpReportTool(name: unknown, title?: unknown): boolean {
+  if (typeof name === "string" && /(?:^mcp__|__|\/|:|\.)report$/i.test(name)) return true;
+  if (name === "report" && typeof title === "string" && /\botto\b/i.test(title)) return true;
+  return false;
+}
+
+/** Matches Otto's MCP `propose` tool across ACP naming conventions (`mcp__otto__propose`,
+ *  `otto__propose`, `otto/propose`, `otto:propose`), never a bare unrelated `propose` tool
+ *  unless its ACP title explicitly identifies the `otto` MCP server. */
+export function isAcpProposalTool(name: unknown, title?: unknown): boolean {
+  if (typeof name === "string" && /(?:^mcp__|__|\/|:|\.)propose$/i.test(name)) return true;
+  if (name === "propose" && typeof title === "string" && /\botto\b/i.test(title)) return true;
+  return false;
+}
+
+/** Maps ACP v1 `StopReason` values into Otto's shared adjudication vocabulary. */
+export function mapAcpStopReason(stopReason: unknown): string | undefined {
+  switch (stopReason) {
+    case "end_turn":
+      return "stop";
+    case "max_tokens":
+    case "max_turn_requests":
+      return "length";
+    case "refusal":
+      return "error";
+    case "cancelled":
+      return "aborted";
+    case null:
+    case undefined:
+      return undefined;
+    default:
+      return typeof stopReason === "string" ? stopReason : undefined;
+  }
+}
+
+export class JsonRpcError extends Error {
+  readonly code: number;
+  readonly data?: unknown;
+
+  constructor(code: number, message: string, data?: unknown) {
+    super(data !== undefined ? `${message} (${typeof data === "string" ? data : JSON.stringify(data)})` : message);
+    this.name = "JsonRpcError";
+    this.code = code;
+    this.data = data;
+  }
+}
+
+export interface AcpProcessOptions {
+  command: string[];
+  args: string[];
+  cwd: string;
+  env?: Record<string, string | undefined>;
+  redactSecrets?: string[];
+  stderrFile?: string;
+  onNotification: (method: string, params: Record<string, unknown>) => void;
+  onRequest: (id: string | number, method: string, params: Record<string, unknown>) => void;
+  onExit: (info: { code: number | null; signal: NodeJS.Signals | null }) => void;
+}
+
+interface PendingRpc {
+  method: string;
+  resolve: (result: Record<string, unknown>) => void;
+  reject: (err: Error) => void;
+  timer?: NodeJS.Timeout;
+}
+
+export class AcpProcess {
+  private readonly options: AcpProcessOptions;
+  private child?: ChildProcess;
+  private stdoutBuffer = "";
+  private readonly decoder = new StringDecoder("utf8");
+  private stderrTail = "";
+  private readonly stderrLimit = 64 * 1024;
+  private exited = false;
+  private exitWaiters: (() => void)[] = [];
+  private lastOutputAtMs = 0;
+  private nextId = 1;
+  private readonly pending = new Map<number, PendingRpc>();
+
+  constructor(options: AcpProcessOptions) {
+    this.options = options;
+  }
+
+  spawn(): void {
+    if (this.child) throw new Error("AcpProcess already spawned");
+    const child = spawn(this.options.command[0]!, [...this.options.command.slice(1), ...this.options.args], {
+      cwd: this.options.cwd,
+      env: this.options.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: false,
+    });
+    if (child.stdin === null || child.stdout === null || child.stderr === null) {
+      throw new Error("acp process is not piped");
+    }
+    this.child = child;
+    this.lastOutputAtMs = Date.now();
+    child.stdout.on("data", (chunk: Buffer) => this.onStdoutChunk(chunk));
+    child.stderr.on("data", (chunk: Buffer) => this.appendStderr(chunk));
+    child.on("error", (err) => this.handleExit(null, null, err));
+    child.on("exit", (code, signal) => this.handleExit(code, signal));
+  }
+
+  rpc(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
+    return new Promise((resolveRpc, rejectRpc) => {
+      if (this.exited || !this.child?.stdin) {
+        rejectRpc(new Error(`acp exited before '${method}'; stderr tail:\n${this.stderrTail.slice(-2000)}`));
+        return;
+      }
+      const id = this.nextId++;
+      let timer: NodeJS.Timeout | undefined;
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          rejectRpc(new Error(`acp '${method}' timed out after ${timeoutMs}ms; stderr tail:\n${this.stderrTail.slice(-2000)}`));
+        }, timeoutMs);
+        timer.unref?.();
+      }
+      this.pending.set(id, { method, resolve: resolveRpc, reject: rejectRpc, timer });
+      this.writeJson({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  notify(method: string, params: Record<string, unknown>): void {
+    if (this.exited || !this.child?.stdin) return;
+    this.writeJson({ jsonrpc: "2.0", method, params });
+  }
+
+  respond(id: string | number, result: Record<string, unknown>): void {
+    if (this.exited || !this.child?.stdin) return;
+    this.writeJson({ jsonrpc: "2.0", id, result });
+  }
+
+  respondError(id: string | number, code: number, message: string): void {
+    if (this.exited || !this.child?.stdin) return;
+    this.writeJson({ jsonrpc: "2.0", id, error: { code, message } });
+  }
+
+  private writeJson(payload: Record<string, unknown>): void {
+    const stdin = this.child?.stdin;
+    if (!stdin || this.exited) return;
+    try {
+      stdin.write(JSON.stringify(payload) + "\n");
+    } catch {
+      // broken pipe; exit handler cleans up
+    }
+  }
+
+  get hasExited(): boolean {
+    return this.exited;
+  }
+
+  get pid(): number | undefined {
+    return this.child?.pid;
+  }
+
+  get lastOutputAt(): number {
+    return this.lastOutputAtMs;
+  }
+
+  getStderrTail(): string {
+    return this.stderrTail;
+  }
+
+  kill(): void {
+    if (this.exited || !this.child) return;
+    this.child.kill("SIGKILL");
+  }
+
+  async close(graceMs = 3_000): Promise<void> {
+    if (this.exited || !this.child) return;
+    const exited = this.waitExit();
+    try {
+      this.child.stdin?.end();
+    } catch {
+      // already closed
+    }
+    try {
+      this.child.kill("SIGTERM");
+    } catch {
+      // already gone
+    }
+    const killer = setTimeout(() => this.kill(), graceMs);
+    killer.unref?.();
+    await exited;
+    clearTimeout(killer);
+  }
+
+  waitExit(): Promise<void> {
+    if (this.exited) return Promise.resolve();
+    return new Promise((resolveExit) => this.exitWaiters.push(resolveExit));
+  }
+
+  private onStdoutChunk(chunk: Buffer): void {
+    this.lastOutputAtMs = Date.now();
+    this.stdoutBuffer += this.decoder.write(chunk);
+    let nl: number;
+    while ((nl = this.stdoutBuffer.indexOf("\n")) !== -1) {
+      let line = this.stdoutBuffer.slice(0, nl);
+      this.stdoutBuffer = this.stdoutBuffer.slice(nl + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      if (line.length === 0) continue;
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        this.stderrTail += `\n[otto] unparseable acp stdout line: ${line.slice(0, 200)}\n`;
+        continue;
+      }
+      this.dispatchMessage(msg);
+    }
+  }
+
+  private dispatchMessage(msg: Record<string, unknown>): void {
+    const hasMethod = typeof msg.method === "string";
+    const hasId = typeof msg.id === "number" || typeof msg.id === "string";
+
+    if (hasId && !hasMethod) {
+      const entry = typeof msg.id === "number" ? this.pending.get(msg.id) : undefined;
+      if (!entry) return;
+      this.pending.delete(msg.id as number);
+      if (entry.timer) clearTimeout(entry.timer);
+      if ("error" in msg && typeof msg.error === "object" && msg.error !== null) {
+        const errObj = msg.error as Record<string, unknown>;
+        const code = typeof errObj.code === "number" ? errObj.code : -32603;
+        const message = typeof errObj.message === "string" ? errObj.message : `JSON-RPC error ${code}`;
+        entry.reject(new JsonRpcError(code, message, errObj.data));
+        return;
+      }
+      const result =
+        typeof msg.result === "object" && msg.result !== null ? (msg.result as Record<string, unknown>) : {};
+      entry.resolve(result);
+      return;
+    }
+
+    if (hasId && hasMethod) {
+      const params =
+        typeof msg.params === "object" && msg.params !== null ? (msg.params as Record<string, unknown>) : {};
+      this.options.onRequest(msg.id as string | number, msg.method as string, params);
+      return;
+    }
+
+    if (hasMethod) {
+      const params =
+        typeof msg.params === "object" && msg.params !== null ? (msg.params as Record<string, unknown>) : {};
+      this.options.onNotification(msg.method as string, params);
+    }
+  }
+
+  private appendStderr(chunk: Buffer): void {
+    const text = chunk.toString("utf8");
+    const scrubbed = redactText(text, this.options.redactSecrets);
+    this.stderrTail = (this.stderrTail + scrubbed).slice(-this.stderrLimit);
+    if (this.options.stderrFile) {
+      appendCapped(this.options.stderrFile, scrubbed, this.stderrLimit);
+    }
+  }
+
+  private handleExit(code: number | null, signal: NodeJS.Signals | null, error?: Error): void {
+    if (this.exited) return;
+    this.exited = true;
+    if (error) this.appendStderr(Buffer.from(`\n[otto] spawn error: ${error.message}\n`));
+    const pendingEntries = [...this.pending.values()];
+    this.pending.clear();
+    for (const entry of pendingEntries) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.reject(
+        new Error(
+          `acp exited during '${entry.method}' (code=${code} signal=${signal}); stderr tail:\n${this.stderrTail.slice(-2000)}`,
+        ),
+      );
+    }
+    this.options.onExit({ code, signal });
+    for (const waiter of this.exitWaiters) waiter();
+    this.exitWaiters = [];
+  }
 }
 
 

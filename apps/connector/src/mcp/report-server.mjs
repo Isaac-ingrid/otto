@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Otto's MCP server for Claude Code and Antigravity (`agy acp`) workers (issue #17, ADR-0022):
+// Otto's MCP server for Claude Code, Codex CLI, and ACP v1 workers (issue #17, ADR-0022):
 // a minimal stdio MCP server exposing two tools — `report` (§7.2) and `propose` (`readonly_probe`).
 // LF-delimited JSON-RPC 2.0; initialize → tools/list → tools/call.
 //

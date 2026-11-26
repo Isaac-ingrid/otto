@@ -23,7 +23,7 @@ Conductor 是 [conductor.build](https://conductor.build)（Melty Labs）的 macO
 
 **修订记录**：
 - 初稿曾把"agent 主动归档 workspace"列为未证实；该结论已由上面的索引文本推翻（现属已证实，但它仍是 §3 明确不做的事）。
-- 2026-11-17 定稿复核：对照当前代码库修正了 5 处实现偏差（补齐第 3 个适配器 `AntigravityAdapter` 与 MCP 审计文件分离、将事件入口从 `connector-protocol.ts` 修正为 `ledger.ts` 的 `applyEvent` 并去掉冗余的 `run_proposal` 下行命令、补齐只读 agent 能力路由与 `sibling` 对 Thread 单链不变量的隔离、将钩子存储改为 `connector.sqlite` `repo` 表、用 `progress` 事件替代重型 `preparing` 状态机），并拍板 §7.3–§7.5 与 `C → B → A（仅只读）` 顺序。
+- 2026-11-17 定稿复核：对照当前代码库修正了 5 处实现偏差（补齐 ACP 适配器与 MCP 审计文件分离、将事件入口从 `connector-protocol.ts` 修正为 `ledger.ts` 的 `applyEvent` 并去掉冗余的 `run_proposal` 下行命令、补齐只读 agent 能力路由与 `sibling` 对 Thread 单链不变量的隔离、将钩子存储改为 `connector.sqlite` `repo` 表、用 `progress` 事件替代重型 `preparing` 状态机），并拍板 §7.3–§7.5 与 `C → B → A（仅只读）` 顺序。
 
 ## 2. 现状核查：Otto 已有，因此不重复造
 
@@ -35,7 +35,7 @@ Conductor 是 [conductor.build](https://conductor.build)（Melty Labs）的 macO
 | 应确保数组传参、禁用 `shell: true` | 全仓没有 `shell: true`，全部 `spawn(file, args)` / `execFile`；分支名由本地 `slugify` 生成，不是远端 PR 分支名 | [`apps/connector/src/worktree.ts`](../../apps/connector/src/worktree.ts)、[`apps/connector/src/pr.ts`](../../apps/connector/src/pr.ts) |
 | "拓扑严格单向，单 worker 串行会慢" | 并行写任务本来就允许（默认 parallel）；worker→worker 接力也已存在（`parentWorker` relay 关系 + `decideContinuation` / `assembleBrief`） | [`apps/steward/src/handoff.ts`](../../apps/steward/src/handoff.ts)、[`apps/steward/src/dispatch.ts`](../../apps/steward/src/dispatch.ts) |
 | 应在 Ledger 中绑定 `head_sha` | `sh_pr_watch.head` 已存在并每轮写入；通知 id 为 `pr-watch:<watchId>:<head>:<kind>`，稳定且按 head 去重 | [`apps/steward/src/schema.ts`](../../apps/steward/src/schema.ts) `sh_pr_watch`、[`apps/steward/src/pr-watch.ts`](../../apps/steward/src/pr-watch.ts) |
-| 收尾汇报需结构化 | 收尾报告已有结构：`sh_report` 的 `status / summary / changes / decisions / leftovers / tests / question / next / answer / git`，`status ∈ done\|blocked\|needs_decision`，跨 `pi`、`claude-code`、`antigravity` 三端统一归一 | [`apps/steward/src/schema.ts`](../../apps/steward/src/schema.ts) `sh_report`、[`apps/connector/src/pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts) |
+| 收尾汇报需结构化 | 收尾报告已有结构：`sh_report` 的 `status / summary / changes / decisions / leftovers / tests / question / next / answer / git`，`status ∈ done\|blocked\|needs_decision`，跨 `pi`、`claude-code`、`codex` 与 ACP v1 统一归一 | [`apps/steward/src/schema.ts`](../../apps/steward/src/schema.ts) `sh_report`、[`apps/connector/src/pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts) |
 
 README 的 [PR follow-up](../../README.md) 一节里 "changed-head acceptance remain separate validation work" 指的是**没有验证过这条路径**，不是功能缺失；[`docs/pr-watches.md`](../pr-watches.md) 同样只承诺只读。
 
@@ -63,8 +63,8 @@ README 的 [PR follow-up](../../README.md) 一节里 "changed-head acceptance re
 
 - **三端工具载体与校验对齐**：
   1. **pi**：[`apps/connector/src/ext/otto-pi.ts`](../../apps/connector/src/ext/otto-pi.ts) 的 `reportParameters` 新增可选 `labels: string[]`。
-  2. **claude-code & antigravity (`agy acp`)**：[`apps/connector/src/mcp/report-server.mjs`](../../apps/connector/src/mcp/report-server.mjs) 的 `REPORT_TOOL.inputSchema.properties` 同步新增可选 `labels` 数组描述（否则 MCP 模型侧看不到该参数）。
-  3. **统一边界清洗**：在 [`apps/connector/src/pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts) 的 `normalizeReport`（`pi`、`claude-code`、`antigravity` 三端共用）中与 `leftovers` 同处解析。
+  2. **claude-code、codex 与 ACP v1**：[`apps/connector/src/mcp/report-server.mjs`](../../apps/connector/src/mcp/report-server.mjs) 的 `REPORT_TOOL.inputSchema.properties` 同步新增可选 `labels` 数组描述（否则 MCP 模型侧看不到该参数）。
+  3. **统一边界清洗**：在 [`apps/connector/src/pi-adapter.ts`](../../apps/connector/src/pi-adapter.ts) 的 `normalizeReport`（各适配器共用）中与 `leftovers` 同处解析。
   4. **Steward 存储**：[`apps/steward/src/schema.ts`](../../apps/steward/src/schema.ts) 新增迁移（当前末条为 `038_agent_model_selection`，顺延为 `039_report_labels`），为 `sh_report` 增加 `labels TEXT`（JSON 数组）。
 - **字段语义**：未提供（`undefined`，落库 `NULL`）与空数组 `[]`（明确声明无标签）严格区分，与 `leftovers` 既有语义一致。
 - **受控词表与上限（已拍板）**：
@@ -152,7 +152,7 @@ README 的 [PR follow-up](../../README.md) 一节里 "changed-head acceptance re
 | 同机器（同仓或同机跨仓）只读探查 | 自动批准，并入预算统计 |
 | 跨机器只读探查 | **默认不自动批准**，转 `pending_owner` 生成 **Needs you** 确认项（10 分钟过期，与 [ADR-0019](../adr/0019-pr-watch-owner-confirmation.md) 同构），防止静默消耗另一台机器的额度 |
 
-**关键能力路由规则**：当前适配器中，`pi` 支持 `readonly: true`，而 [`claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts) 与 [`antigravity-adapter.ts`](../../apps/connector/src/antigravity-adapter.ts) 均诚实声明 `readonly: false`（`WorkerManager.startWorker` 会对 `readonly: false` 的 agent 抛 `unsupported_capability`）。因此当 `claude-code` 或 `antigravity` worker 发起只读提案时，Steward 裁定器**绝不能盲目继承父 worker 的 `agent`**，必须显式选择目标机器 `hello.agents` 中声明 `readonly: true` 的 agent（如 `pi`）。
+**关键能力路由规则**：`WorkerManager.startWorker` 会对 `readonly: false` 的适配器抛 `unsupported_capability`。因此当不支持 `readonly` 的本地预设 worker 发起只读提案时，Steward 裁定器**绝不能盲目继承父 worker 的 `agent`**，必须显式选择目标机器 `hello.agents` 中声明 `readonly: true` 的 agent（如 `pi`、`claude-code`、`codex` 或 `opencode`）。
 
 ### A4 派发语义与 Thread 单链不变量隔离
 
@@ -167,8 +167,8 @@ README 的 [PR follow-up](../../README.md) 一节里 "changed-head acceptance re
 不引入任何直写事件日志或内部 IPC 的旁路，严格复用并扩展现有三端工具通道：
 
 1. **pi**：[`apps/connector/src/ext/otto-pi.ts`](../../apps/connector/src/ext/otto-pi.ts) 注册 `propose` 工具，通过 RPC 工具事件由 `PiAdapter` 归一为 `proposal` 事件。
-2. **claude-code**：[`apps/connector/src/mcp/report-server.mjs`](../../apps/connector/src/mcp/report-server.mjs) 新增 `propose` 工具，[`apps/connector/src/claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts) 按 `__propose` 后缀识别工具调用。
-3. **antigravity (`agy acp`)**：[`apps/connector/src/antigravity-adapter.ts`](../../apps/connector/src/antigravity-adapter.ts) 新增 `isAcpProposalTool` 匹配。**带外审计文件分离**：由于真实 `agy acp` 服务端在 `session/update` 中可能省略 MCP `rawInput`（`AntigravityAdapter` 依赖读取 `report-server.mjs` 落盘文件兜底），而单次运行可产生最多 2 次 `propose` 加 1 次 `report`，`report-server.mjs` 不能把 `propose` 写入覆盖式的 `argv[2]`（`reportFile`），必须接收独立的 `argv[3]`（`proposals-${workerId}.jsonl`，追加写入每条通过校验的提案并在回合开始前清理），防止 `propose` 与 `report` 互相覆盖。
+2. **claude-code / codex**：[`apps/connector/src/mcp/report-server.mjs`](../../apps/connector/src/mcp/report-server.mjs) 新增 `propose` 工具，[`apps/connector/src/claude-adapter.ts`](../../apps/connector/src/claude-adapter.ts) 按 `__propose` 后缀识别工具调用。
+3. **ACP v1 (`opencode` / `agentica`)**：[`apps/connector/src/acp-adapter.ts`](../../apps/connector/src/acp-adapter.ts) 通过 `isAcpProposalTool` 匹配。**带外审计文件分离**：由于真实 ACP 服务端在 `session/update` 中可能省略 MCP `rawInput`（`AcpAdapter` 支持读取 `report-server.mjs` 落盘文件兜底），而单次运行可产生最多 2 次 `propose` 加 1 次 `report`，`report-server.mjs` 不能把 `propose` 写入覆盖式的 `argv[2]`（`reportFile`），必须接收独立的 `argv[3]`（`proposals-${workerId}.jsonl`，追加写入每条通过校验的提案并在回合开始前清理），防止 `propose` 与 `report` 互相覆盖。
 
 子进程继续保持零 `OTTO_*` 环境变量、零连接器凭据暴露。
 

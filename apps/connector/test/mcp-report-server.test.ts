@@ -1,7 +1,7 @@
 // The Otto MCP report + propose server (issue #17, ADR-0022 Stage 3): stdio JSON-RPC 2.0,
 // two tools (`report` + `propose`), separate out-of-band files (`argv[2]` JSON report and
-// `argv[3]` JSONL proposals) — driven over its real stdio pipe exactly like Claude Code and
-// Antigravity ACP drive it.
+// `argv[3]` JSONL proposals) — driven over its real stdio pipe exactly like Claude Code,
+// Codex CLI, and ACP v1 agents drive it.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +24,7 @@ interface Turn {
 
 /** Spawns the server, writes the given LF-delimited requests on stdin, closes stdin, and
  *  collects everything it answered. One shot per turn — the real server lives as long as
- *  Claude Code / Antigravity keeps it, but every exchange here is stateless. */
+ *  Claude Code / ACP keeps it, but every exchange here is stateless. */
 function drive(requests: Array<Record<string, unknown>>, args: string[] = []): Turn {
   const result = spawnSync(process.execPath, [SERVER, ...args], {
     input: requests.map((r) => JSON.stringify(r)).join("\n") + "\n",

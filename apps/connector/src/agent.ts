@@ -16,7 +16,6 @@ export type AgentKind =
   | "pi"
   | "claude-code"
   | "codex"
-  | "antigravity"
   | "opencode"
   | "agentica"
   | "dsh"
@@ -170,7 +169,7 @@ export interface CumulativeUsageCursor {
 
 /**
  * Computes the single-turn incremental `turnUsage` from a cumulative session-stats snapshot
- * (`pi` `get_session_stats`, `antigravity` cumulative session usage) so multi-turn `send`
+ * (`pi` `get_session_stats`, ACP cumulative session usage) so multi-turn `send`
  * continuations on the same `workerId` never double-count earlier turns at settlement.
  */
 export function diffCumulativeSessionUsage(
@@ -262,7 +261,7 @@ export type RawAdapterEvent =
       lastText?: string;
       report?: ReportPayload;
       usage?: SessionUsage;
-      /** Incremental single-turn usage when `usage` is session-cumulative (`pi`, `antigravity`). */
+      /** Incremental single-turn usage when `usage` is session-cumulative (`pi`, ACP). */
       turnUsage?: SessionUsage;
       telemetry?: WorkerLiveTelemetry;
     }

@@ -314,7 +314,7 @@ describe("CodexAdapter invocation and capabilities", () => {
       version: "codex-cli 0.170.0",
     });
     expect(detectCodex(missing).installed).toBe(false);
-    const adapters = defaultAdapters(stateDir, missing, missing, null, [process.execPath, fakeBin]);
+    const adapters = defaultAdapters(stateDir, missing, [process.execPath, fakeBin]);
     expect(adapters.map((a) => a.kind)).toEqual(["pi", "codex"]);
 
     setup([

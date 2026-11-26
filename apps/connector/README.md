@@ -6,7 +6,7 @@
 
 **English** · [简体中文](#otto-connector-简体中文)
 
-`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs primarily as a Node process on your own server, with Cloudflare Workers as an alternative. The connector runs on macOS, Linux, or Windows and connects that computer to Otto. It keeps an outbound WebSocket connection to your deployment, starts local coding agents (`pi`, Claude Code, Codex CLI, Antigravity `agy`, ACP v1 `opencode` / `agentica`, or locally allowlisted `dsh` / `zcode` presets), runs local SHA-256-approved zero-token probes and zero-checkout PR diffs, and reports progress back to your personal agent.
+`@isaac2ingrid/otto` installs the `otto` command. Otto is a self-hosted personal agent that runs primarily as a Node process on your own server, with Cloudflare Workers as an alternative. The connector runs on macOS, Linux, or Windows and connects that computer to Otto. It keeps an outbound WebSocket connection to your deployment, starts local coding agents (`pi`, Claude Code, Codex CLI, ACP v1 `opencode` / `agentica`, or locally allowlisted `dsh` / `zcode` presets), runs local SHA-256-approved zero-token probes and zero-checkout PR diffs, and reports progress back to your personal agent.
 
 The connector makes only an outbound connection. You do not need to open an inbound port on your computer.
 
@@ -16,7 +16,7 @@ The connector makes only an outbound connection. You do not need to open an inbo
 - Node.js 22.18 or newer
 - npm 7 or newer
 - A deployed Otto workspace
-- At least one local coding agent (`pi`, Claude Code, Codex CLI, Antigravity `agy`, OpenCode, or Agentica) installed and authenticated separately
+- At least one local coding agent (`pi`, Claude Code, Codex CLI, OpenCode, or Agentica) installed and authenticated separately
 
 ## Install
 
@@ -74,7 +74,6 @@ otto uninstall              # remove the service, preserve local state
 otto repo-config <path>     # inspect or update local-only write isolation, concurrency, trust & hooks
 otto probe list             # list or approve local SHA-256 zero-token scripts under ~/.otto/probes/
 otto notify [on|off|test]   # toggle or test zero-dependency OS desktop notifications
-otto agy-key [<key>|--test] # configure an isolated GEMINI_API_KEY profile for Antigravity
 otto daemon --supervise     # run the daemon in this terminal, restarting it on failure
 ```
 
@@ -97,7 +96,7 @@ The deployment and connector runbooks live in the Otto repository checkout:
 
 # Otto connector 简体中文
 
-`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是自托管 personal agent，主要以 Node 进程运行在自己的服务器上，也可选择部署到 Cloudflare Workers；connector 运行在 macOS、Linux 或 Windows 电脑上，把这台电脑接入 Otto。它保持到你部署地址的出站 WebSocket 连接，启动本地的 `pi`、Claude Code、Codex CLI、Antigravity（`agy`）、OpenCode / Agentica（ACP v1）或本机白名单命令预设（`dsh` / `zcode`），执行经 SHA-256 审批的本地零 Token 探针与零检出 PR Diff，并把进展回传给服务端。
+`@isaac2ingrid/otto` 会安装 `otto` 命令。Otto 是自托管 personal agent，主要以 Node 进程运行在自己的服务器上，也可选择部署到 Cloudflare Workers；connector 运行在 macOS、Linux 或 Windows 电脑上，把这台电脑接入 Otto。它保持到你部署地址的出站 WebSocket 连接，启动本地的 `pi`、Claude Code、Codex CLI、OpenCode / Agentica（ACP v1）或本机白名单命令预设（`dsh` / `zcode`），执行经 SHA-256 审批的本地零 Token 探针与零检出 PR Diff，并把进展回传给服务端。
 
 Connector 只主动发起出站连接，不需要在电脑上开放入站端口。
 
@@ -107,7 +106,7 @@ Connector 只主动发起出站连接，不需要在电脑上开放入站端口�
 - Node.js 22.18 或更新版本
 - npm 7 或更新版本
 - 已部署的 Otto 工作台
-- 已单独安装并完成认证的本地 coding agent（如 `pi`、Claude Code、Codex CLI、Antigravity、OpenCode 或 Agentica）
+- 已单独安装并完成认证的本地 coding agent（如 `pi`、Claude Code、Codex CLI、OpenCode 或 Agentica）
 
 ## 安装
 
@@ -165,7 +164,6 @@ otto uninstall              # 移除服务，保留本地状态
 otto repo-config <path>     # 查看或设置仅限本机修改的写入隔离、并发、信任与钩子策略
 otto probe list             # 查看或审批 ~/.otto/probes/ 下的 SHA-256 零 Token 本地探针脚本
 otto notify [on|off|test]   # 开关或测试零外部依赖的系统桌面通知
-otto agy-key [<key>|--test] # 为 Antigravity 配置隔离的 GEMINI_API_KEY（不改动 ~/.gemini）
 otto daemon --supervise     # 在当前终端运行守护进程，崩溃后自动重启
 ```
 

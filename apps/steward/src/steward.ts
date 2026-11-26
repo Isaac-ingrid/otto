@@ -1352,13 +1352,13 @@ export class Steward extends Agent<Env> {
   // rechecked here because this method also owns the generated-key surface the Worker cannot see.
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    // Cloudflare learns the public origin from requests; the Node host pins it to
-    // OTTO_PUBLIC_ORIGIN so an anonymous caller cannot change login links with a forged Host.
-    if (url.protocol === "https:" || url.protocol === "http:") this.web.recordOrigin(url.origin);
     if ((url.pathname === "/owner/in/github" || url.pathname === "/owner/in/gitlab") && request.method === "POST") {
       const source: InboundWebhookSource = url.pathname.endsWith("/github") ? "github" : "gitlab";
       return this.handleInboundWebhook(source, request);
     }
+    // Cloudflare learns the public origin from requests; the Node host pins it to
+    // OTTO_PUBLIC_ORIGIN so an anonymous caller cannot change login links with a forged Host.
+    if (url.protocol === "https:" || url.protocol === "http:") this.web.recordOrigin(url.origin);
     if (url.pathname.startsWith("/api/")) {
       if (!ownerAuthorized(request, this.env)) return new Response("unauthorized", { status: 401 });
       if (url.pathname === "/api/messages" && (request.method === "POST" || request.method === "GET")) {
@@ -4738,7 +4738,7 @@ export class Steward extends Agent<Env> {
 
   // ---- Stage 4 PR Watch Stuck Action & Zero-Checkout Blind Review --------------------------------
 
-  setPrWatchStuckThresholdForTest(ms: number | undefined): void {
+  async setPrWatchStuckThresholdForTest(ms: number | undefined): Promise<void> {
     this.prWatches.setStuckThresholdMsForTest(ms);
   }
 
@@ -4898,9 +4898,12 @@ export class Steward extends Agent<Env> {
   get outboundWebhooks(): OutboundWebhookStore {
     return (this.outboundWebhooks_ ??= new OutboundWebhookStore(this.sql.bind(this)));
   }
-  private outboundWebhookFetchForTest?: typeof fetch;
-  setOutboundWebhookFetchForTest(fn: typeof fetch | undefined): void {
-    this.outboundWebhookFetchForTest = fn;
+  private recordedWebhookDeliveriesForTest: Array<{ url: string; headers: Record<string, string>; body: string }> | null = null;
+  async setOutboundWebhookCaptureForTest(enabled: boolean): Promise<void> {
+    this.recordedWebhookDeliveriesForTest = enabled ? [] : null;
+  }
+  async recordedOutboundWebhooksForTest(): Promise<Array<{ url: string; headers: Record<string, string>; body: string }>> {
+    return this.recordedWebhookDeliveriesForTest ? [...this.recordedWebhookDeliveriesForTest] : [];
   }
 
   private async handleApiOutboundWebhooks(request: Request): Promise<Response> {
@@ -5911,6 +5914,23 @@ export class Steward extends Agent<Env> {
     const target = row.threadId ? linkTargetForThread(row.threadId) : "home";
     const workspaceUrl = await this.web.linkUrl(target, CARD_LINK_TTL_MS);
     const threadTitle = row.threadId ? (this.ledger.threads.get(row.threadId)?.title ?? undefined) : undefined;
+    const testCapture = this.recordedWebhookDeliveriesForTest;
+    const captureFetch: typeof fetch | undefined = testCapture
+      ? ((async (input: RequestInfo | URL, init?: RequestInit) => {
+          const headersObj: Record<string, string> = {};
+          if (init?.headers && typeof init.headers === "object") {
+            for (const [k, v] of Object.entries(init.headers as Record<string, string>)) {
+              headersObj[k.toLowerCase()] = String(v);
+            }
+          }
+          testCapture.push({
+            url: String(input),
+            headers: headersObj,
+            body: String(init?.body ?? ""),
+          });
+          return new Response("ok", { status: 200 });
+        }) as typeof fetch)
+      : undefined;
     await fanOutOutboundWebhooks({
       hooks,
       event: {
@@ -5921,7 +5941,7 @@ export class Steward extends Agent<Env> {
         card: localCard,
         workspaceUrl,
       },
-      ...(this.outboundWebhookFetchForTest ? { fetchImpl: this.outboundWebhookFetchForTest } : {}),
+      ...(captureFetch ? { fetchImpl: captureFetch } : {}),
       onLog: (reason, detail) => this.logChannel(reason, detail),
     });
   }

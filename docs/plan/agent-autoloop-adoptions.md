@@ -3,8 +3,8 @@
 状态：阶段 1–5 已全部落地并通过生产环境验收（2026-11-25，`050`–`053` 迁移落表，`pnpm verify:prod` 0 失败）。
 
 范围与顺序决定（2026-11-24 拍板，2026-11-25 验收收口）：
-1. **双轨兼顾**：既面向日常主力 `pi` + 多 API / Coding 套餐提供方（DeepSeek、`zai-coding-cn`、OpenAI 兼容网关）落地细粒度限流挂起与活进程补报，也补齐**除 Gemini CLI 以外**的外围 CLI 生态（`codex`、`claude-code`、基于 ACP v1 的 `opencode` / `agentica`，以及本机白名单 `CommandAdapter` 接入 `dsh` / `zcode` / `command`）。
-2. **彻底剔除 Gemini CLI**：2026 年 6 月 18 日起 Google 已停止 Gemini CLI 对免费及 AI Pro / Ultra 个人订阅的服务（[google-gemini/gemini-cli#27274](https://github.com/google-gemini/gemini-cli/discussions/27274)），并严禁第三方编排工具复用个人 OAuth 登录态（[google-gemini/gemini-cli#20632](https://github.com/google-gemini/gemini-cli/discussions/20632)）。代码与测试中不保留任何 `gemini --acp` 接入或冗余防御分支，仅保留实际支持的引擎（Antigravity 单独提供 `otto agy-key` 隔离 API Key 配置）。
+1. **双轨兼顾**：既面向日常主力 `pi` + 多 API / Coding 套餐提供方（DeepSeek、`zai-coding-cn`、OpenAI 兼容网关）落地细粒度限流挂起与活进程补报，也补齐外围 CLI 生态（`codex`、`claude-code`、基于 ACP v1 的 `opencode` / `agentica`，以及本机白名单 `CommandAdapter` 接入 `dsh` / `zcode` / `command`）。
+2. **收敛本地 Agent 范围**：仅保留实际使用的编码引擎（`pi`、`claude-code`、`codex`、通用 `opencode` / `agentica` ACP 与白名单 `CommandAdapter`），不保留无关外围 CLI 的本地适配、配置命令或冗余防御分支。
 3. **离线契约测试桩（Contract Fixtures）门禁**：针对开发机未登录部分外围 CLI 实账号的情况，外围协议流统一固化在 `fake-pi.mjs`、`fake-claude.mjs`、`fake-codex.mjs`、`fake-acp.mjs`、`fake-command.mjs` 中完成确定性回归验证，并在 `hello.agents` 附带无损 `authStatus` 预检。
 4. **已交付阶段**：**阶段 1（`050` 双粒度限流冷却挂起、`promptAccepted` 对账判据、单次只读补报与 Codex / Claude 细节修补） → 阶段 2（通用 `AcpAdapter` 支持 `opencode` / `agentica` 与 `shell: false` 的 `CommandAdapter`） → 阶段 3（`051` 零 Token 本地 SHA-256 探针 `otto probe`、`autoHops <= 8` 熔断与 GitHub/GitLab 验签入站 Webhook 暂停补放） → 阶段 4（`052` PR Watch 2 小时停滞确认卡与零检出 `git_pr_diff` 跨引擎/净空盲审） → 阶段 5（`053` `otto notify` 零依赖桌面通知、飞书 Schema 2.0 卡片与 SSRF 防护签名出站 Webhook）**。
 

@@ -12,7 +12,7 @@
 
 - **服务端常驻，随时响应。** 即使电脑休眠，Steward 仍在云服务器上保留对话、记忆、定时回看与经 SHA-256 审批的本地零 Token 探针排期；本地编码任务等连接器上线后继续执行。
 - **多台机器，一处对话。** 任务、待决事项、实时上下文/工具遥测与进展集中在一起，支持 `Cmd/Ctrl+K` 全局混合检索（FTS5），并可按需开启本机桌面通知（`otto notify`）、Web Push 以及飞书 Schema 2.0 卡片 / 钉钉 / 企微 / Slack 签名出站 Webhook。
-- **代码留在自己的电脑上。** 连接器在本地运行 **pi**、**Claude Code**、**Codex CLI**、**Antigravity（`agy`）**、基于 ACP v1 的 **OpenCode** / **Agentica** 或本机白名单命令预设（**`dsh`**、**`zcode`**），按仓库执行写入隔离（`worktree`/`in-place`）、并发策略（`parallel`/`serial`）与授权钩子；coding agent 的完整会话记录始终留在本机磁盘。
+- **代码留在自己的电脑上。** 连接器在本地运行 **pi**、**Claude Code**、**Codex CLI**、基于 ACP v1 的 **OpenCode** / **Agentica** 或本机白名单命令预设（**`dsh`**、**`zcode`**），按仓库执行写入隔离（`worktree`/`in-place`）、并发策略（`parallel`/`serial`）与授权钩子；coding agent 的完整会话记录始终留在本机磁盘。
 - **限流冷却挂起与单次补报抢救。** 遇到套餐窗口或配额限流（`error:rate_limited`）时，会话挂起为 `idle`（不判为 `broken`），按 `(机器, provider/agent)` 双粒度冷却表登记重置时刻并在到期后零模型开销自动续跑；无错结束但漏调 `report` 工具时，最多执行一次只读补报回收结构化结论。
 - **有边界的记忆、技能与控制面。** 偏好和项目约定与聊天记录分开保存（记录来源及确认状态），结合同仓库历史会话识别重复模式，仅在证据充分时提议新增或增量更新 `SKILL.md` 技能并等待确认落盘；同时提供确定性 worker 检查点、双账本预算与遥测图表，以及只读 Worktree 体检与带确认门禁的安全回收。
 - **只读跟进 PR 与零检出交叉盲审。** 把 GitHub PR 关联到已有事项，服务器持续监测 CI 状态、诊断失败日志、检测合并冲突、分诊可信评审意见，并在同一提交停滞超过 2 小时时推送去重确认卡；经你点击确认后，连接器可直接从裸 Git 对象提取 `git_pr_diff`（不切分支、不污染本地脏工作区），派发剥离作者推理过程的跨引擎/净空只读盲审。
@@ -31,7 +31,7 @@
              ▲ connector 主动建立 WebSocket 出站连接
              │
 macOS / Linux / Windows 上的 connector
-  ├─ 本地适配器：pi、Claude Code、Codex CLI、Antigravity（agy）、OpenCode / Agentica（ACP）、dsh / zcode
+  ├─ 本地适配器：pi、Claude Code、Codex CLI、OpenCode / Agentica（ACP）、dsh / zcode
   └─ 本地受控中继：Worktree 差异/体检/清理、零检出 PR Diff、SHA-256 探针、检查点、仓库技能、系统桌面通知
 ```
 
@@ -108,7 +108,7 @@ otto status
 
 配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务，Windows 用当前用户登录自启动：`Run` 注册表项加生成的 `~/.otto/otto-daemon.vbs`）；如果这台机器装不了（当前会话够不到服务管理器，或者机器策略禁止登录自启动），`connect` 会在**兑换配对码之前**就说清楚，重试不需要新码；也可以加 `--foreground` 把守护进程跑在当前终端里；如果机器已经配对、只是缺少自启动项，用 `otto install` 补上即可，它不需要配对码。`otto status` 会告诉你是哪一种；Windows 上连接器在下次登录时自动启动，启动器会以 `otto daemon --supervise` 方式运行它，所以守护进程挂掉后会自己按退避策略重启，直到执行 `otto stop`。
 
-连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后试一个小的只读任务。Otto 默认不传模型参数，本地 agent 用的是**它自己的默认模型**。connector 上报模型选择能力后，可在**设置 → 本地编程 agent 模型**（或**机器**页）按机器和 agent 设置新任务默认模型；面板显式模型列表目前面向 `pi` 开放（展示本机 `pi` 探测到的模型、默认值及缓存状态，支持高级自定义输入），其余已安装的 CLI（`claude`、`codex`、`agy`、`opencode`、`agentica`）跟随各自默认配置（Antigravity 可通过 `otto agy-key` 在 `~/.otto` 内配置隔离的 `GEMINI_API_KEY`，不改动 `~/.gemini`）。Otto 不保存本地 agent 的密钥；若某个服务商触发配额限流窗口，会话会挂起为 `idle` 并在冷却结束后自动续跑。`otto status` 与 `otto doctor` 会检查实际可启动的 agent 命令（不存在时提示 `NOT SPAWNABLE`）；`otto probe` 管理 `~/.otto/probes/` 下经本机 SHA-256 审批的零 Token 探针脚本；`otto notify` 控制本机桌面通知；`otto logs -n 50` 用于排查上线问题。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
+连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后试一个小的只读任务。Otto 默认不传模型参数，本地 agent 用的是**它自己的默认模型**。connector 上报模型选择能力后，可在**设置 → 本地编程 agent 模型**（或**机器**页）按机器和 agent 设置新任务默认模型；面板显式模型列表目前面向 `pi` 开放（展示本机 `pi` 探测到的模型、默认值及缓存状态，支持高级自定义输入），其余已安装的 CLI（`claude`、`codex`、`opencode`、`agentica`）跟随各自默认配置。Otto 不保存本地 agent 的密钥；若某个服务商触发配额限流窗口，会话会挂起为 `idle` 并在冷却结束后自动续跑。`otto status` 与 `otto doctor` 会检查实际可启动的 agent 命令（不存在时提示 `NOT SPAWNABLE`）；`otto probe` 管理 `~/.otto/probes/` 下经本机 SHA-256 审批的零 Token 探针脚本；`otto notify` 控制本机桌面通知；`otto logs -n 50` 用于排查上线问题。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
 
 **完成标志：** 机器和选定目录显示在线，测试任务返回结果。其他电脑重复这一步。
 

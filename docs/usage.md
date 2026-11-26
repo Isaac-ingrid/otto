@@ -49,7 +49,7 @@ Two exact phrases stay deterministic and never reach the model — they mint cre
 
 - **Claude Code (`claude`)** — headless `claude -p` stream-json execution with Otto's `report` / `propose` MCP tools, strict read-only execution (`--permission-mode plan` + read-only tools), cached input token accounting, and `rate_limit_event` reset-time extraction.
 - **Codex CLI (`codex`)** — JSONL execution and resume (including macOS desktop app binary fallbacks and Windows sandbox read-only ACLs), transient stream error clearing on completed turns, and `readonly` support.
-- **Antigravity (`agy`)** & **ACP v1 (`opencode`, `agentica`)** — JSON-RPC 2.0 ACP session management with worktree realpath permission checks and optional isolated `GEMINI_API_KEY` profiles (`otto agy-key`). Gemini CLI is intentionally omitted.
+- **ACP v1 (`opencode`, `agentica`)** — JSON-RPC 2.0 ACP session management with worktree `realpath` permission confinement and cooperative cancellation.
 - **Local Command presets (`dsh`, `zcode`, `command`)** — locally allowlisted `CommandAdapter` templates spawned with `shell: false` and single-pass placeholder substitution.
 
 Across `pi`, `claude-code`, and `codex`, clean exits that omit a structured `report` run at most **one read-only salvage pass** to recover the report without re-executing file edits or shell commands. When a provider or subscription hits a quota or rate-limit window (`error:rate_limited`), Otto parks the worker in `idle` (under `pi:<provider>` or `agent:<kind>` cooldowns), preserves its worktree and session, and resumes automatically once the window resets.

@@ -50,7 +50,6 @@
    - 写入 `.agents/skills/<slug>/SKILL.md` 绝不顺带修改 `connector.sqlite` 中的 `repo.approved`；若 `repo.approved === false`，前端仅展示清晰的本机授权命令提示（`otto repo-config <path> --approve`）。
 
 ### 明确不做（排除项）
-- **不触碰 Antigravity（`agy`）相关目录或运行时集成**：保持 `agy` 实时特性严格冻结。
 - **不做多文件离线技能压缩包（ZIP/目录递归上传）或远程 Skill 市场拉取**：聚焦纯文本单文件 `SKILL.md` / 命令模板的可控沉淀与维护。
 - **不在机器离线时将文件写删排入持久化 `outbox` 延迟执行**：避免数小时后机器上线时静默覆盖用户离线期间的本地修改；离线一律即时返回 `409 machine_offline`（前端保留本地下载 `SKILL.md` 兜底）。
 

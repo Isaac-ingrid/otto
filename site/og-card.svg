@@ -20,5 +20,5 @@
   <text x="96" y="318" fill="#F1F7EE" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, sans-serif" font-size="50" font-weight="650">Otto</text>
   <text x="96" y="386" fill="#959F98" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, sans-serif" font-size="28">在一个网页里，调度你几台电脑上的 coding agent。</text>
   <text x="96" y="434" fill="#6C7A70" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, sans-serif" font-size="22">Coordinate the coding agents on your computers from one web workspace.</text>
-  <text x="96" y="514" fill="#6C7A70" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">pi · Claude Code · Codex CLI · Antigravity  |  Node.js + SQLite  |  MIT</text>
+  <text x="96" y="514" fill="#6C7A70" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">pi · Claude Code · Codex CLI · OpenCode  |  Node.js + SQLite  |  MIT</text>
 </svg>

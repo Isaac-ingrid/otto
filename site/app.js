@@ -20,16 +20,16 @@ const COPY = {
     '在一个网页里，调度你几台电脑上的 coding agent。',
   ],
   heroLead: [
-    'When working across a laptop, a desktop, and a phone, it is hard to track what each local agent is doing. Otto runs a persistent Steward process on your server to hold conversations, task state, quota-cooldown recovery, and reminders, while dispatching code work to pi, Claude Code, Codex CLI, Antigravity, or OpenCode on your own computers. Repositories and full session logs remain on local disk.',
-    '在笔记本、台式机和手机之间切换工作时，往往很难集中追踪各台机器上的任务进度。Otto 在你自己的服务器上运行一个常驻进程（Steward），统一维护对话、事项状态、限流冷却恢复与待办提醒；涉及读写代码的任务则分发给各台电脑上的 pi、Claude Code、Codex CLI、Antigravity 或 OpenCode 执行，代码仓库与完整会话日志始终留在本地。',
+    'When working across a laptop, a desktop, and a phone, it is hard to track what each local agent is doing. Otto runs a persistent Steward process on your server to hold conversations, task state, quota-cooldown recovery, and reminders, while dispatching code work to pi, Claude Code, Codex CLI, or OpenCode on your own computers. Repositories and full session logs remain on local disk.',
+    '在笔记本、台式机和手机之间切换工作时，往往很难集中追踪各台机器上的任务进度。Otto 在你自己的服务器上运行一个常驻进程（Steward），统一维护对话、事项状态、限流冷却恢复与待办提醒；涉及读写代码的任务则分发给各台电脑上的 pi、Claude Code、Codex CLI 或 OpenCode 执行，代码仓库与完整会话日志始终留在本地。',
   ],
   heroCtaStart: ['Setup guide', '安装与运行'],
   heroCtaPreview: ['See workflows', '查看典型场景'],
   copyBtn: ['Copy', '复制'],
   copiedBtn: ['Copied', '已复制'],
   factAgents: [
-    'Local adapters: pi · Claude Code · Codex CLI · Antigravity · OpenCode / Agentica (ACP) · dsh / zcode',
-    '本地适配器：pi · Claude Code · Codex CLI · Antigravity · OpenCode / Agentica（ACP）· dsh / zcode',
+    'Local adapters: pi · Claude Code · Codex CLI · OpenCode / Agentica (ACP) · dsh / zcode',
+    '本地适配器：pi · Claude Code · Codex CLI · OpenCode / Agentica（ACP）· dsh / zcode',
   ],
   factOS: [
     'Connectors: macOS · Linux · Windows (outbound WS, local SHA-256 probes & OS desktop notifications)',
