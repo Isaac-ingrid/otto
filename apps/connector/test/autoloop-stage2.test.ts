@@ -5,9 +5,9 @@
 //    - `session/request_permission` worktree `realpath` confinement (`allow_once` inside worktree vs `reject_once` outside / symlink escape / readonly write)
 // 2. `CommandAdapter` (`dsh` 0.2.2+ & `zcode` + local allowlist):
 //    - Single-pass callback placeholder substitution (`$&` literal preservation + zero recursive `{cwd}` expansion)
-//    - `dsh` multi-step `step_end` token (`input` + `cacheRead` + `output`) & USD cost accumulation + `sessionID` continuation
-//    - `LocalStore` local-only allowlist persistence
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+//    - `dsh` 0.2.2+ official `headless --json` CLI flags (`--permission-mode`, `--approval-policy never`, worktree `--add-dir <git-common-dir>`, zero `--model`), opening `session` identity capture, `step_end` token-only accumulation (`inputTokens` + `cacheReadTokens` + `cacheWriteTokens`, no fabricated USD cost), `final` completion/error adjudication (`RATE_LIMIT`), and `--session-id` continuation
+//    - `zcode` official `-p ... --mode edit|plan --json` CLI flags, `.cjs` script `process.execPath` prefixing, `response` + `sessionId` (`sess_...`) + `usage` extraction, and `WorkerManager` cold `send` `--resume` persistence
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -20,10 +20,16 @@ import {
   buildDshPreset,
   buildZcodePreset,
   CommandAdapter,
+  normalizeCommandExecutable,
+  presetFromStoredConfig,
+  resolveWorktreeGitCommonDir,
   substituteCommandArgv,
 } from "../src/command-adapter.ts";
 import type { RawAdapterEvent } from "../src/agent.ts";
+import { EventLog } from "../src/events.ts";
 import { LocalStore } from "../src/store.ts";
+import { WorkerManager } from "../src/worker-manager.ts";
+import { git, makeGitRepo } from "./helpers.ts";
 
 const FAKE_ACP = join(import.meta.dirname, "fake-acp.mjs");
 const FAKE_CMD = join(import.meta.dirname, "fake-command.mjs");
@@ -48,7 +54,6 @@ afterEach(() => {
 });
 
 describe("Stage 2 — Generic AcpAdapter (`opencode`, `agentica`)", () => {
-
   it("ignores replayed history during `session/load`, enforces worktree `realpath` permission confinement (`allow_once` vs `reject_once`), and settles with report", async () => {
     // Create a symlink inside worktree pointing outside to verify `realpathSync` confinement!
     writeFileSync(join(outsideDir, "secret.txt"), "top-secret");
@@ -194,7 +199,7 @@ describe("Stage 2 — Generic AcpAdapter (`opencode`, `agentica`)", () => {
 });
 
 describe("Stage 2 — CommandAdapter (`dsh` 0.2.2+, `zcode`, single-pass template & local allowlist)", () => {
-  it("substitutes placeholders in a single callback pass without `$&` corruption or recursive `{cwd}` expansion", () => {
+  it("substitutes placeholders in a single callback pass without `$&` corruption or recursive `{cwd}` expansion, and prefixes `node` for `.cjs` scripts", () => {
     const trickyPrompt = "Replace foo with $& and $' and keep literal {cwd} untouched";
     const argv = substituteCommandArgv(["run", "--cwd", "{cwd}", "--model", "{model}", "{prompt}"], {
       prompt: trickyPrompt,
@@ -209,41 +214,73 @@ describe("Stage 2 — CommandAdapter (`dsh` 0.2.2+, `zcode`, single-pass templat
       "deepseek-reasoner",
       "Replace foo with $& and $' and keep literal {cwd} untouched",
     ]);
+
+    expect(normalizeCommandExecutable(["C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs"], "/usr/bin/node")).toEqual([
+      "/usr/bin/node",
+      "C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs",
+    ]);
+    expect(normalizeCommandExecutable(["dsh"], "/usr/bin/node")).toEqual(["dsh"]);
+
+    // Custom `command` preset with `{model}` advertises launch-time model selection, whereas
+    // `dsh` and `zcode` advertise `selection: "none"`.
+    const custom = new CommandAdapter({
+      stateDir,
+      preset: presetFromStoredConfig("command", {
+        enabled: true,
+        command: ["my-cli"],
+        argsTemplate: ["--model", "{model}", "{prompt}"],
+      }),
+    });
+    expect(custom.modelCatalog.capabilities.selection).toBe("launch");
   });
 
-  it("accumulates `dsh` 0.2.2+ `step_end` tokens & USD cost, captures `sessionID`, and continues via `--session`", async () => {
+  it("drives `dsh` 0.2.2+ `headless --json`, grants `--add-dir <git-common-dir>` on worktrees, sums `step_end` tokens (no fake cost), and resumes via `--session-id`", async () => {
+    // Create a real Git repo + linked worktree to verify zero-subprocess `resolveWorktreeGitCommonDir`.
+    const repoPath = await makeGitRepo(rootDir, "dsh-repo");
+    const linkedWt = join(rootDir, "dsh-wt");
+    await git(repoPath, ["worktree", "add", "-b", "otto/dsh-branch", linkedWt]);
+    const expectedCommonGit = realpathSync(join(repoPath, ".git"));
+    expect(resolveWorktreeGitCommonDir(linkedWt)).toBe(expectedCommonGit);
+    expect(resolveWorktreeGitCommonDir(repoPath)).toBeNull();
+
     const scenario1 = join(rootDir, "dsh-1.json");
     const cmdLog = join(rootDir, "dsh.log");
     writeFileSync(
       scenario1,
       JSON.stringify({
         lines: [
-          { type: "step_start", sessionID: "dsh_ses_900" },
+          { type: "session", sessionId: "session-900-uuid" },
           {
             type: "tool_call",
-            sessionID: "dsh_ses_900",
-            tool: "read_file",
-            input: { path: "src/app.ts" },
+            name: "read_file",
+            arguments: { path: "src/app.ts" },
           },
           {
             type: "step_end",
-            sessionID: "dsh_ses_900",
-            part: {
-              tokens: { input: 300, cacheRead: 700, output: 120, reasoning: 30 },
-              cost: 0.0012,
-              contextWindow: 128000,
+            usage: {
+              inputTokens: 300,
+              outputTokens: 150,
+              totalTokens: 1200,
+              cacheReadTokens: 700,
+              cacheWriteTokens: 50,
             },
           },
           {
             type: "step_end",
-            sessionID: "dsh_ses_900",
-            part: {
-              tokens: { input: 200, cacheRead: 800, output: 100 },
-              cost: 0.0015,
-              contextWindow: 128000,
+            usage: {
+              inputTokens: 200,
+              outputTokens: 100,
+              totalTokens: 1100,
+              cacheReadTokens: 800,
             },
           },
-          { type: "text", sessionID: "dsh_ses_900", text: "Completed two steps." },
+          { type: "text", text: "Intermediate step note." },
+          {
+            type: "final",
+            sessionId: "session-900-uuid",
+            text: "Completed two steps.",
+            reason: { kind: "completed" },
+          },
         ],
         reportFilePayload: {
           status: "done",
@@ -258,38 +295,54 @@ describe("Stage 2 — CommandAdapter (`dsh` 0.2.2+, `zcode`, single-pass templat
       preset: buildDshPreset([process.execPath, FAKE_CMD]),
       env: { FAKE_CMD_SCENARIO: scenario1, FAKE_CMD_LOG: cmdLog },
     });
+    expect(adapter.modelCatalog.capabilities.selection).toBe("none");
 
     const events: RawAdapterEvent[] = [];
     adapter.on("worker-event", (e) => events.push(e));
 
+    let observedSid: string | null = null;
+    let promptAccepted = false;
     await adapter.start({
       workerId: "w-dsh-1",
       threadId: "t-dsh",
-      cwd: worktreeDir,
-      mode: "readonly",
-      model: "deepseek-chat",
-      prompt: "Audit src/app.ts with $& pattern",
+      cwd: linkedWt,
+      mode: "write",
+      prompt: "Implement fix in src/app.ts with $& pattern",
       commandId: "cmd-dsh-1",
-    });
-
-    await viWaitFor(() => events.some((e) => e.type === "settled"));
-    const settled1 = events.find((e) => e.type === "settled");
-    expect(settled1).toMatchObject({
-      outcome: "reported",
-      report: { status: "done", summary: "DSH completed multi-step analysis" },
-      usage: {
-        tokens: {
-          // (300+700) + (200+800) = 2000 input (1500 cached), (120+30) + 100 = 250 output
-          input: 2000,
-          output: 250,
-          totalTokens: 2250,
-          cachedInputTokens: 1500,
-        },
-        cost: 0.0027,
+      onSessionId: (sid) => {
+        observedSid = sid;
+      },
+      onPromptAccepted: () => {
+        promptAccepted = true;
       },
     });
 
-    // Follow-up `send` uses captured `dsh_ses_900` via `--session dsh_ses_900`!
+    await viWaitFor(() => events.some((e) => e.type === "settled"));
+    expect(observedSid).toBe("session-900-uuid");
+    expect(promptAccepted).toBe(true);
+
+    const settled1 = events.find((e) => e.type === "settled");
+    expect(settled1).toMatchObject({
+      outcome: "reported",
+      sessionId: "session-900-uuid",
+      report: { status: "done", summary: "DSH completed multi-step analysis" },
+      usage: {
+        tokens: {
+          // Step 1: 300 + 700 + 50 = 1050 input (750 cached), 150 output
+          // Step 2: 200 + 800 = 1000 input (800 cached), 100 output
+          // Total: 2050 input (1550 cached), 250 output = 2300 totalTokens
+          input: 2050,
+          output: 250,
+          totalTokens: 2300,
+          cachedInputTokens: 1550,
+        },
+      },
+    });
+    // `dsh` 0.2.2+ reports tokens only — never fabricate a USD `cost` field.
+    expect(settled1 && settled1.type === "settled" ? settled1.usage?.cost : undefined).toBeUndefined();
+
+    // Follow-up `send` uses captured `session-900-uuid` via `--session-id session-900-uuid`
+    // and repeats `--add-dir <git-common-dir>`!
     events.length = 0;
     await adapter.send("w-dsh-1", { text: "Check one more file", commandId: "cmd-dsh-2" }, "prompt");
     await viWaitFor(() => events.some((e) => e.type === "settled"));
@@ -300,59 +353,192 @@ describe("Stage 2 — CommandAdapter (`dsh` 0.2.2+, `zcode`, single-pass templat
       .map((l) => JSON.parse(l) as { argv: string[]; hasOttoToken: boolean });
     expect(invocations).toHaveLength(2);
     expect(invocations[0]!.hasOttoToken).toBe(false);
-    expect(invocations[0]!.argv).toContain("--readonly");
-    expect(invocations[0]!.argv).toContain("deepseek-chat");
-    expect(invocations[1]!.argv).toContain("--session");
-    expect(invocations[1]!.argv).toContain("dsh_ses_900");
-  });
+    expect(invocations[0]!.argv.slice(0, 8)).toEqual([
+      "headless",
+      "--json",
+      "--permission-mode",
+      "workspace-write",
+      "--approval-policy",
+      "never",
+      "--add-dir",
+      expectedCommonGit,
+    ]);
+    expect(invocations[0]!.argv).not.toContain("--model");
+    expect(invocations[0]!.argv).not.toContain("--session-id");
 
-  it("persists local-only CommandAdapter allowlist in LocalStore and parses `zcode` JSON output", async () => {
-    const store = new LocalStore(join(stateDir, "connector.sqlite"));
-    store.setCommandAdapterConfig("zcode", {
-      enabled: true,
-      command: [process.execPath, FAKE_CMD],
-    });
-    expect(store.getCommandAdaptersConfig().zcode?.enabled).toBe(true);
-    store.close();
+    expect(invocations[1]!.argv).toContain("--session-id");
+    expect(invocations[1]!.argv).toContain("session-900-uuid");
+    expect(invocations[1]!.argv).toContain("--add-dir");
+    expect(invocations[1]!.argv).toContain(expectedCommonGit);
+  }, 20_000);
 
-    const scenarioZcode = join(rootDir, "zcode.json");
+  it("classifies `dsh` in-turn `final.reason` `RATE_LIMIT` errors as `rate_limited` and refuses bogus `--session-id` when no `session` event arrived", async () => {
+    const scenarioRateLimit = join(rootDir, "dsh-rl.json");
     writeFileSync(
-      scenarioZcode,
+      scenarioRateLimit,
       JSON.stringify({
         lines: [
+          { type: "session", sessionId: "session-rl-1" },
           {
-            session_id: "zc_77",
-            result: "Done!",
-            otto_report: { status: "done", summary: "ZCode task finished" },
-            usage: { input_tokens: 450, output_tokens: 90 },
-            cost_usd: 0.004,
+            type: "final",
+            sessionId: "session-rl-1",
+            text: "",
+            reason: {
+              kind: "error",
+              error: {
+                code: "RATE_LIMIT",
+                message: "429 usage limit reached, resets in 30m",
+              },
+            },
           },
         ],
+        exitCode: 1,
       }),
     );
 
     const adapter = new CommandAdapter({
       stateDir,
-      preset: buildZcodePreset([process.execPath, FAKE_CMD]),
-      env: { FAKE_CMD_SCENARIO: scenarioZcode },
+      preset: buildDshPreset([process.execPath, FAKE_CMD]),
+      env: { FAKE_CMD_SCENARIO: scenarioRateLimit },
     });
     const events: RawAdapterEvent[] = [];
     adapter.on("worker-event", (e) => events.push(e));
     await adapter.start({
-      workerId: "w-zc-1",
-      threadId: "t-zc",
+      workerId: "w-dsh-rl",
+      threadId: "t-dsh-rl",
       cwd: worktreeDir,
-      mode: "write",
-      prompt: "Run zcode",
-      commandId: "cmd-zc-1",
+      mode: "readonly",
+      prompt: "Audit repo",
+      commandId: "cmd-dsh-rl",
     });
     await viWaitFor(() => events.some((e) => e.type === "settled"));
-    expect(events.find((e) => e.type === "settled")).toMatchObject({
-      outcome: "reported",
-      report: { status: "done", summary: "ZCode task finished" },
-      usage: { tokens: { input: 450, output: 90, totalTokens: 540 }, cost: 0.004 },
+    const settled = events.find((e) => e.type === "settled");
+    expect(settled).toMatchObject({
+      outcome: "error",
+      errorClass: "rate_limited",
+      sessionId: "session-rl-1",
     });
+
+    // Pre-session driver error (exits without emitting `session`): `resume()` must reject
+    // rather than passing Otto's `w-dsh-nosess` to `dsh --session-id`!
+    const scenarioPreFail = join(rootDir, "dsh-prefail.json");
+    writeFileSync(
+      scenarioPreFail,
+      JSON.stringify({
+        lines: [{ type: "error", message: "MISSING_CREDENTIAL: no API key" }],
+        exitCode: 1,
+      }),
+    );
+    const adapter2 = new CommandAdapter({
+      stateDir,
+      preset: buildDshPreset([process.execPath, FAKE_CMD]),
+      env: { FAKE_CMD_SCENARIO: scenarioPreFail },
+    });
+    const events2: RawAdapterEvent[] = [];
+    adapter2.on("worker-event", (e) => events2.push(e));
+    await adapter2.start({
+      workerId: "w-dsh-nosess",
+      threadId: "t-dsh-nosess",
+      cwd: worktreeDir,
+      mode: "readonly",
+      prompt: "Audit repo",
+      commandId: "cmd-dsh-nosess",
+    });
+    await viWaitFor(() => events2.some((e) => e.type === "settled"));
+    await expect(adapter2.resume("w-dsh-nosess", "manual")).rejects.toMatchObject({ code: "not_found" });
   });
+
+  it("persists local-only `zcode` allowlist, passes `-p ... --mode edit|plan --json`, and preserves `sess_...` across `WorkerManager` cold `send`", async () => {
+    const repoPath = await makeGitRepo(rootDir, "zc-repo");
+    const store = new LocalStore(join(stateDir, "connector.sqlite"));
+    store.setCommandAdapterConfig("zcode", {
+      enabled: true,
+      command: [FAKE_CMD], // `.mjs` script — verifies `normalizeCommandExecutable` prepends `process.execPath`!
+    });
+    expect(store.getCommandAdaptersConfig().zcode?.enabled).toBe(true);
+    store.addRepo({
+      repoId: repoPath,
+      name: "zc-repo",
+      path: repoPath,
+      capability: { kind: "git", gitRoot: repoPath, defaultBranch: "main", remote: null },
+    });
+
+    const scenarioZcode = join(rootDir, "zcode.json");
+    const zcLog = join(rootDir, "zcode.log");
+    writeFileSync(
+      scenarioZcode,
+      JSON.stringify({
+        rawStdout: JSON.stringify(
+          {
+            sessionId: "sess_zc_77",
+            response: "```json\n{\"otto_report\":{\"status\":\"done\",\"summary\":\"ZCode task finished\"}}\n```",
+            usage: { inputTokens: 67500, outputTokens: 900, cacheReadTokens: 42000 },
+          },
+          null,
+          2,
+        ),
+      }),
+    );
+
+    const adapter = new CommandAdapter({
+      stateDir,
+      preset: buildZcodePreset([FAKE_CMD]),
+      env: { FAKE_CMD_SCENARIO: scenarioZcode, FAKE_CMD_LOG: zcLog },
+    });
+    const eventLog = new EventLog(store.database);
+    const managerEvents: Array<Record<string, unknown>> = [];
+    const manager = new WorkerManager({
+      store,
+      stateDir,
+      adapters: [adapter],
+      emit: (workerId, fields) => {
+        const stored = eventLog.append(workerId, fields);
+        managerEvents.push(JSON.parse(stored.payload) as Record<string, unknown>);
+      },
+    });
+
+    try {
+      await manager.startWorker("cmd-zc-1", {
+        workerId: "w-zc-1",
+        threadId: "t-zc",
+        repoId: repoPath,
+        mode: "readonly",
+        agent: "zcode",
+        prompt: "Review module in plan mode",
+      });
+
+      await viWaitFor(() => managerEvents.some((e) => e.type === "settled"));
+      expect(managerEvents.find((e) => e.type === "settled")).toMatchObject({
+        outcome: "reported",
+        usage: {
+          tokens: { input: 67500, output: 900, totalTokens: 68400, cachedInputTokens: 42000 },
+        },
+      });
+      // `WorkerManager` persisted `sess_zc_77` into SQLite so cold `send` resumes with `--resume sess_zc_77`!
+      expect(store.getWorker("w-zc-1")?.sessionId).toBe("sess_zc_77");
+
+      managerEvents.length = 0;
+      await manager.handleCommand("cmd-zc-2", "send", {
+        workerId: "w-zc-1",
+        text: "Follow-up question in plan mode",
+        intent: "auto",
+      });
+      await viWaitFor(() => managerEvents.some((e) => e.type === "settled"));
+
+      const invocations = readFileSync(zcLog, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as { argv: string[] });
+      expect(invocations).toHaveLength(2);
+      expect(invocations[0]!.argv[0]).toBe("-p");
+      expect(invocations[0]!.argv.slice(2)).toEqual(["--mode", "plan", "--json"]);
+      expect(invocations[1]!.argv[0]).toBe("-p");
+      expect(invocations[1]!.argv.slice(2)).toEqual(["--mode", "plan", "--resume", "sess_zc_77", "--json"]);
+    } finally {
+      manager.stop();
+      store.close();
+    }
+  }, 20_000);
 });
 
 async function viWaitFor(pred: () => boolean, timeoutMs = 5_000): Promise<void> {

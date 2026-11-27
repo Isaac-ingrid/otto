@@ -92,7 +92,7 @@
 
 ### 阶段 2：OpenCode / Agentica ACP 适配器与通用 Command 适配器
 - 通用 `AcpAdapter`（`apps/connector/src/acp-adapter.ts`）原生支持 `opencode` 与 `agentica`：区分 `session/load`（跳过历史重放）与 `session/resume`，识别 `-32000` / `thread_active_writer` 会话占用返回可重试的 `session_in_use`，按 worktree 真实路径校验 `allow_once` 权限；Gemini CLI 直接剔除，不留无效防御代码。
-- 轻量 `CommandAdapter`（`apps/connector/src/command-adapter.ts`）受本机存储白名单约束，强制 `shell: false`，单遍回调替换 `{prompt|model|effort|cwd|context}`（防止 `$&` 二次展开），内置 `dsh`（DeepSeek Harness `0.2.2+` JSONL `step_end` 累加）与 `zcode` 解析预设。
+- 轻量 `CommandAdapter`（`apps/connector/src/command-adapter.ts`）受本机存储白名单约束，强制 `shell: false`，单遍回调替换 `{prompt|model|effort|cwd|context|sessionId|reportFile}`（防止 `$&` 二次展开），内置对齐真实 CLI 协议的 `dsh`（`dsh headless --json --permission-mode workspace-write|read-only --approval-policy never`、独立 worktree `--add-dir <git-common-dir>` 授权、`session` / `step_end` Token 累加 / `final` 终态判定，仅上报 Token 不虚构费用）与 `zcode`（`zcode -p ... --mode edit|plan --json` / `--resume`、`.cjs` 自动挂载 `node`）解析预设。
 
 ### 阶段 3：零 Token 本地脚本探针（`probe`）、`autoHops` 8 跳熔断与入站 Webhook 暂停 `replay`
 - **本地探针（迁移 `051_probes_autohops_and_replay`）**：脚本限定于 `~/.otto/probes/` 并经本机 `otto probe approve <name>` 绑定 SHA-256；`RoutineService` 支持 `probe` 类型例行任务，返回 `{ triggered: false }` 时零 Token 结束，仅 `triggered: true` 时唤醒 Steward。

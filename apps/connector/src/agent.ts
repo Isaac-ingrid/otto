@@ -62,6 +62,9 @@ export interface StartSpec {
    *  (`pi` `/otto` handled, `claude` `system/init`, `codex` `turn.started`) so crash
    *  reconciliation distinguishes pre-prompt startup crashes from mid-run crashes. */
   onPromptAccepted?: () => void;
+  /** Fires when a headless CLI (`dsh` `session` event, `zcode` `--json` output) reveals its
+   *  persisted session identifier after process spawn so LocalStore records the real ID. */
+  onSessionId?: (sessionId: string) => void;
   /** approveProject (§13): the repo's local trust flag — pi runs with --approve. Never
    * taken from the command; set by the WorkerManager from the LocalStore's repo row. */
   approveProject?: boolean;
@@ -252,6 +255,8 @@ export type RawAdapterEvent =
       type: "settled";
       workerId: string;
       outcome: SettledOutcome;
+      /** Persisted CLI session identifier observed during or at the end of the run (`dsh`, `zcode`). */
+      sessionId?: string;
       errorClass?: ErrorClass;
       /** Epoch ms when a temporary quota/rate-limit window resets (bounded to <= 8 days). */
       limitedUntil?: number;

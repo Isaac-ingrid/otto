@@ -524,6 +524,12 @@ export class LocalStore {
       .run(accepted ? 1 : 0, Date.now(), workerId);
   }
 
+  setWorkerSessionId(workerId: string, sessionId: string): void {
+    this.db
+      .prepare("UPDATE worker SET sessionId = ?, updatedAt = ? WHERE workerId = ?")
+      .run(sessionId, Date.now(), workerId);
+  }
+
   setModelObservation(workerId: string, observation: AgentModelObservation, initialLaunch = false): void {
     const json = JSON.stringify(observation);
     this.db.prepare('UPDATE worker SET launchObservedModel = CASE WHEN ? THEN COALESCE(launchObservedModel, ?) ELSE launchObservedModel END, lastObservedModel = ?, updatedAt = ? WHERE workerId = ?').run(initialLaunch ? 1 : 0, json, json, Date.now(), workerId);

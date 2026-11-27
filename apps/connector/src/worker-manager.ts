@@ -688,6 +688,9 @@ export class WorkerManager {
           this.expectCommandMarker(commandId, args.workerId, sessionFile, lastKnownEntryId);
         },
         onPromptAccepted: () => this.store.setPromptAccepted(args.workerId, true),
+        onSessionId: (sid) => {
+          if (sid) this.store.setWorkerSessionId(args.workerId, sid);
+        },
         // §13: approveProject comes from the repo's local config, never from the command.
         approveProject: repo.approved === true ? true : undefined,
         images: args.images,
@@ -1433,13 +1436,16 @@ export class WorkerManager {
         this.expectCommandMarker(commandId, workerId, sessionFile, lastKnownEntryId);
       },
       onPromptAccepted: () => this.store.setPromptAccepted(workerId, true),
+      onSessionId: (sid) => {
+        if (sid) this.store.setWorkerSessionId(workerId, sid);
+      },
       // §13: approveProject comes from the repo's local config on every spawn — the
       // send-relaunch path included (issue #16 merge stitch).
       approveProject: repo?.approved === true ? true : undefined,
       images: input.images,
       // The worker already has a session: agents whose session id is not the workerId
-      // (Claude Code) resume it instead of deriving a fresh one (issue #17).
-      resumeSessionId: worker.sessionId ?? undefined,
+      // (Claude Code, DSH, ZCode) resume it instead of deriving a fresh one (issue #17).
+      resumeSessionId: worker.sessionId || undefined,
     };
     try {
       const adapter = this.adapterOfWorker(worker);
@@ -2062,11 +2068,14 @@ export class WorkerManager {
         this.expectCommandMarker(options.commandId, workerId, sessionFile, lastKnownEntryId);
       },
       onPromptAccepted: () => this.store.setPromptAccepted(workerId, true),
+      onSessionId: (sid) => {
+        if (sid) this.store.setWorkerSessionId(workerId, sid);
+      },
       // §13: the repo's local trust applies to resumes exactly like first starts.
       approveProject: repo?.approved === true ? true : undefined,
-      // The session exists (this is a resume): Claude Code resumes its UUID session
-      // instead of deriving a fresh one (issue #17).
-      resumeSessionId: worker.sessionId ?? undefined,
+      // The session exists (this is a resume): Claude Code / DSH / ZCode resume their
+      // persisted session id instead of deriving a fresh one (issue #17).
+      resumeSessionId: worker.sessionId || undefined,
     };
     this.active.set(workerId, {
       repoId: worker.repoId,
@@ -2245,10 +2254,13 @@ export class WorkerManager {
       commandId: `stall-respawn-${this.now()}`,
       ...this.workerModelSpec(worker),
       onPromptAccepted: () => this.store.setPromptAccepted(workerId, true),
+      onSessionId: (sid) => {
+        if (sid) this.store.setWorkerSessionId(workerId, sid);
+      },
       // §13: reproduce the original launch's trust mode — the respawn is the same run.
       approveProject: repo?.approved === true ? true : undefined,
-      // Same session as the stalled run (issue #17: Claude Code resumes its UUID).
-      resumeSessionId: worker.sessionId ?? undefined,
+      // Same session as the stalled run (issue #17: Claude Code / DSH / ZCode resume their id).
+      resumeSessionId: worker.sessionId || undefined,
     };
     this.active.set(workerId, {
       repoId: worker.repoId,
@@ -2399,6 +2411,9 @@ export class WorkerManager {
         return;
       }
       case "settled": {
+        if (event.sessionId) {
+          this.store.setWorkerSessionId(event.workerId, event.sessionId);
+        }
         const context = this.active.get(event.workerId);
         this.recordSessionTail(event.workerId); // §10 baseline: everything up to this settle is ours
         // `report` merged with GitFacts (§7.2): facts come from git, not the model.
