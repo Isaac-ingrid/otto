@@ -338,9 +338,10 @@ describe("Worker execution ledger isolation, replay idempotency, and $0 subscrip
     });
     await waitForWorkerState("idle");
 
-    // Resume the same worker: a new `progress` overwrites `sh_worker.lastProgress`, followed by Turn 2 settle
-    // using `turnUsage` (subscription CLI reporting `cost: undefined`, 30k incremental tokens).
+    // Resume the same worker: wait for `resumed` to flip `idle` -> `running` first (`fake.emit` only
+    // queues WS frames, so polling `idle` immediately after Turn 1 can match Turn 1's stale `idle`).
     await fake.emit("resumed", workerId, { reason: "follow-up" });
+    await waitForWorkerState("running");
     await fake.emit("progress", workerId, { phase: "tool", tool: "Edit", target: "src/b.ts", turn: 1 });
     await fake.emit("report", workerId, { status: "done", summary: "第二轮完成" });
     await fake.emit("settled", workerId, {
@@ -355,7 +356,7 @@ describe("Worker execution ledger isolation, replay idempotency, and $0 subscrip
         tokens: { input: 25_000, output: 5_000, totalTokens: 30_000 },
       },
     });
-    await waitForWorkerState("idle");
+    await waitWorkerPredicate(workerId, (w) => w.state === "idle" && w.contextTokens === 120_000);
 
     await runInDurableObject(ownerStub(), async (instance: Steward) => {
       const sql = (instance as unknown as { sql: LedgerSql }).sql.bind(instance);
