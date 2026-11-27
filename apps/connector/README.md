@@ -201,7 +201,7 @@ npm stage approve <stage-id> --registry=https://registry.npmjs.org
 - 上传这一步用的是 `~/.npmrc` 里那把 `bypass 2FA` 的 granular token（它就是勾了 *Bypass two-factor
   authentication* 建出来的那种）；npm 正在逐步限制它，届时改用 `npm login --auth-type=web` 拿会话 token。
 - 发布完确认：`npm view @isaac2ingrid/otto version`，再在干净目录跑
-  `npx -y @isaac2ingrid/otto@0.2.0 help`。
+  `npx -y @isaac2ingrid/otto@1.0.0 help`。
 
 ## 许可证
 
