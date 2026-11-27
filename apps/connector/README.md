@@ -173,6 +173,9 @@ otto daemon --supervise     # 在当前终端运行守护进程，崩溃后自�
 
 发布的是 `@isaac2ingrid/otto`，scope 就是 npm 账号名本身。
 
+- **GitHub Actions OIDC 自动发布（推荐）**：在 npm 包设置页的 **Trusted Publisher** 中绑定 `Isaac-ingrid/otto` 仓库与 `release.yml`（勾选允许 `npm publish`）后，修改版本号提交上 `main` 再推送对应的 `v*` 标签，`.github/workflows/release.yml` 会通过 OIDC 免 Token 自动完成发布并附带溯源签名；若该版本已提前手动上架，流水线会自动跳过并保持全绿。
+- **本机 Touch ID 两阶段手动发布（备用）**：步骤如下。
+
 **npm 已经停止新增 TOTP 2FA**（`npm profile enable-2fa` 现在直接报
 `Adding a new TOTP 2FA is no longer supported`），所以没有"6 位验证码"可输。发布靠**安全密钥 +
 浏览器按键**：先 `npm stage publish` 上传，再 `npm stage approve` 当场按指纹。
@@ -196,6 +199,7 @@ npm stage approve <stage-id> --registry=https://registry.npmjs.org
 
 - `--registry` 在 `approve` 上不能省：`publishConfig.registry` 只对 publish 生效，不传就会打到本机
   npmrc 里的镜像，回 `404 /-/stage/***/approve not found`。
+- 若 `npm stage approve` 报 `409 Conflict (... automated review hasn't finished)`，说明后台安全扫描尚未结束，等 1～3 分钟对同一个 `<stage-id>` 重试 `approve` 即可，不要重新执行 `stage publish`。
 - `npm stage list` 看未批准的暂存件，`view <id>` 看详情，`reject <id>` 丢弃。暂存件会过期，过期就重新
   `stage publish`。
 - 上传这一步用的是 `~/.npmrc` 里那把 `bypass 2FA` 的 granular token（它就是勾了 *Bypass two-factor

@@ -1,38 +1,68 @@
 name: Release
 
-# Publishes @isaac2ingrid/otto (the connector CLI) to npm. Triggered by pushing a `v*` tag
-# (e.g. `v0.1.0`) after bumping apps/connector/package.json; requires an NPM_TOKEN secret
-# with publish rights for the @isaac2ingrid scope. ADR-0001 decision 10, issue #26.
+# Publishes @isaac2ingrid/otto (the connector CLI) to npm via OIDC Trusted Publishing
+# (with automatic Sigstore provenance). Triggered by pushing a `v*` tag (e.g. `v1.0.1`)
+# after bumping apps/connector/package.json. If the version in apps/connector/package.json
+# is already published on npm (e.g. published manually via `npm stage`), the workflow
+# skips publishing and exits green so archival `v*` tags never fail.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/action-setup@v6.1.1
+      # Node 24 ships npm 11.6+ (npm OIDC Trusted Publishing requires npm >= 11.5.1).
       - uses: actions/setup-node@v7.1.0
         with:
-          node-version: "22"
+          node-version: "24"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @isaac2ingrid/otto build
       - run: pnpm --filter @isaac2ingrid/otto typecheck
       - run: pnpm --filter @isaac2ingrid/otto test
-      # setup-node v7 no longer supplies a dummy NODE_AUTH_TOKEN. Configure the registry
-      # only after dependency installation/tests; the real token remains publish-step-only.
+
+      - name: Check version alignment and whether already published on npm
+        id: check
+        working-directory: apps/connector
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            EXPECTED_TAG="v${PKG_VERSION}"
+            if [[ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match apps/connector/package.json version (${EXPECTED_TAG})"
+              exit 1
+            fi
+          fi
+          if npm view "@isaac2ingrid/otto@${PKG_VERSION}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "@isaac2ingrid/otto@${PKG_VERSION} is already published on npm — skipping publish."
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "@isaac2ingrid/otto@${PKG_VERSION} is not yet on npm — proceeding with OIDC publish."
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v7.1.0
+        if: steps.check.outputs.already_published == 'false'
         with:
-          node-version: "22"
+          node-version: "24"
           package-manager-cache: false
           registry-url: https://registry.npmjs.org
-      # prepack rebuilds dist into the tarball; the manifest carries no runtime deps.
-      - run: npm publish --access public
+
+      # prepack rebuilds dist into the tarball; npm CLI automatically exchanges GitHub's
+      # OIDC token for a short-lived publish credential and attaches Sigstore provenance.
+      - name: Publish to npm via OIDC Trusted Publishing
+        if: steps.check.outputs.already_published == 'false'
         working-directory: apps/connector
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm --version
+          npm publish --access public
