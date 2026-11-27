@@ -108,7 +108,7 @@ otto status
 
 配对码十分钟后过期且只能使用一次，不要发进聊天或日志。配对会安装并启动后台服务（macOS 用 launchd，Linux 用 systemd 用户服务，Windows 用当前用户登录自启动：`Run` 注册表项加生成的 `~/.otto/otto-daemon.vbs`）；如果这台机器装不了（当前会话够不到服务管理器，或者机器策略禁止登录自启动），`connect` 会在**兑换配对码之前**就说清楚，重试不需要新码；也可以加 `--foreground` 把守护进程跑在当前终端里；如果机器已经配对、只是缺少自启动项，用 `otto install` 补上即可，它不需要配对码。`otto status` 会告诉你是哪一种；Windows 上连接器在下次登录时自动启动，启动器会以 `otto daemon --supervise` 方式运行它，所以守护进程挂掉后会自己按退避策略重启，直到执行 `otto stop`。
 
-连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后试一个小的只读任务。Otto 默认不传模型参数，本地 agent 用的是**它自己的默认模型**。connector 上报模型选择能力后，可在**设置 → 本地编程 agent 模型**（或**机器**页）按机器和 agent 设置新任务默认模型；面板显式模型列表目前面向 `pi` 开放（展示本机 `pi` 探测到的模型、默认值及缓存状态，支持高级自定义输入），其余已安装的 CLI（`claude`、`codex`、`opencode`、`agentica`）跟随各自默认配置。Otto 不保存本地 agent 的密钥；若某个服务商触发配额限流窗口，会话会挂起为 `idle` 并在冷却结束后自动续跑。`otto status` 与 `otto doctor` 会检查实际可启动的 agent 命令（不存在时提示 `NOT SPAWNABLE`）；`otto probe` 管理 `~/.otto/probes/` 下经本机 SHA-256 审批的零 Token 探针脚本；`otto notify` 控制本机桌面通知；`otto logs -n 50` 用于排查上线问题。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
+连接器主动连向 Otto，电脑无需开放入站端口。在工作台**机器**页面只添加你选定的本地目录，然后试一个小的只读任务。Otto 默认不传模型参数，本地 agent 用的是**它自己的默认模型**。connector 上报模型选择能力后，可在**设置 → 本地编程 agent 模型**（或**机器**页）按机器和 agent 设置新任务默认模型；面板显式模型列表目前面向 `pi` 开放（展示本机 `pi` 探测到的模型、默认值及缓存状态，支持高级自定义输入），其余已安装的 CLI（`claude`、`codex`、`opencode`、`agentica`、`dsh`、`zcode`）跟随各自默认配置。Otto 不保存本地 agent 的密钥；若某个服务商触发配额限流窗口，会话会挂起为 `idle` 并在冷却结束后自动续跑。`otto status` 与 `otto doctor` 会检查实际可启动的 agent 命令（不存在时提示 `NOT SPAWNABLE`）；`otto probe` 管理 `~/.otto/probes/` 下经本机 SHA-256 审批的零 Token 探针脚本；`otto notify` 控制本机桌面通知；`otto upgrade` 从 npm 更新 CLI 并重启后台服务；`otto logs -n 50` 用于排查上线问题。代理、无服务管理器或源码安装步骤见[连接器操作文档](docs/agent-connect.md)。
 
 **完成标志：** 机器和选定目录显示在线，测试任务返回结果。其他电脑重复这一步。
 

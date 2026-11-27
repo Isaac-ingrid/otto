@@ -488,6 +488,7 @@ const QUICKSTARTS = {
       'otto connect <your-otto-url> <pairing-code>',
       'otto doctor',
       'otto notify on   # optional: enable native OS desktop notifications',
+      'otto upgrade     # later: update CLI and restart background service',
     ],
   },
 };
@@ -604,8 +605,10 @@ function hydrateLinks() {
   if (heroCmd) heroCmd.textContent = `npm i -g ${NPM_PKG}`;
 
   const footerLinks = document.getElementById('footer-links');
+  const npmUrl = ['https://www.npmjs.com', 'package', NPM_PKG].join('/');
   footerLinks?.replaceChildren(
     el('a', { href: REPO_BASE, target: '_blank', rel: 'noopener noreferrer' }, 'GitHub'),
+    el('a', { href: npmUrl, target: '_blank', rel: 'noopener noreferrer' }, 'npm'),
     el('a', { href: `${REPO_BASE}/blob/main/README.zh-CN.md`, target: '_blank', rel: 'noopener noreferrer' }, '中文 README'),
     el('a', { href: `${REPO_BASE}/blob/main/README.md`, target: '_blank', rel: 'noopener noreferrer' }, 'English README'),
     el('a', { href: `${REPO_BASE}/blob/main/LICENSE`, target: '_blank', rel: 'noopener noreferrer' }, 'MIT License'),
