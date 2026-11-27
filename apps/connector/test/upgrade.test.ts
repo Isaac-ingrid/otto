@@ -26,10 +26,16 @@ function fakeGlobalInstall(npmRoot: string, version: string): void {
   writeFileSync(join(pkgRoot, "bin", "otto.js"), "#!/usr/bin/env node\n");
 }
 
-function fakeInstaller(state: { installed: boolean; running: boolean; actions: string[] }): ServiceInstaller {
+function fakeInstaller(state: {
+  kind?: ServiceInstaller["kind"];
+  installed: boolean;
+  running: boolean;
+  actions: string[];
+}): ServiceInstaller {
+  const kind = state.kind ?? "launchd";
   const status = (): Promise<ServiceStatus> =>
     Promise.resolve({
-      manager: "launchd",
+      manager: kind,
       installed: state.installed,
       running: state.running,
       detail: state.running ? "running" : "stopped",
@@ -38,7 +44,7 @@ function fakeInstaller(state: { installed: boolean; running: boolean; actions: s
     state.actions.push(action);
   };
   return {
-    kind: "launchd" as const,
+    kind,
     unitPath: "/tmp/fake.plist",
     notes: [],
     install: record("install"),
@@ -65,10 +71,10 @@ function upgradeExec(npmRoot: string): { calls: string[][]; exec: Exec } {
 }
 
 describe("runUpgrade", () => {
-  it("installs @latest globally, reinstalls the service, and reports versions", async () => {
+  it("installs @latest globally, reinstalls the launchd service, and reports versions", async () => {
     const npmRoot = join(dir, "lib", "node_modules");
     const { calls, exec } = upgradeExec(npmRoot);
-    const state = { installed: true, running: true, actions: [] as string[] };
+    const state = { kind: "launchd" as const, installed: true, running: true, actions: [] as string[] };
     const lines: string[] = [];
 
     const result = await runUpgrade((line) => lines.push(line), {
@@ -82,9 +88,28 @@ describe("runUpgrade", () => {
     expect(calls[1]).toEqual(["install", "-g", `${PACKAGE_NAME}@latest`]);
     expect(result).toMatchObject({ from: "0.1.0", to: "9.9.9", serviceRestarted: true });
     expect(result.entryPath).toBe(join(npmRoot, PACKAGE_NAME, "bin", "otto.js"));
-    expect(state.actions).toEqual(["install"]); // install() reloads + restarts
+    expect(state.actions).toEqual(["install"]); // launchd install() bootouts + bootstraps
     expect(lines.some((l) => l.includes("restarted"))).toBe(true);
   });
+
+  it.each(["windows", "systemd"] as const)(
+    "explicitly restarts a running %s service after rewriting its launcher/unit",
+    async (kind) => {
+      const npmRoot = join(dir, "lib", "node_modules");
+      const { exec } = upgradeExec(npmRoot);
+      const state = { kind, installed: true, running: true, actions: [] as string[] };
+
+      const result = await runUpgrade(() => {}, {
+        currentVersion: "0.2.0",
+        currentEntry: "/old/bin/otto.js",
+        exec,
+        getService: () => fakeInstaller(state),
+      });
+
+      expect(result).toMatchObject({ from: "0.2.0", to: "9.9.9", serviceRestarted: true });
+      expect(state.actions).toEqual(["install", "restart"]);
+    },
+  );
 
   it("honors --version and targets the pinned version", async () => {
     const npmRoot = join(dir, "lib", "node_modules");

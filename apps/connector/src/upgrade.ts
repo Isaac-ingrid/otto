@@ -76,6 +76,12 @@ export async function runUpgrade(print: (line: string) => void, options: Upgrade
     if (status.installed) {
       await installer.install();
       if (status.running) {
+        // launchd's install() already bootouts and bootstraps the new plist; Windows's
+        // lock-preserving install() and systemd's `enable --now` leave an already-running
+        // daemon in place, so explicit restart() brings up the newly installed binary.
+        if (installer.kind !== "launchd") {
+          await installer.restart();
+        }
         serviceRestarted = true;
         print("background service updated and restarted");
       } else {
