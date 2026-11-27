@@ -48,25 +48,34 @@ const workerIds = new Set<string>();
 let treeScript: Array<TreeCpuSample | undefined> = [];
 let errors: unknown[] = [];
 
-beforeEach(async () => {
-  dir = tmpDir("otto-watchdog-test");
-  stateDir = join(dir, "state");
-  repo = await makeGitRepo(dir);
-  store = new LocalStore(join(stateDir, "connector.sqlite"));
-  eventLog = new EventLog(store.database);
+beforeEach(() => {
   events = [];
   treeScript = [];
   errors = [];
 });
 
-afterEach(async () => {
-  for (const workerId of workerIds) {
-    await manager?.stopProcess(workerId).catch(() => undefined);
-  }
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  store?.close();
-  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
+/** Registers the git repo + SQLite store fixture only for WorkerManager suites (avoids
+ *  spawning 5 git processes per pure unit test under Windows CI Defender/CPU contention). */
+function useManagerFixture(): void {
+  beforeEach(async () => {
+    dir = tmpDir("otto-watchdog-test");
+    stateDir = join(dir, "state");
+    repo = await makeGitRepo(dir);
+    store = new LocalStore(join(stateDir, "connector.sqlite"));
+    eventLog = new EventLog(store.database);
+  }, 30_000);
+
+  afterEach(async () => {
+    for (const workerId of workerIds) {
+      await manager?.stopProcess(workerId).catch(() => undefined);
+    }
+    workerIds.clear();
+    manager = undefined as unknown as WorkerManager;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    store?.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }, 30_000);
+}
 
 /** A deterministic tree sampler consuming the script (last value repeats). */
 function scriptedTree(pid: number): Promise<TreeCpuSample | undefined> {
@@ -355,6 +364,7 @@ describe("StallWatchdog (detection and strike policy)", () => {
 // ---- WorkerManager over fake-pi -------------------------------------------------------------------
 
 describe("worker stalls through the manager (fake-pi)", () => {
+  useManagerFixture();
   it("double stall: one respawn with a continuation note, then settles error:stall", async () => {
     setup([stallRun(), stallRun()], { sharedRuns: true });
     store.addRepo({ repoId: repo, name: "repo-a", path: repo, capability: { kind: "git", gitRoot: repo, defaultBranch: "main", remote: null } });
@@ -472,6 +482,7 @@ describe("worker stalls through the manager (fake-pi)", () => {
 // ---- Strike-window interactions (PR #46 review round 3, finding 2) -------------------------------
 
 describe("the strike window vs sends and stops (PR #46 review round 3)", () => {
+  useManagerFixture();
   /** Manager + fake-pi whose stall-respawn spawn is held at a gate: the test controls the
    *  recovering-to-running window deterministically. */
   function setupGatedRespawn(runs: ScenarioStep[][], stallMs = 300): { releaseSpawn: () => void } {
@@ -558,6 +569,7 @@ describe("the strike window vs sends and stops (PR #46 review round 3)", () => {
 // ---- The REAL sampler vs a CPU-bound tool child (PR #41 review finding 1) -------------------------
 
 describe.skipIf(process.platform === "win32")("the production sampler under a busy tool child (fake-pi, real ps)", () => {
+  useManagerFixture();
   // The bug this pins: pi itself idles at ~2% CPU while its tool child burns 80%+. Measuring
   // only the parent declared a stall and killed a healthy build. The tree sampler must see
   // the child. Marker-matched cleanup only — never a broad pkill.
