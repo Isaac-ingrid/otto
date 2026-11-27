@@ -36,5 +36,10 @@ export default defineConfig({
   // groups concurrently, each loading this config — and therefore its own workerd — in a
   // separate vitest process. Keep fileParallelism false: within one process the shared
   // state above still requires serial files.
-  test: { fileParallelism: false },
+  test: {
+    fileParallelism: false,
+    // Steward integration tests wait on real-time 3s wake-merge windows and alarms (mirroring vitest.node.config.ts).
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+  },
 });

@@ -222,5 +222,5 @@ describe("051_probes_autohops_and_replay — Stage 3 Steward capabilities", () =
       instance.replaySkippedEvents({ source: "github" }),
     );
     expect(replay2.replayed).toBe(0);
-  });
+  }, 20_000);
 });

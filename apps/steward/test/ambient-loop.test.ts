@@ -336,7 +336,7 @@ describe("Ambient Memory & Skill Loop (Stage 1 -> Stage 3)", () => {
     expect(notesAfter.n2?.status).toBe("removed");
 
     connector.close();
-  });
+  }, 20_000);
 
   it("Stage 3: enforces L0 high-friction gate, L1 strict veto, zero silent disk writes, 1-tap accept, offline retry, and 24h/72h cooldowns", async () => {
     const connector = await pairFakeConnector("mac-stage3", {
@@ -593,7 +593,7 @@ describe("Ambient Memory & Skill Loop (Stage 1 -> Stage 3)", () => {
     expect(cooldownCheck.repoBUnblocked).toEqual({ allowed: true });
 
     connector.close();
-  });
+  }, 30_000);
 
   it("Stage 4: mines cross-session recurring patterns on moderate runs and proposes lossless updates to existing skills", async () => {
     const existingSkillMd = [
@@ -828,5 +828,5 @@ describe("Ambient Memory & Skill Loop (Stage 1 -> Stage 3)", () => {
     const wsAfter = await client.getWorkspace();
     expect(wsAfter.messages.find((m) => m.id === offerMsg!.id)?.open).toBe(false);
     connector.close();
-  });
+  }, 20_000);
 });

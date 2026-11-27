@@ -57,6 +57,8 @@ const COST = {
   "ui-modules.test.ts": 4,
   "workspace-stream.test.ts": 12,
   "verify-sweep-grid.test.ts": 7,
+  "ambient-loop.test.ts": 14,
+  "autoloop-stage3.test.ts": 5,
 };
 const DEFAULT_COST = 3;
 
